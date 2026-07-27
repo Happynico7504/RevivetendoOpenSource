@@ -1,6 +1,6 @@
 # Revivetendo Bridge
 
-The backend infrastructure powering **Revivetendo** — a community-run server that bridges the Wii U's original online services with [Pretendo Network](https://pretendo.network), bringing back online functionality for games and apps that Pretendo doesn't officially support yet.
+The backend infrastructure powering **[Revivetendo](https://revivetendo.nicochristmann.net)** — a community-run server that bridges the Wii U's original online services with [Pretendo Network](https://pretendo.network), bringing back online functionality for games and apps that Pretendo doesn't officially support yet.
 
 ## What does it do?
 
