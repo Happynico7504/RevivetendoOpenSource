@@ -4,9 +4,6 @@
 [submodule "wiiu-chat-authentication"]
 	path = wiiu-chat-authentication
 	url = https://github.com/PretendoNetwork/wiiu-chat-authentication
-[submodule "wii-sport-club"]
-	path = wii-sport-club
-	url = https://github.com/EcrazerDev/wii-sport-club.git
 [submodule "juxt"]
 	path = juxt
 	url = git@github.com:Happynico7504/juxtaposition-revivetendo.git

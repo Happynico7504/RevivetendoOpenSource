@@ -495,8 +495,6 @@ func handle(w http.ResponseWriter, r *http.Request) {
 				handleNexToken(w, r, rd.ToHost, rd.Port, rd.AccessMode)
 			case "1010EB00":
 				handleMK8NexToken(w, r, rd.ToHost, rd.Port, rd.AccessMode)
-			case "1012F100":
-				handleWSCNexToken(w, r, rd.ToHost, rd.Port, rd.AccessMode)
 			case "10145E00":
 				handleABSWNexToken(w, r, rd.ToHost, rd.Port, rd.AccessMode)
 			case "00003200":
@@ -670,83 +668,6 @@ func handleMK8NexToken(w http.ResponseWriter, r *http.Request, host string, port
 		db.Exec(`INSERT INTO relay_requests (pid, game_server_id) VALUES ($1, $2)`, pid, "1010EB00")
 	}
 	log.Printf("mk8_token for %s: PID=%d token=%s…", ip, pid, sessionToken[:8])
-
-	tkn := nexToken{
-		Host:        host,
-		NexPassword: sessionToken,
-		PID:         pid,
-		Port:        port,
-		Token:       sessionToken,
-	}
-	body, err := xml.MarshalIndent(tkn, "", "  ")
-	if err != nil {
-		http.Error(w, "encode error", 500)
-		return
-	}
-	body = append([]byte(xml.Header), body...)
-	w.Header().Set("Content-Type", "application/xml")
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
-	w.WriteHeader(http.StatusOK)
-	w.Write(body)
-}
-
-func handleWSCNexToken(w http.ResponseWriter, r *http.Request, host string, port uint16, accessMode string) {
-	ip := realIP(r)
-	pid := fetchRealPID(r)
-
-	if pid != 0 {
-		if checkBanned(pid) {
-			log.Printf("WSC: PID=%d is banned, proxying to Pretendo", pid)
-			proxyAndCachePID(w, r)
-			return
-		}
-		if !checkUserAccess(pid, "1012F100", accessMode) {
-			log.Printf("WSC: PID=%d access denied (mode=%s), queued for review", pid, accessMode)
-			queueForReview(pid, "1012F100")
-			proxyAndCachePID(w, r)
-			return
-		}
-	}
-
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		http.Error(w, "token error", 500)
-		return
-	}
-	sessionToken := fmt.Sprintf("%x", b)
-
-	if _, err := db.Exec(`
-		INSERT INTO nex_sessions (token, ip, expires_at)
-		VALUES ($1, $2, NOW() + INTERVAL '5 minutes')
-	`, sessionToken, ip); err != nil {
-		log.Printf("insert wsc session: %v", err)
-		http.Error(w, "db error", 500)
-		return
-	}
-
-	if pid == 0 {
-		db.QueryRow(`
-			SELECT pid FROM nex_sessions
-			WHERE ip = $1 AND pid IS NOT NULL
-			ORDER BY expires_at DESC LIMIT 1
-		`, ip).Scan(&pid)
-	}
-
-	if pid != 0 {
-		pidCache.Store(ip, pid)
-		if hash := authHash(r); hash != "" {
-			storePIDInDB(hash, pid)
-		}
-		if _, err := db.Exec(`
-			INSERT INTO nex_accounts (pid, username, nex_password)
-			VALUES ($1, $2, $3)
-			ON CONFLICT (pid) DO UPDATE SET nex_password = EXCLUDED.nex_password
-		`, pid, fmt.Sprintf("%d", pid), sessionToken); err != nil {
-			log.Printf("upsert wsc nex_account: %v", err)
-		}
-		db.Exec(`INSERT INTO relay_requests (pid, game_server_id) VALUES ($1, $2)`, pid, "1012F100")
-	}
-	log.Printf("wsc_token for %s: PID=%d token=%s…", ip, pid, sessionToken[:8])
 
 	tkn := nexToken{
 		Host:        host,
