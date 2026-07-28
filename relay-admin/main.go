@@ -27,7 +27,6 @@ var gameServerTitles = map[string]string{
 	"00003200": "Friends / Presence",
 	"1005A000": "WiiU Chat",
 	"1010EB00": "Mario Kart 8",
-	"1012F100": "Wii Sports Club",
 	"10145E00": "Angry Birds Star Wars",
 	"10176A00": "Super Mario Maker",
 	"100E4B00": "Super Smash Bros.",
@@ -288,8 +287,6 @@ func main() {
 	http.HandleFunc("/", landingUI)
 	http.HandleFunc("/api/redirects", apiRedirects)
 	http.HandleFunc("/api/stats", apiStats)
-	http.HandleFunc("/wsc-public/", wscUI)
-	http.HandleFunc("/wsc-public/status", apiWSCStatus)
 	http.HandleFunc("/stats/", statsUI)
 	http.HandleFunc("/stats/card.svg", statsCard)
 	http.HandleFunc("/my/login", myLoginHandler)
@@ -351,193 +348,6 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(s)
 }
 
-type wscPlayer struct {
-	PID         uint32   `json:"PID"`
-	Username    string   `json:"Username"`
-	StationURLs []string `json:"StationURLs"`
-	GID         uint32   `json:"GID"`
-}
-
-type wscSession struct {
-	GID        uint32   `json:"GID"`
-	GameMode   uint32   `json:"GameMode"`
-	Sport      string   `json:"Sport"`
-	PlayerPIDs []uint32 `json:"PlayerPIDs"`
-	MaxPlayers uint32   `json:"MaxPlayers"`
-}
-
-type wscStatus struct {
-	Players  []wscPlayer  `json:"players"`
-	Sessions []wscSession `json:"sessions"`
-}
-
-func apiWSCStatus(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
-	resp, err := http.Get("http://127.0.0.1:9181/api/dashboard")
-	if err != nil {
-		w.Write([]byte(`{"players":[],"sessions":[]}`))
-		return
-	}
-	defer resp.Body.Close()
-
-	var status wscStatus
-	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
-		w.Write([]byte(`{"players":[],"sessions":[]}`))
-		return
-	}
-
-	if len(status.Players) > 0 {
-		pids := make([]interface{}, len(status.Players))
-		for i, p := range status.Players {
-			pids[i] = int64(p.PID)
-		}
-		// Build $1,$2,... placeholders
-		placeholders := make([]string, len(pids))
-		for i := range pids {
-			placeholders[i] = fmt.Sprintf("$%d", i+1)
-		}
-		query := "SELECT pid, pnid FROM pnid_cache WHERE pid IN (" + strings.Join(placeholders, ",") + ")"
-		rows, err := db.Query(query, pids...)
-		if err == nil {
-			pnidMap := make(map[int64]string)
-			for rows.Next() {
-				var pid int64
-				var pnid string
-				rows.Scan(&pid, &pnid)
-				pnidMap[pid] = pnid
-			}
-			rows.Close()
-			for i, p := range status.Players {
-				if pnid, ok := pnidMap[int64(p.PID)]; ok {
-					status.Players[i].Username = pnid
-				}
-			}
-		}
-	}
-
-	if status.Players == nil {
-		status.Players = []wscPlayer{}
-	}
-	if status.Sessions == nil {
-		status.Sessions = []wscSession{}
-	}
-	json.NewEncoder(w).Encode(status)
-}
-
-var wscTmpl = template.Must(template.New("wsc").Parse(`<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>Wii Sports Club — Live</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-body{font-family:system-ui,sans-serif;max-width:700px;margin:2rem auto;padding:0 1rem;color:#222}
-h1{font-size:1.4rem;margin-bottom:.25rem}
-p.sub{color:#666;margin-top:0;margin-bottom:1.5rem;font-size:.9rem}
-.cards{display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:2rem}
-.card{background:#f4f4f5;border-radius:8px;padding:1rem 1.5rem;flex:1;min-width:120px}
-.card .num{font-size:2rem;font-weight:700}
-.card .label{font-size:.8rem;color:#666;margin-top:.2rem}
-h2{font-size:1rem;margin-bottom:.75rem;margin-top:2rem}
-.session{border:1px solid #e4e4e7;border-radius:8px;padding:.9rem 1.1rem;margin-bottom:.6rem}
-.session-head{display:flex;justify-content:space-between;align-items:center}
-.gid{font-size:.75rem;color:#aaa;font-family:monospace}
-.dots{display:flex;gap:3px;align-items:center}
-.dot{width:9px;height:9px;border-radius:50%}
-.dot-on{background:#2563eb}.dot-off{background:#d1d5db}
-.chips{margin-top:.5rem;display:flex;flex-wrap:wrap;gap:.3rem}
-.chip{background:#eff6ff;color:#1d4ed8;border-radius:20px;padding:.15rem .6rem;font-size:.8rem}
-table{width:100%;border-collapse:collapse;font-size:.9rem}
-th{text-align:left;border-bottom:2px solid #e4e4e7;padding:.5rem .75rem;color:#666;font-weight:600}
-td{padding:.5rem .75rem;border-bottom:1px solid #f0f0f0}
-tr:last-child td{border-bottom:none}
-.online{display:inline-block;width:7px;height:7px;border-radius:50%;background:#22c55e;margin-right:.4rem}
-.empty{color:#aaa;font-size:.875rem}
-.timer{font-size:.8rem;color:#999}
-</style>
-</head>
-<body>
-<p><a href="/">← Back</a></p>
-<h1>Wii Sports Club</h1>
-<p class="sub" id="meta">Loading...</p>
-<div class="cards">
-  <div class="card"><div class="num" id="n-players">—</div><div class="label">Players online</div></div>
-  <div class="card"><div class="num" id="n-sessions">—</div><div class="label">Active sessions</div></div>
-</div>
-<h2>Sessions</h2>
-<div id="sessions"><div class="empty">Loading...</div></div>
-<h2>Players</h2>
-<div id="players"><div class="empty">Loading...</div></div>
-<script>
-function render(d) {
-  var pl = d.players || [], se = d.sessions || [];
-  document.getElementById('n-players').textContent = pl.length;
-  document.getElementById('n-sessions').textContent = se.length;
-
-  var sEl = document.getElementById('sessions');
-  if (!se.length) {
-    sEl.innerHTML = '<div class="empty">No active sessions</div>';
-  } else {
-    sEl.innerHTML = se.map(function(s) {
-      var filled = (s.PlayerPIDs||[]).length, max = s.MaxPlayers||filled;
-      var dots = '';
-      for (var i=0;i<max;i++) dots += '<div class="dot '+(i<filled?'dot-on':'dot-off')+'"></div>';
-      var chips = (s.PlayerPIDs||[]).map(function(pid) {
-        var p = pl.find(function(x){return x.PID===pid;});
-        return '<span class="chip">'+(p&&p.Username?p.Username:'PID:'+pid)+'</span>';
-      }).join('');
-      return '<div class="session"><div class="session-head">'+
-        '<span style="display:flex;align-items:center;gap:.5rem">'+
-          '<span class="dots">'+dots+'</span>'+
-          '<span class="gid">GID '+s.GID+'</span>'+
-        '</span></div>'+
-        (chips?'<div class="chips">'+chips+'</div>':'')+
-        '</div>';
-    }).join('');
-  }
-
-  var pEl = document.getElementById('players');
-  if (!pl.length) {
-    pEl.innerHTML = '<div class="empty">No players online</div>';
-  } else {
-    pEl.innerHTML = '<table><tr><th>Player</th><th>Session</th></tr>'+
-      pl.map(function(p) {
-        var s = se.find(function(s){return (s.PlayerPIDs||[]).indexOf(p.PID)!==-1;});
-        var sess = s ? 'GID&nbsp;'+s.GID : '—';
-        return '<tr><td><span class="online"></span>'+(p.Username||'PID:'+p.PID)+'</td><td>'+sess+'</td></tr>';
-      }).join('')+'</table>';
-  }
-}
-var countdown = 10;
-function tick() {
-  countdown--;
-  if (countdown <= 0) { countdown = 10; load(); }
-  document.getElementById('meta').textContent = 'Refreshing in ' + countdown + 's';
-}
-function load() {
-  fetch('/wsc-public/status').then(function(r){return r.json();}).then(function(d){
-    render(d);
-    document.getElementById('meta').textContent = 'Updated just now · refreshes every 10s';
-    countdown = 10;
-  }).catch(function(){
-    document.getElementById('meta').textContent = 'Failed to load';
-  });
-}
-load();
-setInterval(tick, 1000);
-</script>
-</body>
-</html>`))
-
-func wscUI(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/wsc-public/" {
-		http.NotFound(w, r)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html")
-	wscTmpl.Execute(w, nil)
-}
 
 func collectStats() Stats {
 	var s Stats
@@ -879,10 +689,6 @@ tr:last-child td{border-bottom:none}
     <h2>Stats</h2>
     <p>Connected PIDs, request history, active redirects</p>
   </a>
-  <a class="card" href="/wsc-public/">
-    <h2>Wii Sports Club</h2>
-    <p>Live sessions and players — auto-refreshes</p>
-  </a>
   <a class="card" href="/inkay/my/">
     <h2>My Status</h2>
     <p>Your online state and friends list — sign in with your web password</p>
@@ -902,7 +708,6 @@ tr:last-child td{border-bottom:none}
     <tr><th>Endpoint</th><th>Description</th></tr>
     <tr><td>GET /inkay/api/stats</td><td>Stats as JSON</td></tr>
     <tr><td>GET /inkay/api/redirects</td><td>Active redirects as JSON</td></tr>
-    <tr><td>GET /wsc-public/status</td><td>WSC live sessions and players as JSON</td></tr>
   </table>
 </div>
 </body>
