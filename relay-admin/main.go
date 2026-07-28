@@ -679,10 +679,8 @@ func reviewCount() int {
 const (
 	certRotationDays = 14
 	certValidDays    = 28 // keeps newest 2 valid at all times
-	caKeyPassEnv     = "CA_KEY_PASSPHRASE"
-	caKeyPassDefault = "Get Signed"
-	caCertPath       = "/var/ca/netcup-server/cert.pem"
-	caKeyPath        = "/var/ca/netcup-server/key.pem"
+	caCertPath       = "/var/ca/netcup-server/client-ca.pem"
+	caKeyPath        = "/var/ca/netcup-server/client-ca.key"
 )
 
 type AdminCert struct {
@@ -713,11 +711,6 @@ func daysUntilRotation(cert *AdminCert) int {
 }
 
 func generateClientCert() (certPEM, keyPEM []byte, err error) {
-	passphrase := os.Getenv(caKeyPassEnv)
-	if passphrase == "" {
-		passphrase = caKeyPassDefault
-	}
-
 	keyF, err := os.CreateTemp("", "inkay-key-*.pem")
 	if err != nil {
 		return nil, nil, err
@@ -739,15 +732,6 @@ func generateClientCert() (certPEM, keyPEM []byte, err error) {
 	defer os.Remove(certF.Name())
 	certF.Close()
 
-	// Write passphrase to temp file so it never appears in process list.
-	passF, err := os.CreateTemp("", "inkay-pass-*")
-	if err != nil {
-		return nil, nil, err
-	}
-	defer os.Remove(passF.Name())
-	passF.WriteString(passphrase)
-	passF.Close()
-
 	// Random serial avoids needing write access to the CA directory for a serial file.
 	serialOut, err := exec.Command("openssl", "rand", "-hex", "16").Output()
 	if err != nil {
@@ -755,8 +739,7 @@ func generateClientCert() (certPEM, keyPEM []byte, err error) {
 	}
 	serial := "0x" + strings.TrimSpace(string(serialOut))
 
-	// Verify CA key is readable before proceeding (key.pem is root-owned by default;
-	// fix with: sudo chown root:nico /var/ca/netcup-server/key.pem && sudo chmod 640 /var/ca/netcup-server/key.pem)
+	// Verify CA key is readable before proceeding.
 	if _, err = os.Open(caKeyPath); err != nil {
 		return nil, nil, fmt.Errorf("CA key not readable (%s) — run: sudo chown root:nico %s && sudo chmod 640 %s", caKeyPath, caKeyPath, caKeyPath)
 	}
@@ -764,13 +747,12 @@ func generateClientCert() (certPEM, keyPEM []byte, err error) {
 	steps := [][]string{
 		{"openssl", "genrsa", "-out", keyF.Name(), "2048"},
 		{"openssl", "req", "-new", "-key", keyF.Name(), "-out", csrF.Name(),
-			"-subj", "/CN=Inkay Admin/O=Pretendo Bridge"},
+			"-subj", "/CN=Inkay Admin/O=Revivetendo"},
 		{"openssl", "x509", "-req",
 			"-days", strconv.Itoa(certValidDays),
 			"-in", csrF.Name(),
 			"-CA", caCertPath, "-CAkey", caKeyPath,
 			"-set_serial", serial,
-			"-passin", "file:" + passF.Name(),
 			"-out", certF.Name()},
 	}
 	for _, args := range steps {
