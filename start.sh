@@ -77,7 +77,7 @@ export WSC_KERBEROS_PASSWORD
 (cd "$ROOT/wsc-authentication" && env $(cat .env | xargs) KERBEROS_PASSWORD="$WSC_KERBEROS_PASSWORD" "$BUILD/wsc-auth") >"$LOG/wsc-authentication.log" 2>&1 &
 WSC_AUTH_PID=$!
 
-(cd "$ROOT/wsc-secure" && KERBEROS_PASSWORD="$WSC_KERBEROS_PASSWORD" "$BUILD/wsc-secure") >"$LOG/wsc-secure.log" 2>&1 &
+(cd "$ROOT/wsc-secure" && env $(cat .env | xargs) KERBEROS_PASSWORD="$WSC_KERBEROS_PASSWORD" "$BUILD/wsc-secure") >"$LOG/wsc-secure.log" 2>&1 &
 WSC_SECURE_PID=$!
 
 python3 "$ROOT/discord-bot/bot.py" >"$LOG/discord-bot.log" 2>&1 &
