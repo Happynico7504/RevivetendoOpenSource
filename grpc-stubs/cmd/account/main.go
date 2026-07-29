@@ -150,7 +150,7 @@ func accessLevelForPID(pid uint32) uint32 {
 	if developerPIDs[pid] {
 		return 3
 	}
-	return 2
+	return 0
 }
 
 func (s *accountServer) GetUserData(ctx context.Context, req *pb.GetUserDataRequest) (*pb.GetUserDataResponse, error) {
