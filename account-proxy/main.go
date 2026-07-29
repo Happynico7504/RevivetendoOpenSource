@@ -495,6 +495,8 @@ func handle(w http.ResponseWriter, r *http.Request) {
 				handleNexToken(w, r, rd.ToHost, rd.Port, rd.AccessMode)
 			case "1010EB00":
 				handleMK8NexToken(w, r, rd.ToHost, rd.Port, rd.AccessMode)
+			case "1012F100":
+				handleWSCNexToken(w, r, rd.ToHost, rd.Port, rd.AccessMode)
 			case "10145E00":
 				handleABSWNexToken(w, r, rd.ToHost, rd.Port, rd.AccessMode)
 			case "00003200":
@@ -668,6 +670,72 @@ func handleMK8NexToken(w http.ResponseWriter, r *http.Request, host string, port
 		db.Exec(`INSERT INTO relay_requests (pid, game_server_id) VALUES ($1, $2)`, pid, "1010EB00")
 	}
 	log.Printf("mk8_token for %s: PID=%d token=%s…", ip, pid, sessionToken[:8])
+
+	tkn := nexToken{
+		Host:        host,
+		NexPassword: sessionToken,
+		PID:         pid,
+		Port:        port,
+		Token:       sessionToken,
+	}
+	body, err := xml.MarshalIndent(tkn, "", "  ")
+	if err != nil {
+		http.Error(w, "encode error", 500)
+		return
+	}
+	body = append([]byte(xml.Header), body...)
+	w.Header().Set("Content-Type", "application/xml")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
+	w.WriteHeader(http.StatusOK)
+	w.Write(body)
+}
+
+func upsertWSCAccount(pid uint32, password string) {
+	col := mongoDB.Collection("wsc_nexaccounts")
+	_, err := col.UpdateOne(
+		context.Background(),
+		bson.D{{Key: "pid", Value: pid}},
+		bson.D{{Key: "$set", Value: bson.D{
+			{Key: "pid", Value: pid},
+			{Key: "password", Value: password},
+		}}},
+		options.Update().SetUpsert(true),
+	)
+	if err != nil {
+		log.Printf("mongo upsert wsc: %v", err)
+	}
+}
+
+func handleWSCNexToken(w http.ResponseWriter, r *http.Request, host string, port uint16, accessMode string) {
+	ip := realIP(r)
+	pid := fetchRealPID(r)
+
+	if pid != 0 {
+		if checkBanned(pid) {
+			log.Printf("WSC: PID=%d is banned, proxying to Pretendo", pid)
+			proxyAndCachePID(w, r)
+			return
+		}
+		if !checkUserAccess(pid, "1012F100", accessMode) {
+			log.Printf("WSC: PID=%d access denied (mode=%s), queued for review", pid, accessMode)
+			queueForReview(pid, "1012F100")
+			proxyAndCachePID(w, r)
+			return
+		}
+	}
+
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		http.Error(w, "token error", 500)
+		return
+	}
+	sessionToken := fmt.Sprintf("%x", b)
+
+	if pid != 0 {
+		upsertWSCAccount(pid, sessionToken)
+		db.Exec(`INSERT INTO relay_requests (pid, game_server_id) VALUES ($1, $2)`, pid, "1012F100")
+	}
+	log.Printf("wsc_token for %s: PID=%d token=%s…", ip, pid, sessionToken[:8])
 
 	tkn := nexToken{
 		Host:        host,

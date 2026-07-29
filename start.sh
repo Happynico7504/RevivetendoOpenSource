@@ -30,6 +30,9 @@ echo "==> building mk8-secure..."
 echo "==> building angry-birds-star-wars..."
 (cd "$ROOT/angry-birds-star-wars" && go build -o "$BUILD/absw" .)
 
+echo "==> building wsc-authentication..."
+(cd "$ROOT/wsc-authentication" && go build -o "$BUILD/wsc-auth" .)
+
 # Export all vars from the secure server .env into the environment
 set -a
 # shellcheck disable=SC1091
@@ -66,6 +69,11 @@ ABSW_KERBEROS_PASSWORD="$(openssl rand -hex 16)"
 (cd "$ROOT/angry-birds-star-wars" && env $(cat .env | xargs) PN_KERBEROS_PASSWORD="$ABSW_KERBEROS_PASSWORD" "$BUILD/absw") >"$LOG/angry-birds-star-wars.log" 2>&1 &
 ABSW_PID=$!
 
+WSC_KERBEROS_PASSWORD="$(openssl rand -hex 16)"
+export WSC_KERBEROS_PASSWORD
+(cd "$ROOT/wsc-authentication" && KERBEROS_PASSWORD="$WSC_KERBEROS_PASSWORD" "$BUILD/wsc-auth") >"$LOG/wsc-authentication.log" 2>&1 &
+WSC_AUTH_PID=$!
+
 python3 "$ROOT/discord-bot/bot.py" >"$LOG/discord-bot.log" 2>&1 &
 BOT_PID=$!
 
@@ -77,7 +85,7 @@ fi
 
 cleanup() {
 	echo "==> shutting down..."
-	kill $ACCOUNT_PID $FRIENDS_PID $ADMIN_PID $PROXY_PID $MK8_AUTH_PID $MK8_SECURE_PID $ABSW_PID $BOT_PID ${MII_BOT_PID:-} 2>/dev/null || true
+	kill $ACCOUNT_PID $FRIENDS_PID $ADMIN_PID $PROXY_PID $MK8_AUTH_PID $MK8_SECURE_PID $ABSW_PID $WSC_AUTH_PID $BOT_PID ${MII_BOT_PID:-} 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
