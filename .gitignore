@@ -16,3 +16,4 @@ relay-admin/account-proxy
 grpc-stubs/account
 grpc-stubs/cmd/account/account
 wsc-authentication/wii-sports-club-authentication
+wsc-secure/wii-sports-club-secure
