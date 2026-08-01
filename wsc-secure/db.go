@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"math/rand"
 	"os"
+	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -28,6 +30,9 @@ func connectDB() {
 	db := client.Database("wsc")
 	sessionsCol = db.Collection("sessions")
 	gatheringsCol = db.Collection("gatherings")
+	// Clear stale data from previous run — all clients disconnect when the server restarts
+	sessionsCol.DeleteMany(context.Background(), bson.D{})
+	gatheringsCol.DeleteMany(context.Background(), bson.D{})
 }
 
 func dbUpsertSession(pid uint32, urls []string, ip, port string) {
@@ -39,6 +44,37 @@ func dbUpsertSession(pid uint32, urls []string, ip, port string) {
 		{Key: "port", Value: port},
 	}}}
 	sessionsCol.UpdateOne(context.Background(), filter, update, options.Update().SetUpsert(true))
+}
+
+// cleanupStaleGatherings runs every 10 seconds and removes open gatherings
+// whose host PID is no longer in connectedPIDs. This catches abrupt disconnects
+// (game crash, power-off) faster than waiting for the PRUDP keep-alive timeout.
+func cleanupStaleGatherings() {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		ctx := context.Background()
+		cursor, err := gatheringsCol.Find(ctx, bson.D{{Key: "open", Value: true}})
+		if err != nil {
+			continue
+		}
+		var docs []bson.M
+		if err := cursor.All(ctx, &docs); err != nil {
+			continue
+		}
+		for _, d := range docs {
+			gid := uint32(d["gid"].(int64))
+			host := uint32(d["host"].(int64))
+			if _, ok := connectedPIDs.Load(host); !ok {
+				gatheringsCol.DeleteOne(ctx, bson.D{{Key: "gid", Value: gid}})
+				fmt.Printf("CleanupGathering: purged stale gid=%d (host PID=%d offline)\n", gid, host)
+			}
+		}
+	}
+}
+
+func dbDeleteSession(pid uint32) {
+	sessionsCol.DeleteOne(context.Background(), bson.D{{Key: "pid", Value: pid}})
 }
 
 func dbGetPlayerURLs(pid uint32) []string {
@@ -70,19 +106,53 @@ func dbUpdateSessionURL(pid uint32, oldURL, newURL string) {
 		bson.D{{Key: "$set", Value: bson.D{{Key: "urls", Value: urls}}}})
 }
 
-func dbFindGathering(gameMode uint32) uint32 {
-	var result bson.M
-	err := gatheringsCol.FindOne(context.Background(), bson.D{
-		{Key: "game_mode", Value: gameMode},
+func dbFindGathering(gameMode uint32, requesterNatm uint32) uint32 {
+	// Match on sport type (top byte only) — lower bytes encode region/settings which differ
+	// between players in the same sport, e.g. 0x03022800 (EU) vs 0x03012400 (NA) are both bowling
+	sportType := int64(gameMode >> 24)
+	ctx := context.Background()
+
+	filter := bson.D{
+		{Key: "sport_type", Value: sportType},
 		{Key: "open", Value: true},
-	}).Decode(&result)
-	if err != nil {
-		return 0
 	}
-	return uint32(result["gid"].(int64))
+	// Only match gatherings whose host has a compatible NAT type.
+	// natm ≤ 2 = open/cone (can hole-punch); natm = 3 = symmetric (cannot).
+	// Unknown natm (0 or field absent) is treated as compatible with anyone.
+	if requesterNatm > 0 {
+		if requesterNatm <= 2 {
+			filter = append(filter, bson.E{Key: "$or", Value: bson.A{
+				bson.D{{Key: "host_natm", Value: bson.D{{Key: "$lte", Value: int64(2)}}}},
+				bson.D{{Key: "host_natm", Value: bson.D{{Key: "$exists", Value: false}}}},
+			}})
+		} else {
+			filter = append(filter, bson.E{Key: "$or", Value: bson.A{
+				bson.D{{Key: "host_natm", Value: bson.D{{Key: "$gte", Value: int64(3)}}}},
+				bson.D{{Key: "host_natm", Value: bson.D{{Key: "$exists", Value: false}}}},
+			}})
+		}
+	}
+
+	for {
+		var result bson.M
+		err := gatheringsCol.FindOne(ctx, filter).Decode(&result)
+		if err != nil {
+			return 0
+		}
+		gid := uint32(result["gid"].(int64))
+		host := uint32(result["host"].(int64))
+		if _, ok := connectedPIDs.Load(host); ok {
+			return gid
+		}
+		// Host has disconnected — purge the stale gathering and keep looking
+		res, err := gatheringsCol.DeleteOne(ctx, bson.D{{Key: "gid", Value: gid}})
+		if err != nil || res.DeletedCount == 0 {
+			return 0
+		}
+	}
 }
 
-func dbNewGathering(hostPID, gameMode, maxPlayers uint32) uint32 {
+func dbNewGathering(hostPID, gameMode, maxPlayers, hostNatm uint32) uint32 {
 	for {
 		gid := rand.Uint32()%500000 + 1
 		var check bson.M
@@ -93,7 +163,9 @@ func dbNewGathering(hostPID, gameMode, maxPlayers uint32) uint32 {
 		gatheringsCol.InsertOne(context.Background(), bson.D{
 			{Key: "gid", Value: gid},
 			{Key: "host", Value: hostPID},
+			{Key: "host_natm", Value: int64(hostNatm)},
 			{Key: "game_mode", Value: gameMode},
+			{Key: "sport_type", Value: int64(gameMode >> 24)},
 			{Key: "max_players", Value: maxPlayers},
 			{Key: "player_count", Value: int64(1)},
 			{Key: "players", Value: bson.A{hostPID}},
@@ -143,6 +215,21 @@ func dbUpdateGatheringHost(gid, pid uint32) {
 	gatheringsCol.UpdateOne(context.Background(),
 		bson.D{{Key: "gid", Value: gid}},
 		bson.D{{Key: "$set", Value: bson.D{{Key: "host", Value: pid}}}})
+}
+
+func dbLeaveAllGatherings(pid uint32) {
+	cursor, err := gatheringsCol.Find(context.Background(), bson.D{
+		{Key: "players", Value: pid},
+	})
+	if err != nil {
+		return
+	}
+	var results []bson.M
+	cursor.All(context.Background(), &results)
+	for _, r := range results {
+		gid := uint32(r["gid"].(int64))
+		dbLeaveGathering(gid, pid)
+	}
 }
 
 func dbLeaveGathering(gid, pid uint32) {

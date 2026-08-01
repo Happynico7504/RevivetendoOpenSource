@@ -7,6 +7,9 @@ certs/
 *.pyc
 *.bak
 
+# runtime datastore state
+wsc-secure/datastore.json
+
 # compiled Go binaries in source dirs
 account-proxy/account-proxy
 friends-nex/friends-nex

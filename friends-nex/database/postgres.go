@@ -61,6 +61,9 @@ func Connect() {
 		log.Fatalf("friends-nex: create pending_pretendo_commands: %v", err)
 	}
 
+	// Clear stale online flags from a previous run — disconnect events won't fire on crash.
+	db.Exec(`UPDATE user_settings SET is_online = FALSE WHERE is_online = TRUE`)
+
 	db.Exec(`CREATE TABLE IF NOT EXISTS pretendo_friend_requests (
 		id              BIGINT NOT NULL DEFAULT 0,
 		owner_pid       BIGINT NOT NULL,

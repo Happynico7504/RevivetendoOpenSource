@@ -27,6 +27,7 @@ var gameServerTitles = map[string]string{
 	"00003200": "Friends / Presence",
 	"1005A000": "WiiU Chat",
 	"1010EB00": "Mario Kart 8",
+	"1012F100": "Wii Sports Club",
 	"10145E00": "Angry Birds Star Wars",
 	"10176A00": "Super Mario Maker",
 	"100E4B00": "Super Smash Bros.",
@@ -309,6 +310,8 @@ func main() {
 	http.HandleFunc("/admin/review/dismiss", adminReviewDismiss)
 	http.HandleFunc("/admin/certs/rotate", adminCertsRotate)
 	http.HandleFunc("/admin/client-cert.p12", adminClientCert)
+	http.HandleFunc("/wsc-public/", adminWSC)
+	http.HandleFunc("/wsc-public/nat/", wscNATInfo)
 
 	addr := "127.0.0.1:9004"
 	log.Printf("relay-admin listening on %s", addr)
@@ -439,7 +442,7 @@ func onlineUsers() []OnlineUser {
 		       COALESCE(s.presence_game_server_id, 0)
 		FROM user_settings s
 		LEFT JOIN pnid_cache p ON p.pid = s.pid
-		WHERE s.is_online = TRUE AND s.last_heartbeat_at > NOW() - interval '5 minutes'
+		WHERE s.is_online IS TRUE
 		ORDER BY p.pnid`)
 	if err != nil {
 		return nil
@@ -482,6 +485,340 @@ func reviewCount() int {
 	var n int
 	db.QueryRow(`SELECT COUNT(*) FROM review_queue`).Scan(&n)
 	return n
+}
+
+// --- WSC dashboard ---
+
+const wscStatusURL = "http://127.0.0.1:9015/status"
+
+var wscSportNames = map[int64]string{
+	1: "Tennis",
+	3: "Bowling",
+	4: "Baseball",
+	5: "Golf",
+	6: "Boxing",
+}
+
+type WSCPlayerRow struct {
+	PID  int64
+	PNID string
+	NATm int64
+	IP   string
+	Port string
+}
+
+type WSCGatheringRow struct {
+	GID         int64
+	SportName   string
+	Host        int64
+	HostPNID    string
+	PlayerCount int64
+	MaxPlayers  int64
+	Players     []WSCPlayerRow
+	Open        bool
+}
+
+type WSCDashData struct {
+	ServerUp   bool
+	Players    []WSCPlayerRow
+	Gatherings []WSCGatheringRow
+}
+
+func lookupPNIDs(pids []int64) map[int64]string {
+	if len(pids) == 0 {
+		return map[int64]string{}
+	}
+	placeholders := make([]string, len(pids))
+	args := make([]interface{}, len(pids))
+	for i, pid := range pids {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+		args[i] = pid
+	}
+	query := fmt.Sprintf(`SELECT pid, pnid FROM pnid_cache WHERE pid IN (%s)`,
+		strings.Join(placeholders, ","))
+	rows, err := db.Query(query, args...)
+	result := map[int64]string{}
+	if err != nil {
+		return result
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var pid int64
+		var pnid string
+		rows.Scan(&pid, &pnid)
+		result[pid] = pnid
+	}
+	return result
+}
+
+func fetchWSCStatus() WSCDashData {
+	var data WSCDashData
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(wscStatusURL)
+	if err != nil {
+		return data
+	}
+	defer resp.Body.Close()
+	data.ServerUp = true
+
+	var raw struct {
+		Sessions []struct {
+			PID  int64  `json:"pid"`
+			NATm int64  `json:"natm"`
+			IP   string `json:"ip"`
+			Port string `json:"port"`
+		} `json:"sessions"`
+		Gatherings []struct {
+			GID         int64   `json:"gid"`
+			Host        int64   `json:"host"`
+			SportType   int64   `json:"sport_type"`
+			MaxPlayers  int64   `json:"max_players"`
+			PlayerCount int64   `json:"player_count"`
+			Players     []int64 `json:"players"`
+			Open        bool    `json:"open"`
+		} `json:"gatherings"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return data
+	}
+
+	// Collect all PIDs for batch PNID lookup.
+	pidSet := map[int64]struct{}{}
+	for _, s := range raw.Sessions {
+		pidSet[s.PID] = struct{}{}
+	}
+	for _, g := range raw.Gatherings {
+		pidSet[g.Host] = struct{}{}
+		for _, p := range g.Players {
+			pidSet[p] = struct{}{}
+		}
+	}
+	pids := make([]int64, 0, len(pidSet))
+	for pid := range pidSet {
+		pids = append(pids, pid)
+	}
+	pnids := lookupPNIDs(pids)
+
+	for _, s := range raw.Sessions {
+		data.Players = append(data.Players, WSCPlayerRow{
+			PID:  s.PID,
+			PNID: pnids[s.PID],
+			NATm: s.NATm,
+			IP:   s.IP,
+			Port: s.Port,
+		})
+	}
+
+	for _, g := range raw.Gatherings {
+		sport := wscSportNames[g.SportType]
+		if sport == "" {
+			sport = fmt.Sprintf("Sport %d", g.SportType)
+		}
+		row := WSCGatheringRow{
+			GID:         g.GID,
+			SportName:   sport,
+			Host:        g.Host,
+			HostPNID:    pnids[g.Host],
+			PlayerCount: g.PlayerCount,
+			MaxPlayers:  g.MaxPlayers,
+			Open:        g.Open,
+		}
+		for _, pid := range g.Players {
+			row.Players = append(row.Players, WSCPlayerRow{
+				PID:  pid,
+				PNID: pnids[pid],
+			})
+		}
+		data.Gatherings = append(data.Gatherings, row)
+	}
+	return data
+}
+
+var wscTmpl = template.Must(template.New("wsc").Funcs(tmplFuncs).Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WSC Dashboard — Inkay Relay Admin</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{font-family:system-ui,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem;color:#222}
+h1{font-size:1.4rem}
+h2{font-size:1.1rem;margin-top:2rem}
+a{color:#2563eb}
+table{width:100%;border-collapse:collapse;font-size:.9rem;margin-bottom:2rem}
+th{text-align:left;border-bottom:2px solid #e4e4e7;padding:.5rem .75rem;color:#666;font-weight:600}
+td{padding:.5rem .75rem;border-bottom:1px solid #f0f0f0;vertical-align:middle}
+tr:last-child td{border-bottom:none}
+.badge{display:inline-block;padding:.2rem .5rem;border-radius:4px;font-size:.75rem;font-weight:600}
+.on{background:#dcfce7;color:#166534}.off{background:#fee2e2;color:#991b1b}
+.tag{display:inline-block;padding:.15rem .4rem;border-radius:4px;font-size:.75rem;background:#e0e7ff;color:#3730a3}
+.mono{font-family:monospace;font-size:.85rem}
+</style>
+</head>
+<body>
+<h1>Wii Sports Club Dashboard</h1>
+<p style="margin-bottom:1.5rem">
+  <a href="/inkay/stats/" target="_blank">← Public stats</a> &nbsp;|&nbsp;
+  <a href="/wsc-public/nat/">NAT type guide</a>
+</p>
+
+<div style="display:flex;align-items:center;gap:.6rem;margin-bottom:1.5rem;font-size:.9rem">
+  <span class="badge {{if .ServerUp}}on{{else}}off{{end}}">{{if .ServerUp}}Server online{{else}}Server unreachable{{end}}</span>
+  {{if .ServerUp}}<span style="color:#666">{{len .Players}} connected{{if .Gatherings}}, {{len .Gatherings}} gathering{{if gt (len .Gatherings) 1}}s{{end}}{{end}}</span>{{end}}
+  <span style="margin-left:auto;font-size:.8rem;color:#aaa" id="refresh-label">refreshes in 15s</span>
+</div>
+
+<h2>Connected Players{{if .Players}} <span style="background:#dcfce7;color:#166534;border-radius:999px;padding:.1rem .5rem;font-size:.75rem;font-weight:700;vertical-align:middle">{{len .Players}}</span>{{end}}</h2>
+{{if .Players}}
+<table>
+<tr><th>PNID</th><th>PID</th><th>NAT</th></tr>
+{{range .Players}}
+<tr>
+  <td>{{if .PNID}}<strong>@{{.PNID}}</strong>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
+  <td class="mono">{{.PID}}</td>
+  <td>{{if eq .NATm 1}}<span class="badge on">Open</span>{{else if eq .NATm 2}}<span class="badge" style="background:#fef9c3;color:#854d0e">Moderate</span>{{else if eq .NATm 3}}<span class="badge off">Strict</span>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
+</tr>
+{{end}}
+</table>
+{{else}}
+<p style="color:#aaa;font-size:.9rem;margin-top:0">No players connected.</p>
+{{end}}
+
+<h2>Active Gatherings{{if .Gatherings}} <span style="background:#dcfce7;color:#166534;border-radius:999px;padding:.1rem .5rem;font-size:.75rem;font-weight:700;vertical-align:middle">{{len .Gatherings}}</span>{{end}}</h2>
+{{if .Gatherings}}
+<table>
+<tr><th>GID</th><th>Sport</th><th>Host</th><th>Players</th><th>Capacity</th><th>Open</th></tr>
+{{range .Gatherings}}
+<tr>
+  <td class="mono">{{.GID}}</td>
+  <td><span class="tag">{{.SportName}}</span></td>
+  <td>{{if .HostPNID}}<strong>@{{.HostPNID}}</strong>{{else}}<span class="mono">{{.Host}}</span>{{end}}</td>
+  <td>
+    {{range .Players}}{{if .PNID}}@{{.PNID}}{{else}}<span class="mono">{{.PID}}</span>{{end}} {{end}}
+  </td>
+  <td class="mono">{{.PlayerCount}}/{{.MaxPlayers}}</td>
+  <td><span class="badge {{if .Open}}on{{else}}off{{end}}">{{if .Open}}open{{else}}full{{end}}</span></td>
+</tr>
+{{end}}
+</table>
+{{else}}
+<p style="color:#aaa;font-size:.9rem;margin-top:0">No active gatherings.</p>
+{{end}}
+
+<script>
+var countdown = 15;
+function tick() {
+  countdown--;
+  if (countdown <= 0) { location.reload(); return; }
+  document.getElementById('refresh-label').textContent = 'refreshes in ' + countdown + 's';
+}
+setInterval(tick, 1000);
+</script>
+</body>
+</html>`))
+
+var wscNATTmpl = template.Must(template.New("wsc-nat").Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>NAT Types — Wii Sports Club</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{font-family:system-ui,sans-serif;max-width:780px;margin:2rem auto;padding:0 1rem;color:#222;line-height:1.6}
+h1{font-size:1.4rem;margin-bottom:.25rem}
+h2{font-size:1.05rem;margin-top:2rem;margin-bottom:.5rem}
+a{color:#2563eb}
+p{margin:.5rem 0 1rem}
+.cards{display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:2rem}
+.card{flex:1;min-width:180px;border:1px solid #e4e4e7;border-radius:8px;padding:1rem 1.25rem}
+.card h3{font-size:.95rem;margin:0 0 .4rem}
+.card p{font-size:.875rem;color:#555;margin:0}
+.badge{display:inline-block;padding:.2rem .55rem;border-radius:4px;font-size:.8rem;font-weight:600;margin-bottom:.5rem}
+.open{background:#dcfce7;color:#166534}
+.mod{background:#fef9c3;color:#854d0e}
+.strict{background:#fee2e2;color:#991b1b}
+table{width:100%;border-collapse:collapse;font-size:.9rem;margin-bottom:2rem}
+th{text-align:center;padding:.5rem .75rem;border:1px solid #e4e4e7;background:#f8fafc;font-weight:600;color:#444}
+td{text-align:center;padding:.5rem .75rem;border:1px solid #e4e4e7}
+td:first-child{text-align:left;font-weight:600}
+.yes{color:#166534;font-weight:700}
+.no{color:#991b1b;font-weight:700}
+.maybe{color:#854d0e;font-weight:700}
+.tip{background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;padding:.75rem 1rem;font-size:.875rem;color:#1e40af;margin-bottom:1rem}
+</style>
+</head>
+<body>
+<p><a href="/wsc-public/">← WSC Dashboard</a></p>
+<h1>NAT Types — Wii Sports Club</h1>
+<p>NAT (Network Address Translation) determines whether two players can establish a direct peer-to-peer connection for online play. The server matches players based on their NAT type to avoid failed connections.</p>
+
+<h2>Your NAT Type</h2>
+<div class="cards">
+  <div class="card">
+    <span class="badge open">Open</span>
+    <h3>NAT Type 1 — Open</h3>
+    <p>Your router forwards traffic freely. You can connect with anyone. Best experience for online play.</p>
+  </div>
+  <div class="card">
+    <span class="badge mod">Moderate</span>
+    <h3>NAT Type 2 — Moderate</h3>
+    <p>Your router filters by IP address. You can connect with Open and Moderate players. Works well for most matches.</p>
+  </div>
+  <div class="card">
+    <span class="badge strict">Strict</span>
+    <h3>NAT Type 3 — Strict</h3>
+    <p>Your router uses symmetric NAT. Port numbers change with each connection, making hole-punching unreliable. You can only be matched with other Strict players, and even then the connection may fail.</p>
+  </div>
+</div>
+
+<h2>Compatibility Table</h2>
+<table>
+<tr>
+  <th></th>
+  <th><span class="badge open">Open</span></th>
+  <th><span class="badge mod">Moderate</span></th>
+  <th><span class="badge strict">Strict</span></th>
+</tr>
+<tr>
+  <td><span class="badge open">Open</span></td>
+  <td class="yes">✓ Works</td>
+  <td class="yes">✓ Works</td>
+  <td class="no">✗ Blocked</td>
+</tr>
+<tr>
+  <td><span class="badge mod">Moderate</span></td>
+  <td class="yes">✓ Works</td>
+  <td class="yes">✓ Works</td>
+  <td class="no">✗ Blocked</td>
+</tr>
+<tr>
+  <td><span class="badge strict">Strict</span></td>
+  <td class="no">✗ Blocked</td>
+  <td class="no">✗ Blocked</td>
+  <td class="maybe">~ May fail</td>
+</tr>
+</table>
+<p style="font-size:.85rem;color:#666;margin-top:-.5rem">Strict↔Strict matches are allowed by the server but peer-to-peer connection may still fail depending on each player's router configuration.</p>
+
+<h2>How to Improve Your NAT Type</h2>
+<div class="tip">Enable UPnP on your router, or set up a port forward for UDP port 60015 pointed at your Wii U's local IP address. This typically changes a Strict NAT to Moderate or Open.</div>
+<p>Steps vary by router model — search for "<em>your router model</em> UPnP" or "<em>your router model</em> port forwarding" for instructions.</p>
+</body>
+</html>`))
+
+func wscNATInfo(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html")
+	wscNATTmpl.Execute(w, nil)
+}
+
+func adminWSC(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/wsc-public/" {
+		http.NotFound(w, r)
+		return
+	}
+	data := fetchWSCStatus()
+	w.Header().Set("Content-Type", "text/html")
+	wscTmpl.Execute(w, data)
 }
 
 // --- Admin client cert rotation ---
@@ -696,6 +1033,10 @@ tr:last-child td{border-bottom:none}
   <a class="card" href="/inkay/my/discord">
     <h2>Discord Link</h2>
     <p>Link your PNID to Discord for WiiU Chat call notifications</p>
+  </a>
+  <a class="card" href="/wsc-public/">
+    <h2>WSC Status and Players/Sessions</h2>
+    <p>Live Wii Sports Club players and active matchmaking sessions</p>
   </a>
   <a class="card" href="/inkay/admin/">
     <h2>Admin</h2>
@@ -971,7 +1312,8 @@ input[type=text],select{border:1px solid #d1d5db;border-radius:4px;padding:.4rem
   <a href="/inkay/stats/" target="_blank">← Public stats</a> &nbsp;|&nbsp;
   <a class="dl" href="/inkay/admin/client-cert.p12" download="inkay-admin.p12">⬇ Download client cert</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/review/">🕐 Review queue{{if .ReviewCount}} <span style="background:#ef4444;color:#fff;border-radius:999px;padding:.1rem .45rem;font-size:.75rem;font-weight:700">{{.ReviewCount}}</span>{{end}}</a> &nbsp;|&nbsp;
-  <a href="/inkay/admin/bans/">🚫 Banned users</a>
+  <a href="/inkay/admin/bans/">🚫 Banned users</a> &nbsp;|&nbsp;
+  <a href="/wsc-public/">🎳 WSC</a>
 </p>
 <div style="display:flex;align-items:center;gap:1rem;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:.6rem 1rem;margin-bottom:1.5rem;font-size:.875rem">
   <span>🔑 Client cert: <strong>{{.CertAge}}</strong>
@@ -1915,7 +2257,7 @@ func myHandler(w http.ResponseWriter, r *http.Request) {
 	var titleID int64
 	db.QueryRow(`
 		SELECT COALESCE(NULLIF(p.pnid,''), ''), COALESCE(NULLIF(s.mii_name,''), ''),
-		       (s.is_online IS TRUE AND s.last_heartbeat_at > NOW() - interval '5 minutes'),
+		       (s.is_online IS TRUE),
 		       COALESCE(s.presence_title_id, 0),
 		       COALESCE(LPAD(UPPER(TO_HEX(NULLIF(s.presence_game_server_id, 0))), 8, '0'), '')
 		FROM pnid_cache p
@@ -1926,7 +2268,7 @@ func myHandler(w http.ResponseWriter, r *http.Request) {
 		SELECT f.friend_pid,
 		       COALESCE(NULLIF(p.pnid,''), NULLIF(f.friend_nnid,''), ''),
 		       COALESCE(NULLIF(s.mii_name,''), NULLIF(f.mii_name,''), NULLIF(m.mii_name,''), ''),
-		       ((s.is_online IS TRUE AND s.last_heartbeat_at > NOW() - interval '5 minutes') OR f.is_online IS TRUE),
+		       ((s.is_online IS TRUE) OR f.is_online IS TRUE),
 		       COALESCE(NULLIF(s.presence_title_id, 0), NULLIF(f.title_id, 0), 0),
 		       COALESCE(LPAD(UPPER(TO_HEX(NULLIF(f.game_server_id, 0))), 8, '0'), ''),
 		       GREATEST(s.last_online_at, f.last_online)

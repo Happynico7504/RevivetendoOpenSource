@@ -48,44 +48,60 @@ set +a
 LOG="$ROOT/log"
 mkdir -p "$LOG"
 
+# Helper: run a command in a restart loop, appending to a log file.
+# Usage: autostart <logfile> <cmd...>
+autostart() {
+	local log="$1"
+	shift
+	while true; do
+		"$@" >>"$log" 2>&1
+		echo "[$(date -Iseconds)] process exited (code $?), restarting in 45s..." >>"$log"
+		sleep 45
+	done
+}
+
 echo "==> starting services..."
-"$BUILD/account-grpc" >"$LOG/account-grpc.log" 2>&1 &
+
+(autostart "$LOG/account-grpc.log"      "$BUILD/account-grpc") &
 ACCOUNT_PID=$!
 
-(cd "$ROOT/friends-nex" && "$BUILD/friends-nex") >"$LOG/friends-nex.log" 2>&1 &
+(cd "$ROOT/friends-nex" && autostart "$LOG/friends-nex.log" "$BUILD/friends-nex") &
 FRIENDS_PID=$!
 
-"$BUILD/relay-admin" >"$LOG/relay-admin.log" 2>&1 &
+(autostart "$LOG/relay-admin.log"       "$BUILD/relay-admin") &
 ADMIN_PID=$!
 
-GODEBUG=tls10server=1,tlsrsakex=1 "$BUILD/account-proxy" >"$LOG/account-proxy.log" 2>&1 &
+(autostart "$LOG/account-proxy.log"     env GODEBUG=tls10server=1,tlsrsakex=1 "$BUILD/account-proxy") &
 PROXY_PID=$!
 
 MK8_KERBEROS_PASSWORD="$(openssl rand -hex 16)"
 export MK8_KERBEROS_PASSWORD
-(cd "$ROOT/mk8-authentication" && KERBEROS_PASSWORD="$MK8_KERBEROS_PASSWORD" "$BUILD/mk8-auth") >"$LOG/mk8-authentication.log" 2>&1 &
+(cd "$ROOT/mk8-authentication" && autostart "$LOG/mk8-authentication.log" env KERBEROS_PASSWORD="$MK8_KERBEROS_PASSWORD" "$BUILD/mk8-auth") &
 MK8_AUTH_PID=$!
-(cd "$ROOT/mk8-secure" && KERBEROS_PASSWORD="$MK8_KERBEROS_PASSWORD" "$BUILD/mk8-secure") >"$LOG/mk8-secure.log" 2>&1 &
+(cd "$ROOT/mk8-secure"        && autostart "$LOG/mk8-secure.log"          env KERBEROS_PASSWORD="$MK8_KERBEROS_PASSWORD" "$BUILD/mk8-secure") &
 MK8_SECURE_PID=$!
 
 ABSW_KERBEROS_PASSWORD="$(openssl rand -hex 16)"
-(cd "$ROOT/angry-birds-star-wars" && env $(cat .env | xargs) PN_KERBEROS_PASSWORD="$ABSW_KERBEROS_PASSWORD" "$BUILD/absw") >"$LOG/angry-birds-star-wars.log" 2>&1 &
+(cd "$ROOT/angry-birds-star-wars" && autostart "$LOG/angry-birds-star-wars.log" \
+	env $(cat .env | xargs) PN_KERBEROS_PASSWORD="$ABSW_KERBEROS_PASSWORD" "$BUILD/absw") &
 ABSW_PID=$!
 
 WSC_KERBEROS_PASSWORD="$(openssl rand -hex 16)"
 export WSC_KERBEROS_PASSWORD
-(cd "$ROOT/wsc-authentication" && env $(cat .env | xargs) KERBEROS_PASSWORD="$WSC_KERBEROS_PASSWORD" "$BUILD/wsc-auth") >"$LOG/wsc-authentication.log" 2>&1 &
+(cd "$ROOT/wsc-authentication" && autostart "$LOG/wsc-authentication.log" \
+	env $(cat .env | xargs) KERBEROS_PASSWORD="$WSC_KERBEROS_PASSWORD" "$BUILD/wsc-auth") &
 WSC_AUTH_PID=$!
 
-(cd "$ROOT/wsc-secure" && env $(cat .env | xargs) KERBEROS_PASSWORD="$WSC_KERBEROS_PASSWORD" "$BUILD/wsc-secure") >"$LOG/wsc-secure.log" 2>&1 &
+(cd "$ROOT/wsc-secure" && autostart "$LOG/wsc-secure.log" \
+	env $(cat .env | xargs) KERBEROS_PASSWORD="$WSC_KERBEROS_PASSWORD" "$BUILD/wsc-secure") &
 WSC_SECURE_PID=$!
 
-python3 "$ROOT/discord-bot/bot.py" >"$LOG/discord-bot.log" 2>&1 &
+(autostart "$LOG/discord-bot.log" python3 "$ROOT/discord-bot/bot.py") &
 BOT_PID=$!
 
 MII_BOT_PID=""
 if [ -n "${MII_BOT_TOKEN:-}" ]; then
-	python3 "$ROOT/discord-bot/mii_bot.py" >"$LOG/mii-bot.log" 2>&1 &
+	(autostart "$LOG/mii-bot.log" python3 "$ROOT/discord-bot/mii_bot.py") &
 	MII_BOT_PID=$!
 fi
 
