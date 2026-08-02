@@ -319,6 +319,7 @@ func main() {
 	http.HandleFunc("/admin/client-cert.p12", adminClientCert)
 	http.HandleFunc("/wsc-public/", adminWSC)
 	http.HandleFunc("/wsc-public/nat/", wscNATInfo)
+	http.HandleFunc("/wsc-public/api/players", apiWSCPlayers)
 
 	addr := "127.0.0.1:9004"
 	log.Printf("relay-admin listening on %s", addr)
@@ -875,6 +876,103 @@ td:first-child{text-align:left;font-weight:600}
 <p>Steps vary by router model — search for "<em>your router model</em> UPnP" or "<em>your router model</em> port forwarding" for instructions.</p>
 </body>
 </html>`))
+
+func lookupMiiNames(pids []int64) map[int64]string {
+	if len(pids) == 0 {
+		return map[int64]string{}
+	}
+	placeholders := make([]string, len(pids))
+	args := make([]interface{}, len(pids))
+	for i, pid := range pids {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+		args[i] = pid
+	}
+	query := fmt.Sprintf(`SELECT pid, mii_name FROM mii_names WHERE pid IN (%s)`,
+		strings.Join(placeholders, ","))
+	rows, err := db.Query(query, args...)
+	result := map[int64]string{}
+	if err != nil {
+		return result
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var pid int64
+		var name string
+		rows.Scan(&pid, &name)
+		result[pid] = name
+	}
+	return result
+}
+
+func apiWSCPlayers(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	data := fetchWSCStatus()
+
+	// Collect all PIDs for Mii name lookup
+	pidSet := map[int64]struct{}{}
+	for _, p := range data.Players {
+		pidSet[p.PID] = struct{}{}
+	}
+	for _, g := range data.Gatherings {
+		for _, p := range g.Players {
+			pidSet[p.PID] = struct{}{}
+		}
+	}
+	pids := make([]int64, 0, len(pidSet))
+	for pid := range pidSet {
+		pids = append(pids, pid)
+	}
+	miiNames := lookupMiiNames(pids)
+
+	type PlayerJSON struct {
+		PID     int64  `json:"pid"`
+		PNID    string `json:"pnid"`
+		MiiName string `json:"mii_name,omitempty"`
+	}
+	type GatheringJSON struct {
+		GID         int64        `json:"gid"`
+		SportName   string       `json:"sport_name"`
+		HostPNID    string       `json:"host_pnid"`
+		PlayerCount int64        `json:"player_count"`
+		MaxPlayers  int64        `json:"max_players"`
+		Open        bool         `json:"open"`
+		Players     []PlayerJSON `json:"players"`
+	}
+	type ResponseJSON struct {
+		ServerUp   bool            `json:"server_up"`
+		Players    []PlayerJSON    `json:"players"`
+		Gatherings []GatheringJSON `json:"gatherings"`
+	}
+
+	resp := ResponseJSON{ServerUp: data.ServerUp}
+	for _, p := range data.Players {
+		resp.Players = append(resp.Players, PlayerJSON{
+			PID:     p.PID,
+			PNID:    p.PNID,
+			MiiName: miiNames[p.PID],
+		})
+	}
+	for _, g := range data.Gatherings {
+		gj := GatheringJSON{
+			GID:         g.GID,
+			SportName:   g.SportName,
+			HostPNID:    g.HostPNID,
+			PlayerCount: g.PlayerCount,
+			MaxPlayers:  g.MaxPlayers,
+			Open:        g.Open,
+		}
+		for _, p := range g.Players {
+			gj.Players = append(gj.Players, PlayerJSON{
+				PID:     p.PID,
+				PNID:    p.PNID,
+				MiiName: miiNames[p.PID],
+			})
+		}
+		resp.Gatherings = append(resp.Gatherings, gj)
+	}
+	json.NewEncoder(w).Encode(resp)
+}
 
 func wscNATInfo(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html")
