@@ -714,7 +714,8 @@ tr:last-child td{border-bottom:none}
 <h1>Wii Sports Club Dashboard</h1>
 <p style="margin-bottom:1.5rem">
   <a href="/inkay/stats/" target="_blank">← Public stats</a> &nbsp;|&nbsp;
-  <a href="/wsc-public/nat/">NAT type guide</a>
+  <a href="/wsc-public/nat/">NAT type guide</a> &nbsp;|&nbsp;
+  <a href="/wsc-public/overlay" target="_blank">Stream overlay</a>
 </p>
 
 <div style="display:flex;align-items:center;gap:.6rem;margin-bottom:1.5rem;font-size:.9rem">
