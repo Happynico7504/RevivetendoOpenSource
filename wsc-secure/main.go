@@ -209,9 +209,19 @@ func dsSeedProfiles() {
 // Populated on Connect, cleared on Disconnect — always reflects live state.
 var connectedPIDs sync.Map // uint32 → struct{}
 
-// pidNATm stores each player's NAT mapping type (1=open, 2=address-restricted, 3=symmetric).
-// Populated when ReportNATProperties is received, used to prevent bad-NAT / good-NAT mismatches.
+// currentClient maps PID → the *nex.Client that last connected.
+// Used to detect stale Disconnect events: nex-go v1.0.16 can fire Disconnect twice
+// (e.g. two DISC packets, or a reset SYN), and may fire the old Disconnect after a
+// fresh Connect has already run. Comparing the client pointer prevents double-cleanup
+// and protects the new session's gatherings from being torn down by a stale event.
+var currentClient sync.Map // uint32 → *nex.Client
+
+// pidNATm/pidNATf store each player's NAT mapping/filtering type.
+// Persisted across reconnects — NAT type is a router property, not a session property.
+// Not deleted on Disconnect so that GetSessionURLs can stamp correct values immediately
+// on reconnect, before ReportNATProperties fires.
 var pidNATm sync.Map // uint32 → uint32
+var pidNATf sync.Map // uint32 → uint32
 
 
 // --- Internal HTTP status endpoint (127.0.0.1:9015) for relay-admin dashboard ---
@@ -219,6 +229,15 @@ var pidNATm sync.Map // uint32 → uint32
 type wscSessionInfo struct {
 	PID  int64 `json:"pid"`
 	NATm int64 `json:"natm"`
+}
+
+type wscMatchInfo struct {
+	GID         int64   `json:"gid"`
+	SportType   int64   `json:"sport_type"`
+	Host        int64   `json:"host"`
+	Players     []int64 `json:"players"`
+	PlayerCount int64   `json:"player_count"`
+	StartedAt   int64   `json:"started_at"`
 }
 
 type wscGatheringInfo struct {
@@ -287,10 +306,31 @@ func startStatusServer() {
 			gatherings = []wscGatheringInfo{}
 		}
 
+		var matches []wscMatchInfo
+		for _, d := range dbGetRecentMatches() {
+			m := wscMatchInfo{
+				GID:         bsonInt(d["gid"]),
+				SportType:   bsonInt(d["sport_type"]),
+				Host:        bsonInt(d["host"]),
+				PlayerCount: bsonInt(d["player_count"]),
+				StartedAt:   bsonInt(d["started_at"]),
+			}
+			if raw, ok := d["players"].(bson.A); ok {
+				for _, p := range raw {
+					m.Players = append(m.Players, bsonInt(p))
+				}
+			}
+			matches = append(matches, m)
+		}
+		if matches == nil {
+			matches = []wscMatchInfo{}
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"sessions":   sessions,
 			"gatherings": gatherings,
+			"matches":    matches,
 		})
 	})
 	if err := http.ListenAndServe("127.0.0.1:9015", mux); err != nil {
@@ -343,6 +383,7 @@ func main() {
 
 		packet.Sender().SetPID(userPID)
 		connectedPIDs.Store(userPID, struct{}{})
+		currentClient.Store(userPID, packet.Sender())
 		dbLeaveAllGatherings(userPID) // clear any stale gatherings from a previous session
 
 		responseValueStream := nex.NewStreamOut(nexServer)
@@ -363,9 +404,18 @@ func main() {
 		if pid == 0 {
 			return
 		}
+		// Guard against stale disconnects: nex-go can fire Disconnect twice for the same
+		// connection, or fire an old Disconnect after a new Connect has already run.
+		// Only proceed if this client pointer is still the current one for this PID.
+		stored, ok := currentClient.Load(pid)
+		if !ok || stored.(*nex.Client) != packet.Sender() {
+			fmt.Printf("Disconnect: PID=%d — stale event, skipping cleanup\n", pid)
+			return
+		}
+		currentClient.Delete(pid)
 		fmt.Printf("Disconnect: PID=%d — cleaning up gatherings and session\n", pid)
 		connectedPIDs.Delete(pid)
-		pidNATm.Delete(pid)
+		// pidNATm/pidNATf intentionally kept — NAT type is stable across reconnects
 		dbLeaveAllGatherings(pid)
 		dbDeleteSession(pid)
 	})
@@ -826,6 +876,27 @@ func getSessionURLs(err error, client *nex.Client, callID uint32, gatheringID ui
 		urls = []string{}
 	}
 
+	// Stamp the host's known natm/natf onto the external (type=3) URL on the fly.
+	// The DB may still have natm=0 if ReportNATProperties hasn't fired yet on this session
+	// (e.g. immediately after a reconnect). Using the persisted pidNATm/pidNATf values
+	// ensures joiners always get accurate NAT info for hole-punching.
+	if natm, ok := pidNATm.Load(hostPID); ok {
+		natf := uint32(0)
+		if v, ok2 := pidNATf.Load(hostPID); ok2 {
+			natf = v.(uint32)
+		}
+		natmStr := strconv.FormatUint(uint64(natm.(uint32)), 10)
+		natfStr := strconv.FormatUint(uint64(natf), 10)
+		for i, urlStr := range urls {
+			u := nex.NewStationURL(urlStr)
+			if u.Type() == "3" {
+				u.SetNatm(natmStr)
+				u.SetNatf(natfStr)
+				urls[i] = u.EncodeToString()
+			}
+		}
+	}
+
 	fmt.Printf("GetSessionURLs: gid=%d hostPID=%d urls=%v\n", gatheringID, hostPID, urls)
 
 	rmcResponseStream := nex.NewStreamOut(nexServer)
@@ -1021,6 +1092,7 @@ func handleCloseParticipation(packet *nex.PacketV1) {
 	stream := nex.NewStreamIn(request.Parameters(), nexServer)
 	gid := stream.ReadUInt32LE()
 	fmt.Printf("CloseParticipation: PID=%d gid=%d\n", client.PID(), gid)
+	go dbRecordMatch(gid)
 	sendResponse(client, matchmake_extension.ProtocolID, request.CallID(), matchmake_extension.MethodCloseParticipation, nil)
 }
 
@@ -1061,6 +1133,7 @@ func reportNATProperties(err error, client *nex.Client, callID uint32, natm uint
 
 	fmt.Printf("ReportNATProperties: PID=%d natm=%d natf=%d\n", client.PID(), natm, natf)
 	pidNATm.Store(client.PID(), natm)
+	pidNATf.Store(client.PID(), natf)
 
 	urls := dbGetPlayerURLs(client.PID())
 	pid := strconv.FormatUint(uint64(client.PID()), 10)

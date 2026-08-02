@@ -85,6 +85,13 @@ var tmplFuncs = template.FuncMap{
 		}
 		return ""
 	},
+	"matchTime": func(t time.Time) string {
+		now := time.Now()
+		if t.Year() == now.Year() && t.YearDay() == now.YearDay() {
+			return t.Format("15:04")
+		}
+		return t.Format("Jan 2, 15:04")
+	},
 }
 
 const dbSchema = `
@@ -518,10 +525,20 @@ type WSCGatheringRow struct {
 	Open        bool
 }
 
+type WSCMatchRow struct {
+	GID         int64
+	SportName   string
+	HostPNID    string
+	Players     []string // PNIDs (or "PID:xxx" fallback)
+	PlayerCount int64
+	StartedAt   time.Time
+}
+
 type WSCDashData struct {
 	ServerUp   bool
 	Players    []WSCPlayerRow
 	Gatherings []WSCGatheringRow
+	Matches    []WSCMatchRow
 }
 
 func lookupPNIDs(pids []int64) map[int64]string {
@@ -577,6 +594,14 @@ func fetchWSCStatus() WSCDashData {
 			Players     []int64 `json:"players"`
 			Open        bool    `json:"open"`
 		} `json:"gatherings"`
+		Matches []struct {
+			GID         int64   `json:"gid"`
+			Host        int64   `json:"host"`
+			SportType   int64   `json:"sport_type"`
+			Players     []int64 `json:"players"`
+			PlayerCount int64   `json:"player_count"`
+			StartedAt   int64   `json:"started_at"`
+		} `json:"matches"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		return data
@@ -590,6 +615,12 @@ func fetchWSCStatus() WSCDashData {
 	for _, g := range raw.Gatherings {
 		pidSet[g.Host] = struct{}{}
 		for _, p := range g.Players {
+			pidSet[p] = struct{}{}
+		}
+	}
+	for _, m := range raw.Matches {
+		pidSet[m.Host] = struct{}{}
+		for _, p := range m.Players {
 			pidSet[p] = struct{}{}
 		}
 	}
@@ -630,6 +661,28 @@ func fetchWSCStatus() WSCDashData {
 			})
 		}
 		data.Gatherings = append(data.Gatherings, row)
+	}
+
+	for _, m := range raw.Matches {
+		sport := wscSportNames[m.SportType]
+		if sport == "" {
+			sport = fmt.Sprintf("Sport %d", m.SportType)
+		}
+		row := WSCMatchRow{
+			GID:         m.GID,
+			SportName:   sport,
+			HostPNID:    pnids[m.Host],
+			PlayerCount: m.PlayerCount,
+			StartedAt:   time.Unix(m.StartedAt, 0),
+		}
+		for _, pid := range m.Players {
+			if pnid := pnids[pid]; pnid != "" {
+				row.Players = append(row.Players, "@"+pnid)
+			} else {
+				row.Players = append(row.Players, fmt.Sprintf("PID:%d", pid))
+			}
+		}
+		data.Matches = append(data.Matches, row)
 	}
 	return data
 }
@@ -703,6 +756,23 @@ tr:last-child td{border-bottom:none}
 </table>
 {{else}}
 <p style="color:#aaa;font-size:.9rem;margin-top:0">No active gatherings.</p>
+{{end}}
+
+<h2>Matches (last 24 h){{if .Matches}} <span style="background:#dcfce7;color:#166534;border-radius:999px;padding:.1rem .5rem;font-size:.75rem;font-weight:700;vertical-align:middle">{{len .Matches}}</span>{{end}}</h2>
+{{if .Matches}}
+<table>
+<tr><th>Time</th><th>Sport</th><th>Host</th><th>Players</th></tr>
+{{range .Matches}}
+<tr>
+  <td class="mono" style="white-space:nowrap">{{matchTime .StartedAt}}</td>
+  <td><span class="tag">{{.SportName}}</span></td>
+  <td>{{if .HostPNID}}<strong>@{{.HostPNID}}</strong>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
+  <td>{{range .Players}}{{.}} {{end}}</td>
+</tr>
+{{end}}
+</table>
+{{else}}
+<p style="color:#aaa;font-size:.9rem;margin-top:0">No matches recorded yet.</p>
 {{end}}
 
 <script>

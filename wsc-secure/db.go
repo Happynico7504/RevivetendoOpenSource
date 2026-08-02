@@ -14,6 +14,7 @@ import (
 
 var sessionsCol *mongo.Collection
 var gatheringsCol *mongo.Collection
+var matchHistoryCol *mongo.Collection
 
 func connectDB() {
 	uri := os.Getenv("MONGO_URI")
@@ -30,9 +31,11 @@ func connectDB() {
 	db := client.Database("wsc")
 	sessionsCol = db.Collection("sessions")
 	gatheringsCol = db.Collection("gatherings")
+	matchHistoryCol = db.Collection("match_history")
 	// Clear stale data from previous run — all clients disconnect when the server restarts
 	sessionsCol.DeleteMany(context.Background(), bson.D{})
 	gatheringsCol.DeleteMany(context.Background(), bson.D{})
+	// match_history is intentionally not cleared — we want history across restarts
 }
 
 func dbUpsertSession(pid uint32, urls []string, ip, port string) {
@@ -263,4 +266,39 @@ func dbLeaveGathering(gid, pid uint32) {
 			{Key: "open", Value: count < maxPlayers},
 			{Key: "host", Value: newHost},
 		}}})
+}
+
+// dbRecordMatch snapshots the gathering into match_history when a match starts (CloseParticipation).
+func dbRecordMatch(gid uint32) {
+	ctx := context.Background()
+	var g bson.M
+	if err := gatheringsCol.FindOne(ctx, bson.D{{Key: "gid", Value: int64(gid)}}).Decode(&g); err != nil {
+		return
+	}
+	matchHistoryCol.InsertOne(ctx, bson.D{
+		{Key: "gid", Value: int64(gid)},
+		{Key: "sport_type", Value: g["sport_type"]},
+		{Key: "game_mode", Value: g["game_mode"]},
+		{Key: "host", Value: g["host"]},
+		{Key: "players", Value: g["players"]},
+		{Key: "player_count", Value: g["player_count"]},
+		{Key: "started_at", Value: time.Now().Unix()},
+	})
+}
+
+// dbGetRecentMatches returns match_history documents from the last 24 hours, newest first.
+func dbGetRecentMatches() []bson.M {
+	ctx := context.Background()
+	since := time.Now().Add(-24 * time.Hour).Unix()
+	opts := options.Find().
+		SetSort(bson.D{{Key: "started_at", Value: -1}}).
+		SetLimit(200)
+	cur, err := matchHistoryCol.Find(ctx,
+		bson.D{{Key: "started_at", Value: bson.D{{Key: "$gte", Value: since}}}}, opts)
+	if err != nil {
+		return nil
+	}
+	var docs []bson.M
+	cur.All(ctx, &docs)
+	return docs
 }
