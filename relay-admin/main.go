@@ -505,7 +505,6 @@ var wscSportNames = map[int64]string{
 	2: "Golf",
 	3: "Bowling",
 	4: "Baseball",
-	5: "Golf",
 	6: "Boxing",
 }
 
