@@ -504,8 +504,7 @@ var wscSportNames = map[int64]string{
 	1: "Tennis",
 	2: "Golf",
 	3: "Bowling",
-	4: "Baseball",
-	6: "Boxing",
+	4: "Boxing",
 }
 
 type WSCPlayerRow struct {
