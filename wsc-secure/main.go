@@ -1140,8 +1140,10 @@ func reportNATTraversalResult(err error, client *nex.Client, callID uint32, cid 
 	fmt.Printf("ReportNATTraversalResult: PID=%d cid=%d result=%v rtt=%d\n", client.PID(), cid, result, rtt)
 	sendResponse(client, nat_traversal.ProtocolID, callID, nat_traversal.MethodReportNATTraversalResult, []byte{})
 	if result {
+		// Don't close here — CloseParticipation is the actual game-start signal.
+		// Just clear the quick-exit fail counter so a successful pair doesn't
+		// penalise the gathering.
 		if gid := dbFindGatheringForPID(client.PID()); gid != 0 {
-			dbCloseGathering(gid)
 			gatheringFailCount.Delete(gid)
 		}
 	}
