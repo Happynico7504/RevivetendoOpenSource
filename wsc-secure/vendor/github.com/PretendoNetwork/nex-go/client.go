@@ -204,6 +204,15 @@ func (client *Client) IncreasePingTimeoutTime(seconds int) {
 
 // StartTimeoutTimer begins the packet timeout timer
 func (client *Client) StartTimeoutTimer() {
+	// Stop any previously running timers so reconnects don't accumulate goroutines.
+	if client.pingCheckTimer != nil {
+		client.pingCheckTimer.Stop()
+		client.pingCheckTimer = nil
+	}
+	if client.pingKickTimer != nil {
+		client.pingKickTimer.Stop()
+		client.pingKickTimer = nil
+	}
 	//if we haven't gotten a ping *from* the client, send them one to check all is well
 	client.pingCheckTimer = time.AfterFunc(time.Second*time.Duration(client.server.PingTimeout()), func() {
 		client.server.SendPing(client)

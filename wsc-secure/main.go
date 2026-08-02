@@ -223,6 +223,19 @@ var currentClient sync.Map // uint32 → *nex.Client
 var pidNATm sync.Map // uint32 → uint32
 var pidNATf sync.Map // uint32 → uint32
 
+// playerJoinedAt tracks when a player last joined a gathering (as joiner, not host).
+// Used to detect quick-exit loops: join → fail → EndParticipation within 30s.
+var playerJoinedAt sync.Map // uint32 pid → joinRecord
+
+type joinRecord struct {
+	gid  uint32
+	when time.Time
+}
+
+// gatheringFailCount tracks consecutive quick-exits (< 30s) per gathering.
+// After 3 consecutive quick-exits from any joiner, the gathering is closed.
+var gatheringFailCount sync.Map // uint32 gid → int
+
 
 // --- Internal HTTP status endpoint (127.0.0.1:9015) for relay-admin dashboard ---
 
@@ -513,6 +526,7 @@ func main() {
 	secureProto.Register(register)
 	secureProto.ReplaceURL(replaceURL)
 	secureProto.TestConnectivity(testConnectivity)
+	secureProto.SendReport(sendReport)
 
 	dsProto := datastore.NewDataStoreProtocol(nexServer)
 	dsProto.SearchObject(searchObject)
@@ -935,6 +949,27 @@ func endParticipation(err error, client *nex.Client, callID uint32, gid uint32, 
 	dbLeaveGathering(gid, client.PID())
 	fmt.Printf("EndParticipation: PID=%d gid=%d\n", client.PID(), gid)
 
+	// Detect quick-exit loop: if this player joined as a joiner (not host) and left within
+	// 30s, count it as a NAT failure against this gathering. After 3 failures, close the
+	// gathering so it doesn't trap new joiners with an unreachable host.
+	if rec, ok := playerJoinedAt.LoadAndDelete(client.PID()); ok {
+		jr := rec.(joinRecord)
+		if jr.gid == gid && time.Since(jr.when) < 30*time.Second {
+			n := 0
+			if v, loaded := gatheringFailCount.Load(gid); loaded {
+				n = v.(int)
+			}
+			n++
+			if n >= 3 {
+				fmt.Printf("EndParticipation: gid=%d had %d consecutive quick-exits, closing\n", gid, n)
+				dbCloseGathering(gid)
+				gatheringFailCount.Delete(gid)
+			} else {
+				gatheringFailCount.Store(gid, n)
+			}
+		}
+	}
+
 	sendResponse(client, match_making_ext.ProtocolID, callID, match_making_ext.MethodEndParticipation, []byte{0x1})
 }
 
@@ -1049,6 +1084,7 @@ func handleAutoMatchmakeRaw(packet *nex.PacketV1) {
 	} else {
 		dbJoinGathering(gid, client.PID())
 		fmt.Printf("AutoMatchmake: PID=%d joined gathering gid=%d gameMode=%d (sport=0x%02x)\n", client.PID(), gid, gameMode, gameMode>>24)
+		playerJoinedAt.Store(client.PID(), joinRecord{gid: gid, when: time.Now()})
 	}
 
 	hostPID := dbGetGatheringHost(gid)
@@ -1106,6 +1142,7 @@ func reportNATTraversalResult(err error, client *nex.Client, callID uint32, cid 
 	if result {
 		if gid := dbFindGatheringForPID(client.PID()); gid != 0 {
 			dbCloseGathering(gid)
+			gatheringFailCount.Delete(gid)
 		}
 	}
 }
@@ -1129,6 +1166,13 @@ func testConnectivity(err error, client *nex.Client, callID uint32) {
 		return
 	}
 	sendResponse(client, secure_connection.ProtocolID, callID, secure_connection.MethodTestConnectivity, []byte{})
+}
+
+func sendReport(err error, client *nex.Client, callID uint32, reportID uint32, report []byte) {
+	if err != nil {
+		return
+	}
+	sendResponse(client, secure_connection.ProtocolID, callID, secure_connection.MethodSendReport, []byte{})
 }
 
 func reportNATProperties(err error, client *nex.Client, callID uint32, natm uint32, natf uint32, rtt uint32) {
