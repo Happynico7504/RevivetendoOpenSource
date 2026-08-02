@@ -616,7 +616,8 @@ func sendResponse(client *nex.Client, protocolID uint8, callID uint32, methodID 
 	pkt.SetPayload(rmcResponse.Bytes())
 	pkt.AddFlag(nex.FlagNeedsAck)
 	pkt.AddFlag(nex.FlagReliable)
-	nexServer.Send(pkt)
+	// SendFragment bypasses the 500ms sleep in Send() — safe for single-fragment responses
+	nexServer.SendFragment(pkt, 0)
 }
 
 func register(err error, client *nex.Client, callID uint32, stationUrls []*nex.StationURL) {
@@ -970,7 +971,7 @@ func requestProbeInitiationExt(err error, client *nex.Client, callID uint32, tar
 			msgPkt.SetPayload(rmcMessage.Bytes())
 			msgPkt.AddFlag(nex.FlagNeedsAck)
 			msgPkt.AddFlag(nex.FlagReliable)
-			nexServer.Send(msgPkt)
+			nexServer.SendFragment(msgPkt, 0)
 		}
 	}
 }
