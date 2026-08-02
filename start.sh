@@ -54,9 +54,9 @@ autostart() {
 	local log="$1"
 	shift
 	while true; do
-		"$@" >>"$log" 2>&1
-		echo "[$(date -Iseconds)] process exited (code $?), restarting in 45s..." >>"$log"
-		sleep 45
+		"$@" >>"$log" 2>&1 || true
+		echo "[$(date -Iseconds)] process exited (code $?), restarting in 5s..." >>"$log"
+		sleep 5
 	done
 }
 
