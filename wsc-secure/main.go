@@ -1092,6 +1092,7 @@ func handleCloseParticipation(packet *nex.PacketV1) {
 	stream := nex.NewStreamIn(request.Parameters(), nexServer)
 	gid := stream.ReadUInt32LE()
 	fmt.Printf("CloseParticipation: PID=%d gid=%d\n", client.PID(), gid)
+	dbCloseGathering(gid)
 	go dbRecordMatch(gid)
 	sendResponse(client, matchmake_extension.ProtocolID, request.CallID(), matchmake_extension.MethodCloseParticipation, nil)
 }
@@ -1102,6 +1103,11 @@ func reportNATTraversalResult(err error, client *nex.Client, callID uint32, cid 
 	}
 	fmt.Printf("ReportNATTraversalResult: PID=%d cid=%d result=%v rtt=%d\n", client.PID(), cid, result, rtt)
 	sendResponse(client, nat_traversal.ProtocolID, callID, nat_traversal.MethodReportNATTraversalResult, []byte{})
+	if result {
+		if gid := dbFindGatheringForPID(client.PID()); gid != 0 {
+			dbCloseGathering(gid)
+		}
+	}
 }
 
 func acquireNexUniqueID(err error, client *nex.Client, callID uint32) {

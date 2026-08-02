@@ -269,6 +269,22 @@ func dbLeaveGathering(gid, pid uint32) {
 }
 
 // dbRecordMatch snapshots the gathering into match_history when a match starts (CloseParticipation).
+func dbFindGatheringForPID(pid uint32) uint32 {
+	var result bson.M
+	err := gatheringsCol.FindOne(context.Background(),
+		bson.D{{Key: "players", Value: pid}}).Decode(&result)
+	if err != nil {
+		return 0
+	}
+	return uint32(result["gid"].(int64))
+}
+
+func dbCloseGathering(gid uint32) {
+	gatheringsCol.UpdateOne(context.Background(),
+		bson.D{{Key: "gid", Value: gid}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "open", Value: false}}}})
+}
+
 func dbRecordMatch(gid uint32) {
 	ctx := context.Background()
 	var g bson.M
