@@ -1024,7 +1024,7 @@ if(!PNID){
     var rows=(g.players||[]).map(function(p){
       var you=(p.pnid||'').toLowerCase()===PNID.toLowerCase();
       var nm=p.mii_name||p.pnid||('PID:'+p.pid);
-      var mii='<div class="mii"><img src="https://olv.nicochristmann.net/mii/'+p.pid+'/mii_icon.png" onerror="this.style.display=\'none\'"></div>';
+      var mii='<div class="mii"><img src="https://olv.nicochristmann.net/mii/'+p.pid+'/normal_face.png" onerror="this.style.display=\'none\'"></div>';
       return '<div class="player">'+mii+'<div><div class="name'+(you?' you':'')+'">'+(you?'&#9654; ':'')+nm+'</div>'+(p.pnid?'<div class="pnid">@'+p.pnid+'</div>':'')+'</div></div>';
     }).join('');
     el.innerHTML='<div class="card"><div class="sport">'+g.sport_name+badge+'</div>'+rows+'</div>';
