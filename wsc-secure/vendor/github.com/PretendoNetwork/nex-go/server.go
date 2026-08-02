@@ -13,11 +13,13 @@ import (
 	"math/rand"
 	"net"
 	"runtime"
+	"sync"
 )
 
 // Server represents a PRUDP server
 type Server struct {
 	socket                     *net.UDPConn
+	clientsMu                  sync.RWMutex
 	clients                    map[string]*Client
 	genericEventHandles        map[string][]func(PacketInterface)
 	prudpV0EventHandles        map[string][]func(*PacketV0)
@@ -99,12 +101,13 @@ func (server *Server) handleSocketMessage() error {
 
 	discriminator := addr.String()
 
+	server.clientsMu.Lock()
 	if _, ok := server.clients[discriminator]; !ok {
 		newClient := NewClient(addr, server)
 		server.clients[discriminator] = newClient
 	}
-
 	client := server.clients[discriminator]
+	server.clientsMu.Unlock()
 
 	data := buffer[0:length]
 
@@ -213,7 +216,9 @@ func (server *Server) Emit(event string, packet interface{}) {
 func (server *Server) ClientConnected(client *Client) bool {
 	discriminator := client.Address().String()
 
+	server.clientsMu.RLock()
 	_, connected := server.clients[discriminator]
+	server.clientsMu.RUnlock()
 
 	return connected
 }
@@ -232,7 +237,9 @@ func (server *Server) Kick(client *Client) {
 	server.Emit("Kick", packet)
 	client.SetConnected(false)
 	discriminator := client.Address().String()
+	server.clientsMu.Lock()
 	delete(server.clients, discriminator)
+	server.clientsMu.Unlock()
 }
 
 // SendPing sends a ping packet to the given client
@@ -511,6 +518,8 @@ func (server *Server) ConnectionIDCounter() *Counter {
 
 // FindClientFromPID finds a client by their PID
 func (server *Server) FindClientFromPID(pid uint32) *Client {
+	server.clientsMu.RLock()
+	defer server.clientsMu.RUnlock()
 	for _, client := range server.clients {
 		if client.pid == pid {
 			return client
@@ -522,6 +531,8 @@ func (server *Server) FindClientFromPID(pid uint32) *Client {
 
 // FindClientFromConnectionID finds a client by their Connection ID
 func (server *Server) FindClientFromConnectionID(rvcid uint32) *Client {
+	server.clientsMu.RLock()
+	defer server.clientsMu.RUnlock()
 	for _, client := range server.clients {
 		if client.connectionID == rvcid {
 			return client
