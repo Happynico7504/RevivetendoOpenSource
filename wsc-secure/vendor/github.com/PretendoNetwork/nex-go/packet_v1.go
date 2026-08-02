@@ -144,30 +144,35 @@ func (packet *PacketV1) Decode() error {
 		payloadCrypted := stream.ReadBytesNext(int64(payloadSize))
 
 		packet.SetPayload(payloadCrypted)
-
-		if packet.Type() == DataPacket && !packet.HasFlag(FlagMultiAck) {
-			ciphered := make([]byte, payloadSize)
-
-			client := packet.Sender()
-			client.mu.Lock()
-			client.Decipher().XORKeyStream(ciphered, payloadCrypted)
-			client.mu.Unlock()
-
-			request := NewRMCRequest()
-			err := request.FromBytes(ciphered)
-
-			if err != nil {
-				return errors.New("[PRUDPv1] Error parsing RMC request: " + err.Error())
-			}
-
-			packet.rmcRequest = request
-		}
 	}
 
+	// Verify signature BEFORE deciphering: the signature is over the encrypted payload,
+	// so we can validate it without touching the RC4 decipher stream. Stale packets from
+	// old sessions fail here, preventing them from advancing the decipher and corrupting
+	// the keystream for subsequent legitimate packets.
 	calculatedSignature := packet.calculateSignature(packet.Data()[2:14], packet.Sender().ServerConnectionSignature(), options, packet.Payload())
 
 	if !bytes.Equal(calculatedSignature, packet.Signature()) {
-		logger.Error("PRUDPv1 calculated signature did not match")
+		return errors.New("[PRUDPv1] calculated signature did not match")
+	}
+
+	if payloadSize > 0 && packet.Type() == DataPacket && !packet.HasFlag(FlagMultiAck) {
+		payloadCrypted := packet.Payload()
+		ciphered := make([]byte, payloadSize)
+
+		client := packet.Sender()
+		client.mu.Lock()
+		client.Decipher().XORKeyStream(ciphered, payloadCrypted)
+		client.mu.Unlock()
+
+		request := NewRMCRequest()
+		err := request.FromBytes(ciphered)
+
+		if err != nil {
+			return errors.New("[PRUDPv1] Error parsing RMC request: " + err.Error())
+		}
+
+		packet.rmcRequest = request
 	}
 
 	return nil
