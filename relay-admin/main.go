@@ -320,6 +320,7 @@ func main() {
 	http.HandleFunc("/wsc-public/", adminWSC)
 	http.HandleFunc("/wsc-public/nat/", wscNATInfo)
 	http.HandleFunc("/wsc-public/api/players", apiWSCPlayers)
+	http.HandleFunc("/wsc-public/overlay", apiWSCOverlay)
 
 	addr := "127.0.0.1:9004"
 	log.Printf("relay-admin listening on %s", addr)
@@ -972,6 +973,72 @@ func apiWSCPlayers(w http.ResponseWriter, r *http.Request) {
 		resp.Gatherings = append(resp.Gatherings, gj)
 	}
 	json.NewEncoder(w).Encode(resp)
+}
+
+const wscOverlayHTML = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>WSC Overlay</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:transparent;font-family:'Segoe UI',Arial,sans-serif;padding:14px}
+#overlay{display:inline-block;min-width:200px}
+.card{background:rgba(0,0,0,0.72);border-radius:10px;padding:10px 14px;color:#fff;backdrop-filter:blur(4px)}
+.sport{font-size:12px;font-weight:bold;letter-spacing:.5px;color:#7ecfff;margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.badge{font-size:10px;border-radius:3px;padding:1px 6px;font-weight:normal}
+.open{background:#4caf50}.match{background:#e53935}
+.player{display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.08)}
+.player:last-child{border-bottom:none}
+.mii{width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,.12);flex-shrink:0;overflow:hidden}
+.mii img{width:100%;height:100%}
+.name{font-size:14px;font-weight:bold;line-height:1.2}
+.you{color:#7ecfff}
+.pnid{font-size:11px;color:rgba(255,255,255,.55)}
+.offline{color:rgba(255,255,255,.5);font-size:13px;padding:4px 0}
+.setup{background:rgba(0,0,0,.8);border-radius:10px;padding:16px;color:#fff;max-width:340px;font-size:13px;line-height:1.6}
+.setup h2{font-size:15px;margin-bottom:8px;color:#7ecfff}
+.setup code{background:rgba(255,255,255,.15);border-radius:4px;padding:2px 6px;font-family:monospace;font-size:12px;word-break:break-all}
+.setup p{margin-top:8px}
+</style>
+</head>
+<body>
+<div id="overlay"></div>
+<script>
+var params=new URLSearchParams(location.search);
+var PNID=(params.get('pnid')||'').trim();
+
+if(!PNID){
+  document.getElementById('overlay').innerHTML='<div class="setup"><h2>WSC Stream Overlay</h2><p>Add your PNID to the URL to use this overlay:</p><p><code>'+location.href+(location.search?'&':'?')+'pnid=YourPNID</code></p><p>Then add this URL as a Browser Source in OBS with <strong>transparent background</strong>.</p></div>';
+}else{
+  function render(data){
+    var el=document.getElementById('overlay');
+    if(!data||!data.server_up){el.innerHTML='<div class="card"><span class="offline">WSC server offline</span></div>';return;}
+    var g=null;
+    (data.gatherings||[]).forEach(function(gg){
+      (gg.players||[]).forEach(function(p){if((p.pnid||'').toLowerCase()===PNID.toLowerCase())g=gg;});
+    });
+    if(!g){el.innerHTML='<div class="card"><span class="offline">Not in a session</span></div>';return;}
+    var badge=g.open?'<span class="badge open">Open</span>':'<span class="badge match">In Match</span>';
+    var rows=(g.players||[]).map(function(p){
+      var you=(p.pnid||'').toLowerCase()===PNID.toLowerCase();
+      var nm=p.mii_name||p.pnid||('PID:'+p.pid);
+      var mii='<div class="mii"><img src="https://olv.nicochristmann.net/mii/'+p.pid+'/mii_icon.png" onerror="this.style.display=\'none\'"></div>';
+      return '<div class="player">'+mii+'<div><div class="name'+(you?' you':'')+'">'+(you?'&#9654; ':'')+nm+'</div>'+(p.pnid?'<div class="pnid">@'+p.pnid+'</div>':'')+'</div></div>';
+    }).join('');
+    el.innerHTML='<div class="card"><div class="sport">'+g.sport_name+badge+'</div>'+rows+'</div>';
+  }
+  function refresh(){fetch('/wsc-public/api/players').then(function(r){return r.json();}).then(render).catch(function(){});}
+  refresh();
+  setInterval(refresh,5000);
+}
+</script>
+</body>
+</html>`
+
+func apiWSCOverlay(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprint(w, wscOverlayHTML)
 }
 
 func wscNATInfo(w http.ResponseWriter, r *http.Request) {
