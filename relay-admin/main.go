@@ -502,6 +502,7 @@ const wscStatusURL = "http://127.0.0.1:9015/status"
 
 var wscSportNames = map[int64]string{
 	1: "Tennis",
+	2: "Golf",
 	3: "Bowling",
 	4: "Baseball",
 	5: "Golf",
