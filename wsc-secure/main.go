@@ -223,10 +223,6 @@ var currentClient sync.Map // uint32 → *nex.Client
 var pidNATm sync.Map // uint32 → uint32
 var pidNATf sync.Map // uint32 → uint32
 
-// clientSendMu serializes packet sends per client so concurrent goroutines
-// don't corrupt the shared RC4 cipher state (XORKeyStream is not goroutine-safe).
-var clientSendMu sync.Map // addr string → *sync.Mutex
-
 
 // --- Internal HTTP status endpoint (127.0.0.1:9015) for relay-admin dashboard ---
 
@@ -419,7 +415,6 @@ func main() {
 		currentClient.Delete(pid)
 		fmt.Printf("Disconnect: PID=%d — cleaning up gatherings and session\n", pid)
 		connectedPIDs.Delete(pid)
-		clientSendMu.Delete(packet.Sender().Address().String())
 		// pidNATm/pidNATf intentionally kept — NAT type is stable across reconnects
 		dbLeaveAllGatherings(pid)
 		dbDeleteSession(pid)
@@ -610,18 +605,6 @@ func searchObject77(client *nex.Client, callID uint32, param *datastore.DataStor
 	sendResponse(client, 0x77, callID, datastore.MethodSearchObject, rmcResponseStream.Bytes())
 }
 
-// sendDirect sends a single-fragment packet without the 500ms sleep in Send().
-// It holds a per-client mutex because the RC4 cipher (used inside Bytes/SendFragment)
-// is not goroutine-safe — concurrent sends to the same client would corrupt the keystream.
-func sendDirect(pkt *nex.PacketV1) {
-	addr := pkt.Sender().Address().String()
-	val, _ := clientSendMu.LoadOrStore(addr, new(sync.Mutex))
-	mu := val.(*sync.Mutex)
-	mu.Lock()
-	nexServer.SendFragment(pkt, 0)
-	mu.Unlock()
-}
-
 func sendResponse(client *nex.Client, protocolID uint8, callID uint32, methodID uint32, payload []byte) {
 	rmcResponse := nex.NewRMCResponse(protocolID, callID)
 	rmcResponse.SetSuccess(methodID, payload)
@@ -633,7 +616,7 @@ func sendResponse(client *nex.Client, protocolID uint8, callID uint32, methodID 
 	pkt.SetPayload(rmcResponse.Bytes())
 	pkt.AddFlag(nex.FlagNeedsAck)
 	pkt.AddFlag(nex.FlagReliable)
-	sendDirect(pkt)
+	nexServer.Send(pkt)
 }
 
 func register(err error, client *nex.Client, callID uint32, stationUrls []*nex.StationURL) {
@@ -987,7 +970,7 @@ func requestProbeInitiationExt(err error, client *nex.Client, callID uint32, tar
 			msgPkt.SetPayload(rmcMessage.Bytes())
 			msgPkt.AddFlag(nex.FlagNeedsAck)
 			msgPkt.AddFlag(nex.FlagReliable)
-			sendDirect(msgPkt)
+			nexServer.Send(msgPkt)
 		}
 	}
 }
