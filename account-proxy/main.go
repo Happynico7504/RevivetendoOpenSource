@@ -2185,6 +2185,114 @@ func handleWebSetPassword(w http.ResponseWriter, r *http.Request) {
 // The Wii U can't reach the S3 host directly due to TLS CA trust issues.
 var cdnPrefixes = []string{"/mii/", "/paintings/", "/screenshots/", "/icons/", "/headers/"}
 
+// wiiUCiphers are the CBC suites the Wii U understands (no GCM, no ChaCha). Used both
+// for the inbound OLV proxy TLS config (startOLVProxy) and, via wiiUHTTPClient, for
+// outbound requests we make pretending to be a Wii U — Pretendo's edge blocks BOSS
+// requests by TLS fingerprint, not headers (confirmed 2026-08-20: forwarding a real
+// console's exact User-Agent still got "only meant to be accessed by a Wii U or 3DS",
+// but restricting our own outbound handshake to this cipher/version range is what
+// actually matters to whatever's doing the fingerprinting).
+var wiiUCiphers = []uint16{
+	tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
+	tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
+	tls.TLS_RSA_WITH_AES_128_CBC_SHA,
+	tls.TLS_RSA_WITH_AES_256_CBC_SHA,
+	tls.TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA,
+	tls.TLS_RSA_WITH_3DES_EDE_CBC_SHA,
+}
+
+// wiiUHTTPClient makes outbound requests with a TLS ClientHello that looks like a Wii U
+// (TLS 1.0-1.2, CBC-only ciphers) rather than Go's default modern/AEAD profile.
+var wiiUHTTPClient = &http.Client{
+	Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{
+			MinVersion:   tls.VersionTLS10,
+			MaxVersion:   tls.VersionTLS12,
+			CipherSuites: wiiUCiphers,
+		},
+	},
+}
+
+// bossCaptureDir holds raw request/response logs from handleBossCapture, for offline
+// decryption with a dumped BOSS key once we've seen what real Wara Wara Plaza traffic
+// looks like. TEMPORARY — see handleBossCapture doc comment.
+const bossCaptureDir = "/nico-pretendo-bridge/boss-capture"
+
+// handleBossCapture is a TEMPORARY diagnostic proxy for reverse-engineering the Wara
+// Wara Plaza BOSS content format (see feedback_wsc_ping_timeout-style memory once this
+// lands — not yet saved). Inkay-NicoChristmann v3.0.0-9 redirects the client's nppl/npts
+// BOSS lookups to boss.nicochristmann.net instead of the real nppl.app.pretendo.cc /
+// npts.app.pretendo.cc. This handler transparently forwards to the REAL Pretendo BOSS
+// servers (so nothing about the console's plaza experience changes) while logging the
+// full raw request and response to bossCaptureDir. The response's <TaskSheet><File> Url
+// still points at the real npdi.cdn.pretendo.cc (untouched, unpatched), so the actual
+// encrypted file download isn't captured here — only the policylist + tasksheet legs.
+// Remove this (and the matching Inkay patch + nginx stream map entry) once the plaza
+// content format has been reverse-engineered from the captured samples.
+func handleBossCapture(w http.ResponseWriter, r *http.Request) {
+	var target string
+	var realHost string
+	switch {
+	case strings.HasPrefix(r.URL.Path, "/p01/policylist/"):
+		target = "https://nppl.app.pretendo.cc"
+		realHost = "nppl.app.pretendo.cc"
+	case strings.HasPrefix(r.URL.Path, "/p01/tasksheet/"):
+		target = "https://npts.app.pretendo.cc"
+		realHost = "npts.app.pretendo.cc"
+	default:
+		log.Printf("BOSS capture: unknown path %s", r.URL.Path)
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
+	reqBody, _ := io.ReadAll(r.Body)
+
+	os.MkdirAll(bossCaptureDir, 0755)
+	ts := time.Now().Format("20060102-150405.000")
+	safePath := strings.ReplaceAll(strings.Trim(r.URL.Path, "/"), "/", "_")
+	base := fmt.Sprintf("%s/%s_%s", bossCaptureDir, ts, safePath)
+
+	reqLog := fmt.Sprintf("%s %s\nQuery: %s\nHeaders: %v\nBody (hex): %x\n",
+		r.Method, r.URL.Path, r.URL.RawQuery, r.Header, reqBody)
+	os.WriteFile(base+".request.txt", []byte(reqLog), 0644)
+
+	fullTarget := target + r.URL.Path
+	if r.URL.RawQuery != "" {
+		fullTarget += "?" + r.URL.RawQuery
+	}
+	proxyReq, err := http.NewRequest(r.Method, fullTarget, bytes.NewReader(reqBody))
+	if err != nil {
+		http.Error(w, "proxy error", http.StatusInternalServerError)
+		return
+	}
+	proxyReq.Header = r.Header.Clone()
+	proxyReq.Host = realHost
+
+	resp, err := wiiUHTTPClient.Do(proxyReq)
+	if err != nil {
+		log.Printf("BOSS capture: upstream error for %s: %v", fullTarget, err)
+		http.Error(w, "upstream error", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+
+	respLog := fmt.Sprintf("Status: %d\nHeaders: %v\nBody length: %d\n", resp.StatusCode, resp.Header, len(respBody))
+	os.WriteFile(base+".response.txt", []byte(respLog), 0644)
+	os.WriteFile(base+".response.bin", respBody, 0644)
+
+	log.Printf("BOSS capture: %s %s -> %s status=%d bytes=%d (saved %s)",
+		r.Method, r.URL.Path, target, resp.StatusCode, len(respBody), base)
+
+	for k, vs := range resp.Header {
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	w.Write(respBody)
+}
+
 // handleOLV forwards OLV discovery/API requests to miiverse-api on port 8080.
 func handleOLV(w http.ResponseWriter, r *http.Request) {
 	// CDN assets: proxy directly to S3 so the Wii U (which trusts only our cert) can load them.
@@ -2215,6 +2323,7 @@ func handleOLV(w http.ResponseWriter, r *http.Request) {
 	target := "http://127.0.0.1:" + port + r.RequestURI
 	req, err := http.NewRequest(r.Method, target, r.Body)
 	if err != nil {
+		log.Printf("OLV proxy: %s %s -> build request error: %v", r.Method, r.URL.Path, err)
 		http.Error(w, "proxy error", http.StatusInternalServerError)
 		return
 	}
@@ -2227,6 +2336,7 @@ func handleOLV(w http.ResponseWriter, r *http.Request) {
 	req.Header.Set("X-Forwarded-Proto", "https")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		log.Printf("OLV proxy: %s %s -> 127.0.0.1:%s upstream error: %v", r.Method, r.URL.Path, port, err)
 		http.Error(w, "upstream error", http.StatusBadGateway)
 		return
 	}
@@ -2237,7 +2347,8 @@ func handleOLV(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	n, _ := io.Copy(w, resp.Body)
+	log.Printf("OLV proxy: %s %s -> 127.0.0.1:%s status=%d bytes=%d", r.Method, r.URL.Path, port, resp.StatusCode, n)
 }
 
 // startOLVProxy starts a TLS 1.0+ capable HTTPS proxy on port 7443 for OLV.
@@ -2256,6 +2367,11 @@ func startOLVProxy() {
 	if err != nil {
 		log.Fatalf("pretendo discovery cert: %v", err)
 	}
+	// TEMPORARY — see handleBossCapture doc comment.
+	bossCert, err := tls.LoadX509KeyPair(baseCerts+"/boss-nicochristmann-net.crt", baseCerts+"/boss-nicochristmann-net.key")
+	if err != nil {
+		log.Fatalf("boss capture cert: %v", err)
+	}
 
 	getCert := func(chi *tls.ClientHelloInfo) (*tls.Certificate, error) {
 		switch chi.ServerName {
@@ -2263,20 +2379,13 @@ func startOLVProxy() {
 			return &nintendoCert, nil
 		case "discovery.olv.pretendo.cc":
 			return &pretendoCert, nil
+		case "boss.nicochristmann.net":
+			return &bossCert, nil
 		default:
 			return &olvCert, nil
 		}
 	}
 
-	// wiiUCiphers are the CBC suites the Wii U understands (no GCM, no ChaCha).
-	wiiUCiphers := []uint16{
-		tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
-		tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
-		tls.TLS_RSA_WITH_AES_128_CBC_SHA,
-		tls.TLS_RSA_WITH_AES_256_CBC_SHA,
-		tls.TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA,
-		tls.TLS_RSA_WITH_3DES_EDE_CBC_SHA,
-	}
 
 	tlsCfg := &tls.Config{
 		// Default config for modern clients: TLS 1.2+ with standard cipher suites.
@@ -2306,6 +2415,7 @@ func startOLVProxy() {
 	}
 	tlsLn := tls.NewListener(ln, tlsCfg)
 	mux := http.NewServeMux()
+	mux.HandleFunc("boss.nicochristmann.net/", handleBossCapture) // TEMPORARY — see handleBossCapture doc comment.
 	mux.HandleFunc("/", handleOLV)
 	srv := &http.Server{Handler: mux}
 	log.Printf("OLV proxy listening on 127.0.0.1:7443")
