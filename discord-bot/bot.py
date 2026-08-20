@@ -5,11 +5,12 @@ import asyncio
 import base64
 import io
 import os
-from datetime import datetime, timedelta, timezone
+import random
+from datetime import datetime, time, timedelta, timezone
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 import psycopg2
 import aiohttp
 from aiohttp import web, ClientSession
@@ -30,9 +31,11 @@ if os.path.exists(_env_path):
 TOKEN           = os.environ["DISCORD_BOT_TOKEN"]
 GUILD_ID        = int(os.environ["DISCORD_GUILD_ID"])
 MEMBER_ROLE_ID  = int(os.environ["DISCORD_MEMBER_ROLE_ID"])
+MODERATOR_ROLE_ID = int(os.environ["DISCORD_MODERATOR_ROLE_ID"])
 MOD_LOG_ID          = int(os.environ.get("DISCORD_MOD_LOG_CHANNEL_ID", "0"))
 ACTIVITY_LOG_ID     = int(os.environ.get("DISCORD_ACTIVITY_LOG_CHANNEL_ID", "0"))
 RING_FALLBACK_CH_ID = int(os.environ.get("DISCORD_RING_FALLBACK_CHANNEL_ID", "0"))
+MII_OF_DAY_CHANNEL_ID = int(os.environ.get("DISCORD_MII_OF_THE_DAY_CHANNEL_ID", "0"))
 DB_URL          = os.environ.get("DATABASE_URL", "postgres://postgres:wiiu@localhost:5432/wiiuchat?sslmode=disable")
 RING_PORT       = int(os.environ.get("RING_HTTP_PORT", "9203"))
 
@@ -88,6 +91,19 @@ async def _activity_log(embed: discord.Embed):
     if ACTIVITY_LOG_ID and (ch := bot.get_channel(ACTIVITY_LOG_ID)):
         await ch.send(embed=embed)
 
+def is_moderator():
+    async def predicate(interaction: discord.Interaction) -> bool:
+        member = interaction.user
+        return isinstance(member, discord.Member) and any(r.id == MODERATOR_ROLE_ID for r in member.roles)
+    return app_commands.check(predicate)
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.CheckFailure):
+        await interaction.response.send_message("🚫 You need the Moderator role to use this command.", ephemeral=True)
+        return
+    raise error
+
 # ──────────────────────────────────────────────
 # Events
 # ──────────────────────────────────────────────
@@ -100,6 +116,8 @@ async def on_ready():
         print(f"[bot] slash commands synced: {[c.name for c in synced]}", flush=True)
     except Exception as e:
         print(f"[bot] slash command sync FAILED: {e}", flush=True)
+    if not mii_of_the_day.is_running():
+        mii_of_the_day.start()
 
 @bot.event
 async def on_member_join(member: discord.Member):
@@ -227,6 +245,17 @@ async def _fetch_pretendo_mii(pnid: str, session: ClientSession):
         return None, None
 
 
+async def _render_mii_png(mii_bytes: bytes, session: ClientSession):
+    """Render FFLStoreData to a PNG via the same backend /mii uses. Returns (img_data, error) —
+    exactly one of which is set."""
+    mii_b64 = base64.urlsafe_b64encode(mii_bytes).decode().rstrip("=")
+    render_url = f"https://mii-unsecure.ariankordi.net/miis/image.png?data={mii_b64}&width=2048&type=face&api_id=1"
+    async with session.get(render_url) as resp:
+        if resp.status != 200:
+            return None, f"Mii render API returned HTTP {resp.status}."
+        return await resp.read(), None
+
+
 @bot.tree.command(guild=_guild, name="mii", description="Render a Mii as a 2048×2048 image")
 @app_commands.describe(pnid="PNID to render (leave blank to use your linked PNID)")
 async def mii_cmd(interaction: discord.Interaction, pnid: str = ""):
@@ -282,13 +311,10 @@ async def mii_cmd(interaction: discord.Interaction, pnid: str = ""):
             )
             return
 
-        mii_b64 = base64.urlsafe_b64encode(mii_bytes).decode().rstrip("=")
-        render_url = f"https://mii-unsecure.ariankordi.net/miis/image.png?data={mii_b64}&width=2048&type=face&api_id=1"
-        async with session.get(render_url) as resp:
-            if resp.status != 200:
-                await interaction.followup.send(f"❌ Mii render API returned HTTP {resp.status}.", ephemeral=True)
-                return
-            img_data = await resp.read()
+        img_data, render_err = await _render_mii_png(mii_bytes, session)
+        if render_err:
+            await interaction.followup.send(f"❌ {render_err}", ephemeral=True)
+            return
 
     embed = discord.Embed(title=mii_name, color=0x7c3aed)
     embed.set_image(url="attachment://mii.png")
@@ -296,9 +322,69 @@ async def mii_cmd(interaction: discord.Interaction, pnid: str = ""):
     await interaction.followup.send(embed=embed, file=discord.File(io.BytesIO(img_data), filename="mii.png"))
 
 
+# ──────────────────────────────────────────────
+# Mii of the Day — daily post at 00:00 UTC
+# ──────────────────────────────────────────────
+
+def _pick_random_mii():
+    """Pick one random (pnid, mii_name, mii_bytes) from every PNID we have Mii data for,
+    across all three sources /mii falls back through. Returns None if none found."""
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT DISTINCT ON (pnid) pnid, mii_name, mii_data FROM (
+                    SELECT nnid AS pnid, mii_name, mii_data FROM user_settings
+                        WHERE mii_data IS NOT NULL AND nnid <> ''
+                    UNION ALL
+                    SELECT friend_nnid AS pnid, mii_name, mii_data FROM pretendo_friends
+                        WHERE mii_data IS NOT NULL AND friend_nnid <> ''
+                    UNION ALL
+                    SELECT pnid, mii_name, mii_data FROM mii_cache
+                        WHERE mii_data IS NOT NULL AND pnid <> ''
+                ) AS all_miis
+                ORDER BY pnid
+            """)
+            rows = cur.fetchall()
+    if not rows:
+        return None
+    pnid, mii_name, mii_data = random.choice(rows)
+    return pnid, (mii_name or pnid), bytes(mii_data)
+
+
+@tasks.loop(time=time(hour=0, minute=0, tzinfo=timezone.utc))
+async def mii_of_the_day():
+    if not MII_OF_DAY_CHANNEL_ID:
+        return
+    channel = bot.get_channel(MII_OF_DAY_CHANNEL_ID)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(MII_OF_DAY_CHANNEL_ID)
+        except discord.HTTPException as e:
+            print(f"[bot] mii_of_the_day: channel {MII_OF_DAY_CHANNEL_ID} not found: {e}", flush=True)
+            return
+
+    picked = _pick_random_mii()
+    if not picked:
+        print("[bot] mii_of_the_day: no PNIDs with Mii data found, skipping", flush=True)
+        return
+    pnid, mii_name, mii_bytes = picked
+
+    async with ClientSession() as session:
+        img_data, render_err = await _render_mii_png(mii_bytes, session)
+    if render_err:
+        print(f"[bot] mii_of_the_day: render failed for {pnid}: {render_err}", flush=True)
+        return
+
+    embed = discord.Embed(title="Mii of the Day", description=f"**{mii_name}**", color=0x7c3aed, timestamp=_now())
+    embed.set_image(url="attachment://mii.png")
+    embed.set_footer(text=f"PNID: {pnid}")
+    await channel.send(embed=embed, file=discord.File(io.BytesIO(img_data), filename="mii.png"))
+    print(f"[bot] mii_of_the_day: posted {pnid}", flush=True)
+
+
 @bot.tree.command(guild=_guild, name="whois", description="Look up the linked PNID for a Discord user")
 @app_commands.describe(user="The Discord user to look up")
-@app_commands.default_permissions(manage_messages=True)
+@is_moderator()
 async def whois(interaction: discord.Interaction, user: discord.Member):
     with db_conn() as conn:
         with conn.cursor() as cur:
@@ -315,7 +401,7 @@ async def whois(interaction: discord.Interaction, user: discord.Member):
 
 @bot.tree.command(guild=_guild, name="ban", description="Ban a member from the server")
 @app_commands.describe(user="Member to ban", reason="Reason for the ban", delete_days="Days of messages to delete (0–7)")
-@app_commands.default_permissions(ban_members=True)
+@is_moderator()
 async def ban_cmd(interaction: discord.Interaction, user: discord.Member, reason: str = "No reason provided", delete_days: int = 0):
     try:
         await user.send(f"🔨 You have been **banned** from **{interaction.guild.name}**.\nReason: {reason}")
@@ -332,7 +418,7 @@ async def ban_cmd(interaction: discord.Interaction, user: discord.Member, reason
 
 @bot.tree.command(guild=_guild, name="kick", description="Kick a member from the server")
 @app_commands.describe(user="Member to kick", reason="Reason for the kick")
-@app_commands.default_permissions(kick_members=True)
+@is_moderator()
 async def kick_cmd(interaction: discord.Interaction, user: discord.Member, reason: str = "No reason provided"):
     try:
         await user.send(f"👢 You have been **kicked** from **{interaction.guild.name}**.\nReason: {reason}")
@@ -349,7 +435,7 @@ async def kick_cmd(interaction: discord.Interaction, user: discord.Member, reaso
 
 @bot.tree.command(guild=_guild, name="timeout", description="Time out a member")
 @app_commands.describe(user="Member to time out", minutes="Duration in minutes (max 40320 = 28 days)", reason="Reason")
-@app_commands.default_permissions(moderate_members=True)
+@is_moderator()
 async def timeout_cmd(interaction: discord.Interaction, user: discord.Member, minutes: int, reason: str = "No reason provided"):
     until = _now() + timedelta(minutes=max(1, min(40320, minutes)))
     await user.timeout(until, reason=f"{interaction.user}: {reason}")
@@ -364,7 +450,7 @@ async def timeout_cmd(interaction: discord.Interaction, user: discord.Member, mi
 
 @bot.tree.command(guild=_guild, name="warn", description="Issue a warning to a member")
 @app_commands.describe(user="Member to warn", reason="Reason for the warning")
-@app_commands.default_permissions(manage_messages=True)
+@is_moderator()
 async def warn_cmd(interaction: discord.Interaction, user: discord.Member, reason: str):
     with db_conn() as conn:
         with conn.cursor() as cur:
@@ -391,7 +477,7 @@ async def warn_cmd(interaction: discord.Interaction, user: discord.Member, reaso
 
 @bot.tree.command(guild=_guild, name="warns", description="List warnings for a member")
 @app_commands.describe(user="Member to check")
-@app_commands.default_permissions(manage_messages=True)
+@is_moderator()
 async def warns_cmd(interaction: discord.Interaction, user: discord.Member):
     with db_conn() as conn:
         with conn.cursor() as cur:
@@ -411,7 +497,7 @@ async def warns_cmd(interaction: discord.Interaction, user: discord.Member):
 
 @bot.tree.command(guild=_guild, name="clear", description="Delete recent messages in this channel")
 @app_commands.describe(count="Number of messages to delete (1–100)")
-@app_commands.default_permissions(manage_messages=True)
+@is_moderator()
 async def clear_cmd(interaction: discord.Interaction, count: int):
     count = max(1, min(100, count))
     await interaction.response.defer(ephemeral=True)

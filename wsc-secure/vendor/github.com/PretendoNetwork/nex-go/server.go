@@ -14,6 +14,7 @@ import (
 	"net"
 	"runtime"
 	"sync"
+	"time"
 )
 
 // Server represents a PRUDP server
@@ -30,6 +31,7 @@ type Server struct {
 	supportedFunctions         int
 	fragmentSize               int16
 	resendTimeout              float32
+	maxPacketRetries           int
 	pingTimeout                int
 	kerberosPassword           string
 	kerberosKeySize            int
@@ -68,6 +70,8 @@ func (server *Server) Listen(address string) {
 	for i := 0; i < runtime.NumCPU(); i++ {
 		go server.listenDatagram(quit)
 	}
+
+	go server.startResendLoop()
 
 	logger.Success(fmt.Sprintf("PRUDP server listening on address - %s", udpAddress.String()))
 
@@ -126,6 +130,7 @@ func (server *Server) handleSocketMessage() error {
 	client.IncreasePingTimeoutTime(server.PingTimeout())
 
 	if packet.HasFlag(FlagAck) || packet.HasFlag(FlagMultiAck) {
+		server.processAcknowledgment(client, packet)
 		return nil
 	}
 
@@ -571,9 +576,78 @@ func (server *Server) SendFragment(packet PacketInterface, fragmentID uint8) {
 	packet.SetPayload(data)
 	packet.SetSequenceID(uint16(client.SequenceIDCounterOut().Increment()))
 
+	// packet.Bytes() encrypts the payload in place via the client's RC4 cipher, advancing
+	// its keystream. That must happen exactly once per packet, so the encoded bytes are
+	// captured here and reused verbatim by the resend loop rather than re-encoding.
 	encodedPacket := packet.Bytes()
 
+	if packet.Type() == DataPacket && packet.HasFlag(FlagReliable) && !packet.HasFlag(FlagAck) && !packet.HasFlag(FlagMultiAck) {
+		client.TrackPending(packet.SequenceID(), encodedPacket)
+	}
+
 	server.SendRaw(client.Address(), encodedPacket)
+}
+
+// startResendLoop periodically retries reliable packets that haven't been acknowledged.
+// UDP gives no delivery guarantee, and unlike the client's own PRUDP stack this server
+// otherwise sends every packet exactly once — a single lost packet (an RMC response, a
+// NAT-traversal probe forward, ...) would then stall permanently and the session would
+// die once the client's own patience with the unanswered call runs out, even though the
+// server itself never crashed or logged an error.
+func (server *Server) startResendLoop() {
+	interval := time.Duration(server.resendTimeout * float32(time.Second))
+	if interval <= 0 {
+		interval = 500 * time.Millisecond
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		server.clientsMu.RLock()
+		clients := make([]*Client, 0, len(server.clients))
+		for _, client := range server.clients {
+			clients = append(clients, client)
+		}
+		server.clientsMu.RUnlock()
+
+		for _, client := range clients {
+			client.ResendStalePackets(server, interval, server.maxPacketRetries)
+		}
+	}
+}
+
+// processAcknowledgment clears tracked reliable packets once the peer confirms receipt.
+// Mirrors the wire format AcknowledgePacket itself writes: a simple Ack carries the real
+// sequence ID in the packet header, while an aggregate MultiAck (used for DataPacket acks
+// once both sides negotiate minor version >= 2) sends header SequenceID 0 and encodes the
+// real substream/base-sequence/additional-IDs in the payload instead, acknowledging every
+// packet with sequence ID <= base as well as any explicitly listed additional IDs.
+func (server *Server) processAcknowledgment(client *Client, packet PacketInterface) {
+	if !packet.HasFlag(FlagMultiAck) {
+		client.AcknowledgePending(packet.SequenceID())
+		return
+	}
+
+	payload := packet.Payload()
+	if len(payload) < 4 {
+		return
+	}
+
+	stream := NewStreamIn(payload, server)
+	stream.ReadUInt8() // substream ID — always 0 for packets this server sends
+	additionalCount := stream.ReadUInt8()
+	baseSequenceID := stream.ReadUInt16LE()
+
+	var additional []uint16
+	for i := 0; i < int(additionalCount); i++ {
+		if stream.ByteCapacity()-stream.ByteOffset() < 2 {
+			break
+		}
+		additional = append(additional, stream.ReadUInt16LE())
+	}
+
+	client.AcknowledgePendingUpTo(baseSequenceID, additional)
 }
 
 // SendRaw writes raw packet data to the client socket
@@ -594,6 +668,7 @@ func NewServer() *Server {
 		prudpVersion:          1,
 		fragmentSize:          1300,
 		resendTimeout:         1.5,
+		maxPacketRetries:      10,
 		pingTimeout:           5,
 		kerberosKeySize:       32,
 		kerberosKeyDerivation: 0,

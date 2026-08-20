@@ -85,14 +85,73 @@ var tmplFuncs = template.FuncMap{
 		}
 		return ""
 	},
-	"matchTime": func(t time.Time) string {
-		now := time.Now()
-		if t.Year() == now.Year() && t.YearDay() == now.YearDay() {
-			return t.Format("15:04")
+	// localTime renders a time.Time as a <span> carrying the real UTC instant plus a
+	// UTC-formatted fallback (for no-JS clients / crawlers). localTimeScript then
+	// rewrites it client-side to the viewer's local wall-clock time, labeled "UTC+X"
+	// per the viewer's own offset — the server itself runs on Europe/Berlin time, so
+	// naively formatting server-local time and slapping "UTC" on it (the previous
+	// behavior) was simply wrong.
+	// layout: "date" (2006-01-02), "datetime" (2006-01-02 15:04), "datetime-sec"
+	// (2006-01-02 15:04:05), or "match" (15:04 if today, else "Jan 2, 15:04").
+	"localTime": func(t time.Time, layout string) template.HTML {
+		u := t.UTC()
+		var fallback string
+		switch layout {
+		case "date":
+			fallback = u.Format("2006-01-02")
+		case "datetime-sec":
+			fallback = u.Format("2006-01-02 15:04:05") + " UTC"
+		case "match":
+			now := time.Now().UTC()
+			if u.Year() == now.Year() && u.YearDay() == now.YearDay() {
+				fallback = u.Format("15:04") + " UTC"
+			} else {
+				fallback = u.Format("Jan 2, 15:04") + " UTC"
+			}
+		default:
+			layout = "datetime"
+			fallback = u.Format("2006-01-02 15:04") + " UTC"
 		}
-		return t.Format("Jan 2, 15:04")
+		return template.HTML(fmt.Sprintf(`<span class="ptime" data-utc="%s" data-layout="%s">%s</span>`,
+			u.Format(time.RFC3339), layout, template.HTMLEscapeString(fallback)))
 	},
 }
+
+// localTimeScript rewrites every .ptime span (see the localTime template func above)
+// from its server-rendered UTC fallback to the viewer's local wall-clock time, suffixed
+// with their own "UTC+X"/"UTC-X" offset. Kept as one shared snippet and appended into
+// each page template rather than duplicated per page.
+const localTimeScript = `<script>
+(function(){
+function two(n){return n<10?'0'+n:''+n;}
+var months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+function offsetLabel(d){
+  var m=-d.getTimezoneOffset();
+  var sign=m>=0?'+':'-';
+  m=Math.abs(m);
+  var h=Math.floor(m/60), mm=m%60;
+  return 'UTC'+sign+h+(mm?':'+two(mm):'');
+}
+function fmt(d, layout){
+  var Y=d.getFullYear(), M=d.getMonth()+1, D=d.getDate(), h=d.getHours(), mi=d.getMinutes(), s=d.getSeconds();
+  if (layout==='date') return Y+'-'+two(M)+'-'+two(D);
+  if (layout==='datetime-sec') return Y+'-'+two(M)+'-'+two(D)+' '+two(h)+':'+two(mi)+':'+two(s);
+  if (layout==='match'){
+    var now=new Date();
+    if (Y===now.getFullYear() && M===(now.getMonth()+1) && D===now.getDate()) return two(h)+':'+two(mi);
+    return months[M-1]+' '+D+', '+two(h)+':'+two(mi);
+  }
+  return Y+'-'+two(M)+'-'+two(D)+' '+two(h)+':'+two(mi);
+}
+document.querySelectorAll('.ptime').forEach(function(el){
+  var d = new Date(el.getAttribute('data-utc'));
+  if (isNaN(d.getTime())) return;
+  var layout = el.getAttribute('data-layout') || 'datetime';
+  var suffix = layout==='date' ? '' : (' ' + offsetLabel(d));
+  el.textContent = fmt(d, layout) + suffix;
+});
+})();
+</script>`
 
 const dbSchema = `
 CREATE TABLE IF NOT EXISTS redirects (
@@ -161,6 +220,10 @@ UPDATE redirects SET port = 60004 WHERE game_server_id = '1005A000' AND port IS 
 INSERT INTO redirects (type, from_host, to_host, game_server_id, port, access_mode)
 SELECT 'dns', 'account.pretendo.cc', '45.157.178.35', '1010EB00', 60002, 'whitelist'
 WHERE NOT EXISTS (SELECT 1 FROM redirects WHERE game_server_id = '1010EB00');
+
+INSERT INTO redirects (type, from_host, to_host, game_server_id, port, access_mode)
+SELECT 'dns', 'account.pretendo.cc', '45.157.178.35', '101D9D00', 60016, 'open'
+WHERE NOT EXISTS (SELECT 1 FROM redirects WHERE game_server_id = '101D9D00');
 `
 
 
@@ -767,7 +830,7 @@ tr:last-child td{border-bottom:none}
 <tr><th>Time</th><th>Sport</th><th>Host</th><th>Players</th></tr>
 {{range .Matches}}
 <tr>
-  <td class="mono" style="white-space:nowrap">{{matchTime .StartedAt}}</td>
+  <td class="mono" style="white-space:nowrap">{{localTime .StartedAt "match"}}</td>
   <td><span class="tag">{{.SportName}}</span></td>
   <td>{{if .HostPNID}}<strong>@{{.HostPNID}}</strong>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
   <td>{{range .Players}}{{.}} {{end}}</td>
@@ -787,6 +850,7 @@ function tick() {
 }
 setInterval(tick, 1000);
 </script>
+` + localTimeScript + `
 </body>
 </html>`))
 
@@ -1380,7 +1444,7 @@ h2{font-size:1rem;margin-bottom:.75rem;margin-top:2rem}
   <td>{{if .PNID}}<strong>{{.PNID}}</strong>{{else}}<span style="font-family:monospace;color:#999;font-size:.85rem">{{.PID}}</span>{{end}}</td>
   <td><span class="tag">{{gameTitleFull .GameServerID}}</span></td>
   <td style="color:#666">{{.Attempts}}</td>
-  <td style="font-size:.85rem;color:#666">{{.LastSeen.Format "2006-01-02 15:04 UTC"}}</td>
+  <td style="font-size:.85rem;color:#666">{{localTime .LastSeen "datetime"}}</td>
 </tr>
 {{else}}<tr><td colspan="4" style="color:#aaa">No pending requests</td></tr>
 {{end}}
@@ -1393,11 +1457,12 @@ h2{font-size:1rem;margin-bottom:.75rem;margin-top:2rem}
 <tr>
   <td>{{if .PNID}}<strong>{{.PNID}}</strong>{{else}}<span style="font-family:monospace;color:#999;font-size:.85rem">{{.PID}}</span>{{end}}</td>
   <td><span class="tag">{{gameTitleFull .GameServerID}}</span></td>
-  <td style="font-size:.85rem;color:#666">{{.RequestedAt.Format "2006-01-02 15:04:05 UTC"}}</td>
+  <td style="font-size:.85rem;color:#666">{{localTime .RequestedAt "datetime-sec"}}</td>
 </tr>
 {{else}}<tr><td colspan="3" style="color:#aaa">No requests yet</td></tr>
 {{end}}
 </table>
+` + localTimeScript + `
 </body>
 </html>`))
 
@@ -1799,7 +1864,7 @@ input[type=text]{border:1px solid #d1d5db;border-radius:4px;padding:.4rem .6rem;
 <tr>
   <td>{{if .PNID}}<strong>{{.PNID}}</strong><br><span style="font-family:monospace;color:#999;font-size:.75rem">{{.PID}}</span>{{else}}<span style="font-family:monospace;font-size:.85rem">{{.PID}}</span>{{end}}</td>
   <td>{{if .Note}}{{.Note}}{{else}}<span style="color:#aaa">—</span>{{end}}</td>
-  <td style="font-size:.8rem;color:#666">{{.CreatedAt.Format "2006-01-02 15:04"}}</td>
+  <td style="font-size:.8rem;color:#666">{{localTime .CreatedAt "datetime"}}</td>
   <td>
     <form method="post" action="/inkay/admin/users/delete" onsubmit="return confirm('Remove PID {{.PID}}?')">
       <input type="hidden" name="pid" value="{{.PID}}">
@@ -1832,6 +1897,7 @@ input[type=text]{border:1px solid #d1d5db;border-radius:4px;padding:.4rem .6rem;
   </div>
 </form>
 </fieldset>
+` + localTimeScript + `
 </body>
 </html>`))
 
@@ -1898,7 +1964,7 @@ func adminUserDelete(w http.ResponseWriter, r *http.Request) {
 
 // --- Ban management ---
 
-var bansTmpl = template.Must(template.New("bans").Parse(`<!DOCTYPE html>
+var bansTmpl = template.Must(template.New("bans").Funcs(tmplFuncs).Parse(`<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -1938,7 +2004,7 @@ input[type=text]{border:1px solid #d1d5db;border-radius:4px;padding:.4rem .6rem;
 <tr>
   <td>{{if .PNID}}<strong>{{.PNID}}</strong><br><span style="font-family:monospace;color:#999;font-size:.75rem">{{.PID}}</span>{{else}}<span style="font-family:monospace;font-size:.85rem">{{.PID}}</span>{{end}}</td>
   <td>{{if .Reason}}{{.Reason}}{{else}}<span style="color:#aaa">—</span>{{end}}</td>
-  <td style="font-size:.8rem;color:#666">{{.CreatedAt.Format "2006-01-02 15:04"}}</td>
+  <td style="font-size:.8rem;color:#666">{{localTime .CreatedAt "datetime"}}</td>
   <td>
     <form method="post" action="/inkay/admin/bans/remove" onsubmit="return confirm('Unban PID {{.PID}}?')">
       <input type="hidden" name="pid" value="{{.PID}}">
@@ -1969,6 +2035,7 @@ input[type=text]{border:1px solid #d1d5db;border-radius:4px;padding:.4rem .6rem;
   </div>
 </form>
 </fieldset>
+` + localTimeScript + `
 </body>
 </html>`))
 
@@ -2069,8 +2136,8 @@ input[type=text]{border:1px solid #d1d5db;border-radius:4px;padding:.3rem .5rem;
   <td>{{if .PNID}}<strong>{{.PNID}}</strong><br><span style="font-family:monospace;color:#999;font-size:.75rem">{{.PID}}</span>{{else}}<span style="font-family:monospace;font-size:.85rem">{{.PID}}</span>{{end}}</td>
   <td><span title="{{.GameServerID}}" style="font-size:.85rem">{{gameTitle .GameServerID}}</span></td>
   <td style="color:#666">{{.Attempts}}</td>
-  <td style="font-size:.8rem;color:#666">{{.FirstSeen.Format "2006-01-02 15:04"}}</td>
-  <td style="font-size:.8rem;color:#666">{{.LastSeen.Format "2006-01-02 15:04"}}</td>
+  <td style="font-size:.8rem;color:#666">{{localTime .FirstSeen "datetime"}}</td>
+  <td style="font-size:.8rem;color:#666">{{localTime .LastSeen "datetime"}}</td>
   <td>
     <div class="approve-row">
       <form method="post" action="/inkay/admin/review/approve" style="display:flex;gap:.3rem;align-items:center">
@@ -2096,6 +2163,7 @@ input[type=text]{border:1px solid #d1d5db;border-radius:4px;padding:.3rem .5rem;
 {{else}}<tr><td colspan="6" style="color:#aaa">Queue is empty</td></tr>
 {{end}}
 </table>
+` + localTimeScript + `
 </body>
 </html>`))
 
@@ -2444,7 +2512,7 @@ button.logout-btn{background:none;border:none;color:#dc2626;font-size:.875rem;cu
   <td style="font-size:.8rem;color:#888">@{{.PNID}}</td>
   <td>{{if .IsOnline}}<span class="badge-on">Online</span>{{else}}<span class="badge-off">Offline</span>{{end}}</td>
   <td style="font-size:.85rem">{{with resolveGameName .TitleID .GameServerHex}}{{.}}{{else}}<span style="color:#aaa">—</span>{{end}}</td>
-  <td style="font-size:.8rem;color:#aaa">{{if .LastOnline.Valid}}{{.LastOnline.Time.Format "Jan 2, 15:04"}}{{else}}—{{end}}</td>
+  <td style="font-size:.8rem;color:#aaa">{{if .LastOnline.Valid}}{{localTime .LastOnline.Time "match"}}{{else}}—{{end}}</td>
 </tr>
 {{end}}
 </table>
@@ -2458,6 +2526,7 @@ function tick() {
 }
 setInterval(tick, 1000);
 </script>
+` + localTimeScript + `
 </body>
 </html>`))
 

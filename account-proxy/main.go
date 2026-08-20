@@ -54,6 +54,7 @@ type activeRedirect struct {
 }
 
 var mongoDB *mongo.Database
+var wscMongoDB *mongo.Database
 
 type nexToken struct {
 	XMLName     xml.Name `xml:"nex_token"`
@@ -206,6 +207,7 @@ func main() {
 		log.Fatalf("mongo connect: %v", err)
 	}
 	mongoDB = mongoClient.Database("pretendo")
+	wscMongoDB = mongoClient.Database("wsc")
 	log.Printf("connected to MongoDB")
 
 	refreshRedirects()
@@ -501,6 +503,8 @@ func handle(w http.ResponseWriter, r *http.Request) {
 				handleABSWNexToken(w, r, rd.ToHost, rd.Port, rd.AccessMode)
 			case "00003200":
 				handleFriendsNexToken(w, r, rd.ToHost, rd.Port, rd.AccessMode)
+			case "101D9D00":
+				handleMinecraftNexToken(w, r, rd.ToHost, rd.Port, rd.AccessMode)
 			default:
 				proxyAndCachePID(w, r)
 			}
@@ -949,6 +953,66 @@ func handleABSWNexToken(w http.ResponseWriter, r *http.Request, host string, por
 	w.Write(body)
 }
 
+func upsertMinecraftAccount(pretendoPID uint32, token string) {
+	col := wscMongoDB.Collection("minecraft_nexaccounts")
+	username := fmt.Sprintf("%d", pretendoPID)
+	_, err := col.UpdateOne(
+		context.Background(),
+		bson.D{{Key: "username", Value: username}},
+		bson.D{{Key: "$set", Value: bson.D{
+			{Key: "username", Value: username},
+			{Key: "pid", Value: int32(pretendoPID)},
+			{Key: "nex_password", Value: token},
+		}}},
+		options.Update().SetUpsert(true),
+	)
+	if err != nil {
+		log.Printf("upsert minecraft account: %v", err)
+	}
+}
+
+func handleMinecraftNexToken(w http.ResponseWriter, r *http.Request, host string, port uint16, accessMode string) {
+	ip := realIP(r)
+	pid := fetchRealPID(r)
+
+	if pid != 0 && checkBanned(pid) {
+		log.Printf("Minecraft: PID=%d is banned, proxying to Pretendo", pid)
+		proxyAndCachePID(w, r)
+		return
+	}
+
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		http.Error(w, "token error", 500)
+		return
+	}
+	token := fmt.Sprintf("%x", b)
+
+	if pid != 0 {
+		upsertMinecraftAccount(pid, token)
+		db.Exec(`INSERT INTO relay_requests (pid, game_server_id) VALUES ($1, $2)`, pid, "101D9D00")
+	}
+	log.Printf("mc_token for %s: PID=%d token=%s…", ip, pid, token[:8])
+
+	tkn := nexToken{
+		Host:        host,
+		NexPassword: token,
+		PID:         pid,
+		Port:        port,
+		Token:       token,
+	}
+	body, err := xml.MarshalIndent(tkn, "", "  ")
+	if err != nil {
+		http.Error(w, "encode error", 500)
+		return
+	}
+	body = append([]byte(xml.Header), body...)
+	w.Header().Set("Content-Type", "application/xml")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
+	w.WriteHeader(http.StatusOK)
+	w.Write(body)
+}
+
 // proxyAndCachePID forwards any non-WiiU-Chat nex_token request to Pretendo and
 // caches the returned PID so handleNexToken can use it for the same client IP.
 func proxyAndCachePID(w http.ResponseWriter, r *http.Request) {
@@ -1061,8 +1125,11 @@ func uploadMiiImages(pid uint32, tgaURL string) {
 	tgaData, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	// Convert TGA → PNG via imagemagick
-	cmd := exec.Command("convert", "-flip", "tga:-", "png:-")
+	// Convert TGA → PNG via imagemagick. No -flip: Pretendo's source TGA is already
+	// top-down: added -flip previously inverted it, storing every Mii upside down on
+	// the CDN (confirmed 2026-08-19 by comparing convert output with/without -flip
+	// against a real fetched .tga).
+	cmd := exec.Command("convert", "tga:-", "png:-")
 	cmd.Stdin = bytes.NewReader(tgaData)
 	pngData, err := cmd.Output()
 	if err != nil {

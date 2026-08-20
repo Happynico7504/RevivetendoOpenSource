@@ -20,3 +20,8 @@ grpc-stubs/account
 grpc-stubs/cmd/account/account
 wsc-authentication/wii-sports-club-authentication
 wsc-secure/wii-sports-club-secure
+minecraft-authentication/minecraft-authentication
+minecraft-secure/minecraft-secure
+
+# convenience symlink to the top-level (gitignored) certs/ dir
+account-proxy/certs

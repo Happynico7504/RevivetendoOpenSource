@@ -29,6 +29,18 @@ type Client struct {
 	pingCheckTimer            *time.Timer
 	pingKickTimer             *time.Timer
 	connected                 bool
+	pendingMu                 sync.Mutex
+	pendingPackets            map[uint16]*pendingPacket
+}
+
+// pendingPacket is a reliable packet awaiting acknowledgement. data holds the already
+// RC4-encrypted, fully encoded wire bytes — resends must reuse them as-is via SendRaw,
+// never re-run Bytes(), since re-encoding a DataPacket advances the RC4 keystream again
+// and would desync the cipher from what the client expects.
+type pendingPacket struct {
+	data    []byte
+	sentAt  time.Time
+	retries int
 }
 
 // Reset resets the Client to default values
@@ -48,6 +60,77 @@ func (client *Client) Reset() {
 	}
 
 	client.SetConnected(false)
+
+	client.pendingMu.Lock()
+	client.pendingPackets = make(map[uint16]*pendingPacket)
+	client.pendingMu.Unlock()
+}
+
+// TrackPending registers an already-encoded reliable packet for retransmission until
+// it is acknowledged or exceeds its retry budget.
+func (client *Client) TrackPending(sequenceID uint16, data []byte) {
+	client.pendingMu.Lock()
+	defer client.pendingMu.Unlock()
+
+	if client.pendingPackets == nil {
+		client.pendingPackets = make(map[uint16]*pendingPacket)
+	}
+
+	client.pendingPackets[sequenceID] = &pendingPacket{data: data, sentAt: time.Now()}
+}
+
+// AcknowledgePending removes a single tracked packet, identified by the sequence ID
+// carried in a simple (non-aggregate) Ack packet's header.
+func (client *Client) AcknowledgePending(sequenceID uint16) {
+	client.pendingMu.Lock()
+	defer client.pendingMu.Unlock()
+
+	delete(client.pendingPackets, sequenceID)
+}
+
+// AcknowledgePendingUpTo removes every tracked packet whose sequence ID is <= base
+// (the cumulative-ack semantics PRUDP's aggregate MultiAck uses), plus any additional
+// sequence IDs listed explicitly for selective acknowledgement of out-of-order packets.
+func (client *Client) AcknowledgePendingUpTo(base uint16, additional []uint16) {
+	client.pendingMu.Lock()
+	defer client.pendingMu.Unlock()
+
+	for seq := range client.pendingPackets {
+		if seq <= base {
+			delete(client.pendingPackets, seq)
+		}
+	}
+
+	for _, seq := range additional {
+		delete(client.pendingPackets, seq)
+	}
+}
+
+// ResendStalePackets resends any tracked packet that has been unacknowledged for at
+// least timeout, dropping it once it has been retried maxRetries times. Packets are
+// resent verbatim via SendRaw — see the pendingPacket doc comment for why.
+func (client *Client) ResendStalePackets(server *Server, timeout time.Duration, maxRetries int) {
+	now := time.Now()
+
+	client.pendingMu.Lock()
+	var toResend [][]byte
+	for seq, p := range client.pendingPackets {
+		if now.Sub(p.sentAt) < timeout {
+			continue
+		}
+		if p.retries >= maxRetries {
+			delete(client.pendingPackets, seq)
+			continue
+		}
+		p.retries++
+		p.sentAt = now
+		toResend = append(toResend, p.data)
+	}
+	client.pendingMu.Unlock()
+
+	for _, data := range toResend {
+		server.SendRaw(client.Address(), data)
+	}
 }
 
 // Address returns the clients UDP address

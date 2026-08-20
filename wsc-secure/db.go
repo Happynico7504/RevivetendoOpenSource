@@ -49,9 +49,14 @@ func dbUpsertSession(pid uint32, urls []string, ip, port string) {
 	sessionsCol.UpdateOne(context.Background(), filter, update, options.Update().SetUpsert(true))
 }
 
-// cleanupStaleGatherings runs every 10 seconds and removes open gatherings
-// whose host PID is no longer in connectedPIDs. This catches abrupt disconnects
-// (game crash, power-off) faster than waiting for the PRUDP keep-alive timeout.
+// cleanupStaleGatherings runs every 10 seconds and reconciles open gatherings against
+// connectedPIDs. If the host is gone, the whole gathering is purged (a dead host means
+// no one can join or resolve session URLs anyway). Otherwise, any non-host player who
+// dropped out of connectedPIDs is pruned individually via dbLeaveGathering, so the
+// players/player_count shown on the dashboard stay accurate for joiners too, not just
+// hosts. This is a faster/redundant path on top of the PRUDP ping-timeout-driven
+// Disconnect handler (see SetPingTimeout in main.go), which still runs as the source
+// of truth for connectedPIDs itself.
 func cleanupStaleGatherings() {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
@@ -71,6 +76,18 @@ func cleanupStaleGatherings() {
 			if _, ok := connectedPIDs.Load(host); !ok {
 				gatheringsCol.DeleteOne(ctx, bson.D{{Key: "gid", Value: gid}})
 				fmt.Printf("CleanupGathering: purged stale gid=%d (host PID=%d offline)\n", gid, host)
+				continue
+			}
+			players, _ := d["players"].(bson.A)
+			for _, p := range players {
+				pid := uint32(p.(int64))
+				if pid == host {
+					continue
+				}
+				if _, ok := connectedPIDs.Load(pid); !ok {
+					dbLeaveGathering(gid, pid)
+					fmt.Printf("CleanupGathering: pruned stale player PID=%d from gid=%d\n", pid, gid)
+				}
 			}
 		}
 	}
@@ -110,13 +127,16 @@ func dbUpdateSessionURL(pid uint32, oldURL, newURL string) {
 }
 
 func dbFindGathering(gameMode uint32, requesterNatm uint32) uint32 {
-	// Match on sport type (top byte only) — lower bytes encode region/settings which differ
-	// between players in the same sport, e.g. 0x03022800 (EU) vs 0x03012400 (NA) are both bowling
-	sportType := int64(gameMode >> 24)
+	// Byte 3: sport type, Byte 2: sub-mode/round state (must match — e.g. golfers matched
+	// together carry the same value here as it climbs in lockstep through holes), Byte 1:
+	// region (ignored — confirmed constant per player across sports, e.g. 0x24 for NA
+	// accounts vs 0x28 for EU, not tied to game mode), Byte 0: always 0.
+	// Match on sport+sub-mode but not region so cross-region play works within the same mode.
+	matchKey := int64(gameMode & 0xFFFF0000)
 	ctx := context.Background()
 
 	filter := bson.D{
-		{Key: "sport_type", Value: sportType},
+		{Key: "match_key", Value: matchKey},
 		{Key: "open", Value: true},
 	}
 	// Only match gatherings whose host has a compatible NAT type.
@@ -169,6 +189,7 @@ func dbNewGathering(hostPID, gameMode, maxPlayers, hostNatm uint32) uint32 {
 			{Key: "host_natm", Value: int64(hostNatm)},
 			{Key: "game_mode", Value: gameMode},
 			{Key: "sport_type", Value: int64(gameMode >> 24)},
+			{Key: "match_key", Value: int64(gameMode & 0xFFFF0000)},
 			{Key: "max_players", Value: maxPlayers},
 			{Key: "player_count", Value: int64(1)},
 			{Key: "players", Value: bson.A{hostPID}},

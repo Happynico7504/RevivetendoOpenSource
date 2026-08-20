@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -236,6 +237,123 @@ type joinRecord struct {
 // After 3 consecutive quick-exits from any joiner, the gathering is closed.
 var gatheringFailCount sync.Map // uint32 gid → int
 
+// lastPacketAt tracks, per PID, the last time ANY inbound packet was seen (Data, Ack,
+// MultiAck, Ping, Disconnect — every type, same signal client.IncreasePingTimeoutTime
+// in vendor/nex-go already resets on). Pure diagnostics, no behavior change: after
+// confirming (2026-08-19) that real WSC clients never ack a server-sent PRUDP ping, we
+// need real per-session gap data before shrinking SetPingTimeout(3600) with confidence.
+// Cleared on Disconnect (main loop below) so a PID's next session starts a fresh
+// baseline instead of reporting one bogus multi-hour "gap" across the reconnect.
+var lastPacketAt sync.Map // uint32 pid → time.Time
+
+func packetTypeName(t uint16) string {
+	switch t {
+	case nex.SynPacket:
+		return "Syn"
+	case nex.ConnectPacket:
+		return "Connect"
+	case nex.DataPacket:
+		return "Data"
+	case nex.DisconnectPacket:
+		return "Disconnect"
+	case nex.PingPacket:
+		return "Ping"
+	default:
+		return fmt.Sprintf("Type%d", t)
+	}
+}
+
+func packetFlagsStr(packet *nex.PacketV1) string {
+	var flags []string
+	if packet.HasFlag(nex.FlagAck) {
+		flags = append(flags, "Ack")
+	}
+	if packet.HasFlag(nex.FlagMultiAck) {
+		flags = append(flags, "MultiAck")
+	}
+	if packet.HasFlag(nex.FlagReliable) {
+		flags = append(flags, "Reliable")
+	}
+	if packet.HasFlag(nex.FlagNeedsAck) {
+		flags = append(flags, "NeedsAck")
+	}
+	if len(flags) == 0 {
+		return "-"
+	}
+	return strings.Join(flags, "+")
+}
+
+// logPacketGaps records a PacketGap line whenever a PID goes quiet for a while and then
+// sends something — the raw material for figuring out how long a genuinely-connected
+// (not just-not-yet-timed-out) WSC client can go silent. Registered on the generic
+// "Packet" event, which vendor/nex-go's handleSocketMessage already emits for every
+// packet type after updating the same idle timer SetPingTimeout drives.
+func logPacketGaps(packet *nex.PacketV1) {
+	pid := packet.Sender().PID()
+	if pid == 0 {
+		return
+	}
+	now := time.Now()
+	prev, hadPrev := lastPacketAt.Load(pid)
+	lastPacketAt.Store(pid, now)
+	if !hadPrev {
+		return
+	}
+	gap := now.Sub(prev.(time.Time))
+	if gap < 5*time.Second {
+		return
+	}
+	fmt.Printf("PacketGap: PID=%d gap=%s type=%s flags=%s\n",
+		pid, gap.Round(time.Second), packetTypeName(packet.Type()), packetFlagsStr(packet))
+}
+
+// staleIdleThreshold is how long a connected PID can go without ANY inbound packet
+// before watchStaleConnections treats it as gone. 15s is 3x the observed real client
+// cadence (~5-10s self-initiated Ping, p90=9s, holds even mid-match — see PacketGap
+// logs). Validated in shadow mode 2026-08-19 through a full bowling match: the active
+// participants held a rock-solid ~5s cadence with zero false flags, while abandoned
+// sessions sat idle and climbing with no PacketGap at all. Loosen this if real-world
+// jitter (bad WiFi, packet loss) ever produces false positives on genuinely-connected
+// players.
+const staleIdleThreshold = 15 * time.Second
+
+// watchStaleConnections is the replacement for the vendor ping/kick mechanism, which
+// has an unsynchronized data race on pingKickTimer (client.go) that makes short
+// SetPingTimeout values unsafe — see feedback_wsc_ping_timeout memory. This checks
+// every PID we believe is connected against lastPacketAt on a plain ticker, no
+// timer-callback races involved.
+//
+// On timeout, mirrors the Disconnect handler's cleanup (connectedPIDs/currentClient/
+// lastPacketAt deletion, dbLeaveAllGatherings, dbDeleteSession) but deliberately does
+// NOT call server.Kick() — no need to touch the live PRUDP session, only our own
+// bookkeeping. That asymmetry is the point: a false positive here just means the
+// player briefly drops off the dashboard / out of a gathering and self-heals on their
+// next packet, rather than actually severing their connection like Kick() would.
+func watchStaleConnections() {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		now := time.Now()
+		connectedPIDs.Range(func(k, _ interface{}) bool {
+			pid := k.(uint32)
+			last, ok := lastPacketAt.Load(pid)
+			if !ok {
+				return true
+			}
+			idleFor := now.Sub(last.(time.Time))
+			if idleFor <= staleIdleThreshold {
+				return true
+			}
+			fmt.Printf("StaleDisconnect: PID=%d idleFor=%s — cleaning up gatherings and session (PRUDP session itself untouched)\n", pid, idleFor.Round(time.Second))
+			currentClient.Delete(pid)
+			connectedPIDs.Delete(pid)
+			lastPacketAt.Delete(pid)
+			dbLeaveAllGatherings(pid)
+			dbDeleteSession(pid)
+			return true
+		})
+	}
+}
 
 // --- Internal HTTP status endpoint (127.0.0.1:9015) for relay-admin dashboard ---
 
@@ -359,6 +477,7 @@ func main() {
 	connectDB()
 	go startStatusServer()
 	go cleanupStaleGatherings()
+	go watchStaleConnections()
 
 	nexServer = nex.NewServer()
 	nexServer.SetPRUDPVersion(1)
@@ -367,8 +486,15 @@ func main() {
 	nexServer.SetMatchMakingProtocolVersion(&nex.NEXVersion{Major: 3, Minor: 4, Patch: 0})
 	nexServer.SetKerberosPassword(os.Getenv("KERBEROS_PASSWORD"))
 	nexServer.SetAccessKey("4d324052")
-	// 3600s: a 3-player 9-hole golf round can take 90 minutes.
-	// Ping check fires after 3600s, kick after another 3600s = 2-hour window.
+	// 3600s: CONFIRMED (2026-08-19) that real WSC clients never answer a server-initiated
+	// PRUDP ping — SendPing/Kick was tried at a 10s timeout and kicked every connected
+	// player after ~20s of no outbound traffic, live-connected or not. So this timeout
+	// is NOT a liveness check here, just a very-loose safety net; do not shorten it
+	// without evidence the client actually acks pings. A 3-player 9-hole golf round can
+	// take 90 minutes, hence the size. For abrupt disconnects (crash, power-off, dead
+	// WiFi) there is currently no fast signal at all — cleanup only happens once this
+	// 2-hour timer finally kicks the client. Clean quits (explicit DISC packet) are
+	// detected immediately via the Disconnect handler below, independent of this timer.
 	nexServer.SetPingTimeout(3600)
 
 	nexServer.On("Connect", func(packet *nex.PacketV1) {
@@ -429,9 +555,12 @@ func main() {
 		fmt.Printf("Disconnect: PID=%d — cleaning up gatherings and session\n", pid)
 		connectedPIDs.Delete(pid)
 		// pidNATm/pidNATf intentionally kept — NAT type is stable across reconnects
+		lastPacketAt.Delete(pid) // reset the gap-logging baseline for this PID's next session
 		dbLeaveAllGatherings(pid)
 		dbDeleteSession(pid)
 	})
+
+	nexServer.On("Packet", logPacketGaps)
 
 	nexServer.On("Data", func(packet *nex.PacketV1) {
 		request := packet.RMCRequest()
