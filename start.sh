@@ -60,8 +60,8 @@ autostart() {
 	shift
 	while true; do
 		"$@" >>"$log" 2>&1 || true
-		echo "[$(date -Iseconds)] process exited (code $?), restarting in 5s..." >>"$log"
-		sleep 5
+		echo "[$(date -Iseconds)] process exited (code $?), restarting in 45s..." >>"$log"
+		sleep 45
 	done
 }
 
