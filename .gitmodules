@@ -17,6 +17,3 @@
 [submodule "mk8-secure"]
 	path = mk8-secure
 	url = git@github.com:Happynico7504/mario-kart-8-secure.git
-[submodule "minecraft"]
-	path = minecraft
-	url = https://github.com/Happynico7504/Minecraft-Wii-U-Edition-public-minigame-server
