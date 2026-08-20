@@ -529,7 +529,7 @@ func handle(w http.ResponseWriter, r *http.Request) {
 				if hash := authHash(r); hash != "" {
 					storePIDInDB(hash, p.PID)
 					storeMiiName(p.PID, p.Mii.Name)
-					go uploadMiiImages(p.PID, p.Mii.ImageURL)
+					go uploadMiiImages(p.PID, p.Mii.Data)
 				}
 				if p.PNID != "" {
 					db.Exec(`INSERT INTO pnid_cache (pid, pnid)
@@ -1090,11 +1090,16 @@ var miiExpressions = map[string]string{
 	"sorrow.png":              "sorrow",
 }
 
-// uploadMiiImages downloads the Mii image from Pretendo's CDN (TGA format),
-// converts it to PNG via imagemagick, and uploads all expression variants to S3.
-// Skips if the images are already present in S3 to avoid redundant CDN requests.
-func uploadMiiImages(pid uint32, tgaURL string) {
-	if s3Endpoint == "" || s3AccessKey == "" || tgaURL == "" {
+// uploadMiiImages renders each expression in miiExpressions from the user's raw
+// FFLStoreData and uploads them to S3. Pretendo's own CDN only ever serves a single
+// static "standard" face render (no per-expression endpoint exists there), so all
+// expressions are rendered via mii-unsecure.ariankordi.net — the same public render
+// backend the Discord /mii command uses — passing the expression names as its
+// `expression` query param (confirmed against its own render form: values like
+// smile_open_mouth/wink_left/surprise_open_mouth/frustrated/sorrow match exactly).
+// Skips if the images are already present in S3 to avoid redundant re-rendering.
+func uploadMiiImages(pid uint32, miiDataB64 string) {
+	if s3Endpoint == "" || s3AccessKey == "" || miiDataB64 == "" {
 		return
 	}
 	s3c, err := minio.New(s3Endpoint, &minio.Options{
@@ -1112,33 +1117,36 @@ func uploadMiiImages(pid uint32, tgaURL string) {
 			return // already uploaded and fresh
 		}
 	}
-	resp, err := http.Get(tgaURL)
-	if err != nil || resp.StatusCode != 200 {
-		if resp != nil {
-			resp.Body.Close()
-			log.Printf("uploadMiiImages: cdn fetch pid=%d status=%d url=%s", pid, resp.StatusCode, tgaURL)
-		} else {
-			log.Printf("uploadMiiImages: cdn fetch pid=%d err=%v", pid, err)
-		}
-		return
-	}
-	tgaData, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
 
-	// Convert TGA → PNG via imagemagick. No -flip: Pretendo's source TGA is already
-	// top-down: added -flip previously inverted it, storing every Mii upside down on
-	// the CDN (confirmed 2026-08-19 by comparing convert output with/without -flip
-	// against a real fetched .tga).
-	cmd := exec.Command("convert", "tga:-", "png:-")
-	cmd.Stdin = bytes.NewReader(tgaData)
-	pngData, err := cmd.Output()
+	miiBytes, err := base64.StdEncoding.DecodeString(miiDataB64)
 	if err != nil {
-		log.Printf("uploadMiiImages: convert pid=%d: %v", pid, err)
+		log.Printf("uploadMiiImages: decode mii data pid=%d: %v", pid, err)
 		return
 	}
+	renderDataParam := base64.RawURLEncoding.EncodeToString(miiBytes)
 
-	// Upload the same PNG for all expression filenames (we only have one source image)
-	for filename := range miiExpressions {
+	for filename, expression := range miiExpressions {
+		renderURL := fmt.Sprintf(
+			"https://mii-unsecure.ariankordi.net/miis/image.png?data=%s&width=128&type=face&expression=%s&api_id=1",
+			renderDataParam, expression,
+		)
+		resp, err := http.Get(renderURL)
+		if err != nil {
+			log.Printf("uploadMiiImages: render fetch pid=%d expression=%s: %v", pid, expression, err)
+			continue
+		}
+		if resp.StatusCode != 200 {
+			log.Printf("uploadMiiImages: render fetch pid=%d expression=%s status=%d", pid, expression, resp.StatusCode)
+			resp.Body.Close()
+			continue
+		}
+		pngData, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			log.Printf("uploadMiiImages: read render pid=%d expression=%s: %v", pid, expression, readErr)
+			continue
+		}
+
 		key := fmt.Sprintf("mii/%d/%s", pid, filename)
 		_, err = s3c.PutObject(
 			context.Background(), s3Bucket, key,
@@ -1229,7 +1237,7 @@ func fetchRealPID(r *http.Request) uint32 {
 			if hash != "" {
 				storePIDInDB(hash, p.PID)
 				storeMiiName(p.PID, p.Mii.Name)
-					go uploadMiiImages(p.PID, p.Mii.ImageURL)
+					go uploadMiiImages(p.PID, p.Mii.Data)
 			}
 			log.Printf("fetchRealPID: PID=%d via profile fetch (stored)", p.PID)
 			return p.PID
@@ -1580,7 +1588,7 @@ func initMiiImages() {
 			continue
 		}
 		storeMiiName(prof.PID, prof.Mii.Name)
-		uploadMiiImages(prof.PID, prof.Mii.ImageURL)
+		uploadMiiImages(prof.PID, prof.Mii.Data)
 		log.Printf("initMiiImages: done for %s (PID=%d)", username, prof.PID)
 	}
 }
