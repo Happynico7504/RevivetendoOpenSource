@@ -2489,7 +2489,7 @@ button.logout-btn{background:none;border:none;color:#dc2626;font-size:.875rem;cu
 </div>
 <h1>My Status</h1>
 <div class="me">
-  <img class="mii" src="https://cdn.pretendo.cc/miiverse/mii/{{.PID}}/normal_face.png" alt="" onerror="this.style.display='none'">
+  <img class="mii" src="https://sos-de-fra-1.exo.io/olv-data/mii/{{.PID}}/normal_face.png" alt="" onerror="this.style.display='none'">
   <div class="me-info">
     <div class="me-name">{{if .MiiName}}{{.MiiName}}{{else}}{{.PNID}}{{end}}</div>
     <div class="me-pnid">@{{.PNID}}</div>
@@ -2506,7 +2506,7 @@ button.logout-btn{background:none;border:none;color:#dc2626;font-size:.875rem;cu
 {{range .Friends}}
 <tr>
   <td style="width:38px;padding-right:0">
-    <img class="friend-mii" src="https://cdn.pretendo.cc/miiverse/mii/{{.PID}}/normal_face.png" alt="" onerror="this.style.display='none'">
+    <img class="friend-mii" src="https://sos-de-fra-1.exo.io/olv-data/mii/{{.PID}}/normal_face.png" alt="" onerror="this.style.display='none'">
   </td>
   <td>{{if .MiiName}}{{.MiiName}}{{else}}<span style="color:#aaa">—</span>{{end}}</td>
   <td style="font-size:.8rem;color:#888">@{{.PNID}}</td>

@@ -247,6 +247,7 @@ func main() {
 	}()
 
 	go startOLVProxy()
+	go initMiiImages()
 
 	addr := "0.0.0.0:6666"
 	log.Printf("account proxy listening on %s (TLS)", addr)
@@ -1565,6 +1566,10 @@ func pretendoFetchProfile(deviceID, serial, deviceCert, token string) (profilePe
 }
 
 // initMiiImages runs once at startup to upload Mii images for all registered users.
+// Paced at one user/minute — even a 2s delay between users still hit Pretendo's OAuth
+// rate limit (confirmed 2026-08-20: 186 devices, 126-135 hit 429 Too Many Requests
+// across two attempts). Runs fully in the background (go initMiiImages() in main()),
+// so a 186-device backfill taking ~3h doesn't block or slow anything else down.
 func initMiiImages() {
 	rows, err := db.Query(`SELECT username, device_id, serial, device_cert, pw_hash FROM wii_devices WHERE device_cert != '' AND pw_hash != ''`)
 	if err != nil {
@@ -1572,7 +1577,12 @@ func initMiiImages() {
 		return
 	}
 	defer rows.Close()
+	first := true
 	for rows.Next() {
+		if !first {
+			time.Sleep(1 * time.Minute)
+		}
+		first = false
 		var username, deviceID, serial, deviceCert, pwHash string
 		if err := rows.Scan(&username, &deviceID, &serial, &deviceCert, &pwHash); err != nil {
 			continue
