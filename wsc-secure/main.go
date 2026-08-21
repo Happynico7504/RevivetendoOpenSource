@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -61,6 +62,72 @@ func dsAlloc(ownerPID uint32, p *datastore.DataStorePreparePostParam) *dsObject 
 		Size:      p.Size,
 		Created:   now,
 		Updated:   now,
+	}
+	dsStore.Store(id, obj)
+	go dsSave()
+	return obj
+}
+
+// dsClubRegionPrefix looks up the player's own DataStore profile object
+// (DataType 3, updated by the in-game club-selection screen via ChangeMeta)
+// and derives the region prefix WSC's SearchObject tags use ("eu_"/"us_").
+// Byte 0x5b of that 312-byte blob carries the club's region/country code —
+// confirmed against the already-documented matchmaking region byte (see
+// dbFindGathering's comment: 0x24 = NA, ~0x28 = EU) across 13 real captured
+// player profiles: PID 1672988155 (NA) = 0x24 exactly; every EU account
+// (including Nico's own, confirmed via live "eu_033_ave" etc. search calls
+// right after selecting Germany/Bavaria) clusters at 0x25/0x28/0x29. JP
+// hasn't been observed yet, so anything that isn't the NA byte defaults to
+// "eu" for now — revisit once a JP account's byte value is captured.
+func dsClubRegionPrefix(ownerPID uint32) string {
+	var region byte
+	found := false
+	dsStore.Range(func(_, v interface{}) bool {
+		obj := v.(*dsObject)
+		if obj.OwnerPID == ownerPID && obj.DataType == 3 && len(obj.MetaBinary) > 0x5b {
+			region = obj.MetaBinary[0x5b]
+			found = true
+			return false
+		}
+		return true
+	})
+	if !found {
+		return "eu"
+	}
+	if region == 0x24 {
+		return "us"
+	}
+	return "eu"
+}
+
+// dsAllocRankingScore registers an UploadScore call as a searchable DataStore
+// object. The sport-code portion of the tag (groups[0], zero-padded to 3
+// digits) is confirmed against real SearchObject calls (e.g. groups=[32,...]
+// exactly matches a live "us_032_ave" search). The category→stat-type
+// (base_rank/ave/vs_record) mapping is still a first-pass guess — see
+// handleUploadScore's comment.
+func dsAllocRankingScore(ownerPID, category, score uint32, param uint64, groups []byte) *dsObject {
+	id := atomic.AddUint64(&dsNextID, 1) - 1
+	now := time.Now()
+	regionPrefix := dsClubRegionPrefix(ownerPID)
+	tags := []string{fmt.Sprintf("category_%d", category)}
+	if len(groups) > 0 {
+		tags = append(tags, fmt.Sprintf("%s_%03d_category_%d", regionPrefix, groups[0], category))
+	}
+	for _, g := range groups {
+		tags = append(tags, fmt.Sprintf("group_%d", g))
+	}
+	metaBinary := make([]byte, 8)
+	binary.LittleEndian.PutUint32(metaBinary[0:], score)
+	binary.LittleEndian.PutUint32(metaBinary[4:], uint32(param))
+	obj := &dsObject{
+		DataID:     id,
+		OwnerPID:   ownerPID,
+		DataType:   0xFFFF,
+		MetaBinary: metaBinary,
+		Tags:       tags,
+		Created:    now,
+		Updated:    now,
 	}
 	dsStore.Store(id, obj)
 	go dsSave()
@@ -595,13 +662,18 @@ func main() {
 		if request.ProtocolID() == ranking.ProtocolID {
 			switch request.MethodID() {
 			case ranking.MethodUploadScore:
-				go sendResponse(packet.Sender(), ranking.ProtocolID, request.CallID(), ranking.MethodUploadScore, []byte{})
-			case ranking.MethodUploadCommonData:
-				pid := packet.Sender().PID()
+				client := packet.Sender()
 				callID := request.CallID()
+				params := request.Parameters()
 				go func() {
-					fmt.Printf("UploadCommonData: PID=%d\n", pid)
-					sendResponse(packet.Sender(), ranking.ProtocolID, callID, ranking.MethodUploadCommonData, []byte{})
+					handleUploadScore(client, callID, params)
+				}()
+			case ranking.MethodUploadCommonData:
+				client := packet.Sender()
+				callID := request.CallID()
+				params := request.Parameters()
+				go func() {
+					handleUploadCommonData(client, callID, params)
 				}()
 			default:
 				go sendResponse(packet.Sender(), ranking.ProtocolID, request.CallID(), request.MethodID(), []byte{})
@@ -903,6 +975,96 @@ func postMetaBinary(err error, client *nex.Client, callID uint32, param *datasto
 	rmcResponseStream := nex.NewStreamOut(nexServer)
 	rmcResponseStream.WriteStructure(info)
 	sendResponse(client, datastore.ProtocolID, callID, datastore.MethodPostMetaBinary, rmcResponseStream.Bytes())
+}
+
+// handleUploadScore parses a real Ranking::UploadScore call (RankingScoreData,
+// wire format per NintendoClients' nintendo.nex.ranking — no structure-header
+// wrapper, matching this server's nex.struct_header=False setup):
+//
+//	category:    u32 LE
+//	score:       u32 LE
+//	order:       u8
+//	update_mode: u8
+//	groups:      u32 LE count, then N x u8
+//	param:       u64 LE
+//	unique_id:   u64 LE  (top-level field after the structure)
+//
+// Persists it to Mongo (ranking_scores) and also registers it as a DataStore
+// object so live SearchObject calls can find it. The tag used for that is a
+// first-pass guess (category-derived) — real WSC search calls use tags like
+// "eu_base_rank"/"eu_033_ave" that we haven't reverse-engineered the mapping
+// for yet. Once real category/groups values are captured from actual
+// gameplay, correlate them against the SearchObject tags requested right
+// after and fix the mapping here.
+func handleUploadScore(client *nex.Client, callID uint32, params []byte) {
+	pid := client.PID()
+	if len(params) < 18 {
+		fmt.Printf("UploadScore: PID=%d params too short (%d bytes), acking anyway\n", pid, len(params))
+		sendResponse(client, ranking.ProtocolID, callID, ranking.MethodUploadScore, []byte{})
+		return
+	}
+	off := 0
+	category := binary.LittleEndian.Uint32(params[off:])
+	off += 4
+	score := binary.LittleEndian.Uint32(params[off:])
+	off += 4
+	order := params[off]
+	off++
+	updateMode := params[off]
+	off++
+	groupCount := binary.LittleEndian.Uint32(params[off:])
+	off += 4
+	if off+int(groupCount) > len(params) {
+		fmt.Printf("UploadScore: PID=%d malformed groups (count=%d), acking anyway\n", pid, groupCount)
+		sendResponse(client, ranking.ProtocolID, callID, ranking.MethodUploadScore, []byte{})
+		return
+	}
+	groups := append([]byte{}, params[off:off+int(groupCount)]...)
+	off += int(groupCount)
+	if off+16 > len(params) {
+		fmt.Printf("UploadScore: PID=%d missing param/unique_id, acking anyway\n", pid)
+		sendResponse(client, ranking.ProtocolID, callID, ranking.MethodUploadScore, []byte{})
+		return
+	}
+	param := binary.LittleEndian.Uint64(params[off:])
+	off += 8
+	uniqueID := binary.LittleEndian.Uint64(params[off:])
+
+	fmt.Printf("UploadScore: PID=%d category=%d score=%d order=%d updateMode=%d groups=%v param=%d uniqueID=%d\n",
+		pid, category, score, order, updateMode, groups, param, uniqueID)
+
+	dbInsertRankingScore(pid, category, score, order, updateMode, groups, param, uniqueID)
+
+	obj := dsAllocRankingScore(pid, category, score, param, groups)
+	fmt.Printf("UploadScore: PID=%d stored as DataStore DataID=%d tags=%v\n", pid, obj.DataID, obj.Tags)
+
+	sendResponse(client, ranking.ProtocolID, callID, ranking.MethodUploadScore, []byte{})
+}
+
+// handleUploadCommonData parses a real Ranking::UploadCommonData call:
+// commonData is a length-prefixed buffer (u32 LE size + bytes), followed by
+// a u64 LE unique_id.
+func handleUploadCommonData(client *nex.Client, callID uint32, params []byte) {
+	pid := client.PID()
+	if len(params) < 4 {
+		fmt.Printf("UploadCommonData: PID=%d params too short, acking anyway\n", pid)
+		sendResponse(client, ranking.ProtocolID, callID, ranking.MethodUploadCommonData, []byte{})
+		return
+	}
+	size := binary.LittleEndian.Uint32(params[0:])
+	if 4+int(size)+8 > len(params) {
+		fmt.Printf("UploadCommonData: PID=%d malformed buffer (size=%d), acking anyway\n", pid, size)
+		sendResponse(client, ranking.ProtocolID, callID, ranking.MethodUploadCommonData, []byte{})
+		return
+	}
+	commonData := append([]byte{}, params[4:4+size]...)
+	uniqueID := binary.LittleEndian.Uint64(params[4+size:])
+
+	fmt.Printf("UploadCommonData: PID=%d size=%d uniqueID=%d data=%x\n", pid, size, uniqueID, commonData)
+
+	dbInsertRankingCommonData(pid, commonData, uniqueID)
+
+	sendResponse(client, ranking.ProtocolID, callID, ranking.MethodUploadCommonData, []byte{})
 }
 
 func prepareGetObject(err error, client *nex.Client, callID uint32, param *datastore.DataStorePrepareGetParam) {

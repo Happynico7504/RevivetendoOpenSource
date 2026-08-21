@@ -15,6 +15,8 @@ import (
 var sessionsCol *mongo.Collection
 var gatheringsCol *mongo.Collection
 var matchHistoryCol *mongo.Collection
+var rankingScoresCol *mongo.Collection
+var rankingCommonDataCol *mongo.Collection
 
 func connectDB() {
 	uri := os.Getenv("MONGO_URI")
@@ -32,10 +34,45 @@ func connectDB() {
 	sessionsCol = db.Collection("sessions")
 	gatheringsCol = db.Collection("gatherings")
 	matchHistoryCol = db.Collection("match_history")
+	rankingScoresCol = db.Collection("ranking_scores")
+	rankingCommonDataCol = db.Collection("ranking_common_data")
 	// Clear stale data from previous run — all clients disconnect when the server restarts
 	sessionsCol.DeleteMany(context.Background(), bson.D{})
 	gatheringsCol.DeleteMany(context.Background(), bson.D{})
-	// match_history is intentionally not cleared — we want history across restarts
+	// match_history, ranking_scores, ranking_common_data are intentionally not
+	// cleared — we want history across restarts
+}
+
+// dbInsertRankingScore persists a real UploadScore call. category/groups/param
+// are logged verbatim (not yet mapped to DataStore search tags — see the
+// comment above handleUploadScore in main.go) so real values from actual
+// gameplay can be used to reverse-engineer that mapping.
+func dbInsertRankingScore(pid uint32, category, score uint32, order, updateMode uint8, groups []uint8, param, uniqueID uint64) {
+	groupInts := make([]int32, len(groups))
+	for i, g := range groups {
+		groupInts[i] = int32(g)
+	}
+	rankingScoresCol.InsertOne(context.Background(), bson.D{
+		{Key: "pid", Value: pid},
+		{Key: "category", Value: category},
+		{Key: "score", Value: score},
+		{Key: "order", Value: order},
+		{Key: "update_mode", Value: updateMode},
+		{Key: "groups", Value: groupInts},
+		{Key: "param", Value: int64(param)},
+		{Key: "unique_id", Value: int64(uniqueID)},
+		{Key: "created_at", Value: time.Now().Unix()},
+	})
+}
+
+// dbInsertRankingCommonData persists a real UploadCommonData call.
+func dbInsertRankingCommonData(pid uint32, commonData []byte, uniqueID uint64) {
+	rankingCommonDataCol.InsertOne(context.Background(), bson.D{
+		{Key: "pid", Value: pid},
+		{Key: "common_data", Value: commonData},
+		{Key: "unique_id", Value: int64(uniqueID)},
+		{Key: "created_at", Value: time.Now().Unix()},
+	})
 }
 
 func dbUpsertSession(pid uint32, urls []string, ip, port string) {
