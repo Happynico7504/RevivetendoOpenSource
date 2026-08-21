@@ -103,8 +103,14 @@ func dsClubRegionPrefix(ownerPID uint32) string {
 // dsAllocRankingScore registers an UploadScore call as a searchable DataStore
 // object. The sport-code portion of the tag (groups[0], zero-padded to 3
 // digits) is confirmed against real SearchObject calls (e.g. groups=[32,...]
-// exactly matches a live "us_032_ave" search). The category→stat-type
-// (base_rank/ave/vs_record) mapping is still a first-pass guess — see
+// exactly matches a live "us_032_ave" search). groups[0]==0xFF (255) is the
+// "no specific sport" sentinel — real captures show it's used for the
+// sport-less "eu_base_rank" search, vs a real sport code for the per-sport
+// "eu_NNN_ave"/"eu_NNN_vs_record" searches. The category→stat-type mapping
+// within a family (e.g. which of 2000/2020/2040 is "ave" vs "vs_record")
+// isn't confirmed yet, so both real-format tags get applied to every score
+// in a per-sport batch for now — makes the search actually find something
+// rather than being precisely correct about which category is which. See
 // handleUploadScore's comment.
 func dsAllocRankingScore(ownerPID, category, score uint32, param uint64, groups []byte) *dsObject {
 	id := atomic.AddUint64(&dsNextID, 1) - 1
@@ -113,6 +119,14 @@ func dsAllocRankingScore(ownerPID, category, score uint32, param uint64, groups 
 	tags := []string{fmt.Sprintf("category_%d", category)}
 	if len(groups) > 0 {
 		tags = append(tags, fmt.Sprintf("%s_%03d_category_%d", regionPrefix, groups[0], category))
+		if groups[0] == 0xFF {
+			tags = append(tags, fmt.Sprintf("%s_base_rank", regionPrefix))
+		} else {
+			tags = append(tags,
+				fmt.Sprintf("%s_%03d_ave", regionPrefix, groups[0]),
+				fmt.Sprintf("%s_%03d_vs_record", regionPrefix, groups[0]),
+			)
+		}
 	}
 	for _, g := range groups {
 		tags = append(tags, fmt.Sprintf("group_%d", g))
@@ -205,6 +219,53 @@ func dsLoad() {
 		atomic.StoreUint64(&dsNextID, snap.NextID)
 	}
 	fmt.Printf("DataStore loaded: %d objects, nextID=%d\n", len(snap.Objects), snap.NextID)
+}
+
+// migrateRankingScoreTags backfills the real "eu_base_rank"/"eu_NNN_ave"/
+// "eu_NNN_vs_record"-format tags (added to dsAllocRankingScore after the
+// fact) onto ranking-score objects stored before that fix, by parsing the
+// sport code back out of their existing "group_N" debug tags. Without this,
+// scores already uploaded tonight would stay permanently unfindable by
+// SearchObject until the same player uploads again.
+func migrateRankingScoreTags() {
+	migrated := 0
+	dsStore.Range(func(_, v interface{}) bool {
+		obj := v.(*dsObject)
+		if obj.DataType != 0xFFFF || len(obj.Tags) == 0 {
+			return true
+		}
+		hasRealTag := false
+		var sportCode int = -1
+		for _, t := range obj.Tags {
+			if strings.HasSuffix(t, "_base_rank") || strings.HasSuffix(t, "_ave") || strings.HasSuffix(t, "_vs_record") {
+				hasRealTag = true
+			}
+			if strings.HasPrefix(t, "group_") {
+				if n, err := strconv.Atoi(strings.TrimPrefix(t, "group_")); err == nil && sportCode == -1 {
+					sportCode = n
+				}
+			}
+		}
+		if hasRealTag || sportCode == -1 {
+			return true
+		}
+		regionPrefix := dsClubRegionPrefix(obj.OwnerPID)
+		if sportCode == 0xFF {
+			obj.Tags = append(obj.Tags, fmt.Sprintf("%s_base_rank", regionPrefix))
+		} else {
+			obj.Tags = append(obj.Tags,
+				fmt.Sprintf("%s_%03d_ave", regionPrefix, sportCode),
+				fmt.Sprintf("%s_%03d_vs_record", regionPrefix, sportCode),
+			)
+		}
+		dsStore.Store(obj.DataID, obj)
+		migrated++
+		return true
+	})
+	if migrated > 0 {
+		fmt.Printf("migrateRankingScoreTags: backfilled real-format tags on %d object(s)\n", migrated)
+		go dsSave()
+	}
 }
 
 // dsSeedProfiles seeds real BPFC player profiles recovered from the old community
@@ -540,6 +601,7 @@ var nexServer *nex.Server
 
 func main() {
 	dsLoad()
+	migrateRankingScoreTags()
 	dsSeedProfiles()
 	connectDB()
 	go startStatusServer()
