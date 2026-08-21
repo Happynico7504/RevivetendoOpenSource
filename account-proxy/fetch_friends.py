@@ -398,7 +398,13 @@ async def fetch_friends(pid: int, nex_password: str, auth_host: str, auth_port: 
                             print(f"  unknown pending command: {method}", flush=True)
                         processed_ids.append(cmd_id)
                     except Exception as e:
-                        print(f"  error processing command {method}: {e}", flush=True)
+                        # remove_friend on someone already not in the list is a no-op,
+                        # not a real failure — clear it instead of retrying forever.
+                        if method == "remove_friend" and "NotInMyFriendList" in str(e):
+                            print(f"  remove_friend target_pid={args.get('target_pid')}: already not a friend, clearing", flush=True)
+                            processed_ids.append(cmd_id)
+                        else:
+                            print(f"  error processing command {method}: {e}", flush=True)
                 if processed_ids:
                     cur.execute(
                         "DELETE FROM pending_pretendo_commands WHERE id = ANY(%s)",

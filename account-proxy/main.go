@@ -411,43 +411,49 @@ func generateJuxtServiceToken(pid uint32) (string, error) {
 	return base64.StdEncoding.EncodeToString(append(checksumBytes, encrypted...)), nil
 }
 
+// handleServiceToken mints a Juxt-scoped service token locally whenever we already have
+// a PID for the caller, regardless of which client_id/service requested it. We used to
+// proxy this to Pretendo's real account server first and only substitute our own token on
+// success (see git history), but the response's only field we ever kept was the token
+// itself - everything else got discarded on marshal - and Pretendo's real server outright
+// rejects some client_ids it never registered (e.g. Miiverse/OLV, code 0004 "invalid
+// application credentials"), which broke those flows with no working fallback to lose.
+// Bans are already enforced independently at the NEX/game-token layer (checkBanned), not
+// here, so skipping the upstream call entirely doesn't remove that protection.
 func handleServiceToken(w http.ResponseWriter, r *http.Request) {
 	pid := fetchRealPID(r)
-	body, status, headers, err := doUpstream(r)
-	if err != nil {
-		log.Printf("service_token: upstream error: %v", err)
-		http.Error(w, "upstream error", 502)
-		return
-	}
-	if status != http.StatusOK || pid == 0 {
-		if pid == 0 {
-			log.Printf("service_token: no PID cached for %s, passing Pretendo token (Juxt will reject)", realIP(r))
+
+	if pid == 0 {
+		// No cached PID (e.g. never seen this device before) - we can't mint a token
+		// without one, so this is the one case where asking Pretendo can still help.
+		body, status, headers, err := doUpstream(r)
+		if err != nil {
+			log.Printf("service_token: upstream error: %v", err)
+			http.Error(w, "upstream error", 502)
+			return
 		}
+		log.Printf("service_token: no PID cached for %s, passing Pretendo token (Juxt will reject)", realIP(r))
 		writeResponse(w, status, headers, body)
 		return
 	}
+
 	ourToken, err := generateJuxtServiceToken(pid)
 	if err != nil {
-		log.Printf("service_token: generate error: %v, falling back", err)
-		writeResponse(w, status, headers, body)
+		log.Printf("service_token: generate error for PID=%d: %v", pid, err)
+		http.Error(w, "token generation error", http.StatusInternalServerError)
 		return
 	}
-	var resp serviceTokenResp
-	if err := xml.Unmarshal(body, &resp); err != nil {
-		log.Printf("service_token: parse error: %v, falling back", err)
-		writeResponse(w, status, headers, body)
-		return
-	}
-	resp.Token = ourToken
-	newBody, err := xml.MarshalIndent(resp, "", "  ")
+	body, err := xml.MarshalIndent(serviceTokenResp{Token: ourToken}, "", "  ")
 	if err != nil {
-		log.Printf("service_token: marshal error: %v, falling back", err)
-		writeResponse(w, status, headers, body)
+		log.Printf("service_token: marshal error for PID=%d: %v", pid, err)
+		http.Error(w, "token generation error", http.StatusInternalServerError)
 		return
 	}
-	newBody = append([]byte(xml.Header), newBody...)
-	log.Printf("service_token: injected Juxt token for PID=%d", pid)
-	writeResponse(w, status, headers, newBody)
+	body = append([]byte(xml.Header), body...)
+	log.Printf("service_token: minted local token for PID=%d client_id=%s (Pretendo upstream skipped)", pid, r.URL.Query().Get("client_id"))
+	w.Header().Set("Content-Type", "text/xml")
+	w.WriteHeader(http.StatusOK)
+	w.Write(body)
 }
 
 func storeDeviceHeaders(username, pwHash string, r *http.Request) {
@@ -1883,6 +1889,7 @@ func handleInternalAuth(w http.ResponseWriter, r *http.Request) {
 	}
 	if webPwHash == "" {
 		log.Printf("internal/auth: no web password set for %q", userID)
+		fail("no web password set for this account", 401)
 		return
 	}
 
@@ -1892,28 +1899,30 @@ func handleInternalAuth(w http.ResponseWriter, r *http.Request) {
 	if hex.EncodeToString(entered[:]) != webPwHash {
 		log.Printf("internal/auth: wrong web password for %q", userID)
 		var pid uint32
-		db.QueryRow(`SELECT pid FROM pid_cache WHERE pnid = $1`, userID).Scan(&pid)
+		db.QueryRow(`SELECT pid FROM pnid_cache WHERE pnid = $1`, userID).Scan(&pid)
 		db.Exec(`INSERT INTO web_logins (pid, ip, success) VALUES ($1, $2, FALSE)`, pid, ip)
 		fail("invalid username or password", 401)
 		return
 	}
 
-	token, err := pretendoOAuthToken(userID, deviceID, serial, deviceCert, pwHash)
-	if err != nil {
-		log.Printf("internal/auth: pretendo oauth failed for %q: %v", userID, err)
+	// Password matched locally - derive the PID from cache instead of asking Pretendo.
+	// The only thing this endpoint's caller (grpc-stubs' apiLogin) reads from our response
+	// is pid/pnid (access_token is discarded), so there's nothing Pretendo-specific left to
+	// fetch here. This matters because the whole point of web_password_hash is to grant
+	// Juxt access independent of Pretendo account state - a banned-from-Pretendo user (who
+	// may get unbanned later but still wants Juxt access now) would otherwise pass the
+	// local check above and then get rejected anyway by a real Pretendo OAuth call.
+	var pid uint32
+	db.QueryRow(`SELECT pid FROM pnid_cache WHERE pnid = $1`, userID).Scan(&pid)
+	if pid == 0 {
+		log.Printf("internal/auth: no cached PID for %q, cannot authenticate locally", userID)
 		fail("authentication failed", 401)
 		return
 	}
-	prof, err := pretendoFetchProfile(deviceID, serial, deviceCert, token)
-	if err != nil {
-		log.Printf("internal/auth: profile failed for %q: %v", userID, err)
-		fail("failed to fetch profile", 502)
-		return
-	}
 
-	db.Exec(`INSERT INTO web_logins (pid, ip, success) VALUES ($1, $2, TRUE)`, prof.PID, ip)
-	log.Printf("internal/auth: authenticated %s (PID %d) from %s", prof.PNID, prof.PID, ip)
-	fmt.Fprintf(w, `{"pid":%d,"pnid":%q,"access_token":%q}`, prof.PID, prof.PNID, token)
+	db.Exec(`INSERT INTO web_logins (pid, ip, success) VALUES ($1, $2, TRUE)`, pid, ip)
+	log.Printf("internal/auth: authenticated %s (PID %d) from %s (local, Pretendo skipped)", userID, pid, ip)
+	fmt.Fprintf(w, `{"pid":%d,"pnid":%q,"access_token":""}`, pid, userID)
 }
 
 // ── Cached Pretendo token for internal use ─────────────────────
@@ -2549,7 +2558,11 @@ func handleOLV(w http.ResponseWriter, r *http.Request) {
 }
 
 // startOLVProxy starts a TLS 1.0+ capable HTTPS proxy on port 7443 for OLV.
-// Nginx stream passes olv.nicochristmann.net and discovery.olv.nintendo.net TCP here.
+// Nginx stream passes olv.nicochristmann.net, discovery.olv.nintendo.net, and
+// api.olv.nintendo.net TCP here - the latter is hit directly by nn_olv for
+// community/post calls (GET .../v1/communities/*/posts, POST .../v1/posts), not
+// just the discovery bootstrap, per real endpoint captures shared on the Pretendo
+// forum. Inkay's DNS hook redirects it the same way as discovery.olv.nintendo.net.
 func startOLVProxy() {
 	baseCerts := "/nico-pretendo-bridge/certs"
 	olvCert, err := tls.LoadX509KeyPair(baseCerts+"/olv-nicochristmann-net.crt", baseCerts+"/olv-nicochristmann-net.key")
@@ -2559,6 +2572,10 @@ func startOLVProxy() {
 	nintendoCert, err := tls.LoadX509KeyPair(baseCerts+"/discovery-olv-nintendo-net.crt", baseCerts+"/discovery-olv-nintendo-net.key")
 	if err != nil {
 		log.Fatalf("nintendo discovery cert: %v", err)
+	}
+	nintendoAPICert, err := tls.LoadX509KeyPair(baseCerts+"/api-olv-nintendo-net.crt", baseCerts+"/api-olv-nintendo-net.key")
+	if err != nil {
+		log.Fatalf("nintendo api cert: %v", err)
 	}
 	pretendoCert, err := tls.LoadX509KeyPair(baseCerts+"/discovery-olv-pretendo-cc.crt", baseCerts+"/discovery-olv-pretendo-cc.key")
 	if err != nil {
@@ -2574,6 +2591,8 @@ func startOLVProxy() {
 		switch chi.ServerName {
 		case "discovery.olv.nintendo.net":
 			return &nintendoCert, nil
+		case "api.olv.nintendo.net":
+			return &nintendoAPICert, nil
 		case "discovery.olv.pretendo.cc":
 			return &pretendoCert, nil
 		case "boss.nicochristmann.net":
