@@ -6,6 +6,7 @@ import base64
 import io
 import os
 import random
+import secrets
 from datetime import datetime, time, timedelta, timezone
 
 import discord
@@ -218,6 +219,62 @@ async def link_pnid(interaction: discord.Interaction, code: str):
         ephemeral=True,
     )
     print(f"[bot] linked discord_id={interaction.user.id} ({interaction.user}) → pnid={pnid}", flush=True)
+
+
+_ACCOUNT_PROXY_SET_PASSWORD_URL = "http://127.0.0.1:9191/internal/web/set-password"
+
+@bot.tree.command(guild=_guild, name="reset_web_password", description="Reset your Juxt/relay-admin web password (only works if one is already set)")
+async def reset_web_password(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT username, web_password_hash FROM wii_devices WHERE discord_id = %s", (str(interaction.user.id),))
+            row = cur.fetchone()
+    if not row:
+        await interaction.followup.send("❌ No PNID linked. Use `/link_pnid` first.", ephemeral=True)
+        return
+    pnid, web_password_hash = row
+    if not web_password_hash:
+        await interaction.followup.send(
+            "❌ You don't have a web password set yet — this command only resets an existing one. Ask an admin to set one for you first.",
+            ephemeral=True,
+        )
+        return
+
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pid FROM pnid_cache WHERE pnid = %s", (pnid,))
+            pid_row = cur.fetchone()
+    if not pid_row:
+        await interaction.followup.send("❌ Couldn't resolve your PID — try again later or contact an admin.", ephemeral=True)
+        return
+    pid = pid_row[0]
+
+    new_password = secrets.token_urlsafe(12)
+    try:
+        async with ClientSession() as session:
+            async with session.post(
+                _ACCOUNT_PROXY_SET_PASSWORD_URL,
+                data={"pid": str(pid), "password": new_password},
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    print(f"[bot] reset_web_password: HTTP {resp.status} for PID {pid}: {text}", flush=True)
+                    await interaction.followup.send("❌ Failed to reset password, try again later.", ephemeral=True)
+                    return
+    except Exception as e:
+        print(f"[bot] reset_web_password error for PID {pid}: {e}", flush=True)
+        await interaction.followup.send("❌ Failed to reset password, try again later.", ephemeral=True)
+        return
+
+    await interaction.followup.send(
+        f"✅ Your web password for **{pnid}** has been reset.\nNew password: `{new_password}`\n"
+        "Save it now — it won't be shown again.",
+        ephemeral=True,
+    )
+    print(f"[bot] reset_web_password: pnid={pnid} via discord_id={interaction.user.id}", flush=True)
 
 
 _ACCOUNT_PROXY_MII_URL = "http://127.0.0.1:9191/internal/mii"
