@@ -70,36 +70,42 @@ func dsAlloc(ownerPID uint32, p *datastore.DataStorePreparePostParam) *dsObject 
 	return obj
 }
 
-// dsClubRegionPrefix looks up the player's own DataStore profile object
-// (DataType 3, updated by the in-game club-selection screen via ChangeMeta)
-// and derives the region prefix WSC's SearchObject tags use ("eu_"/"us_").
-// Byte 0x5b of that 312-byte blob carries the club's region/country code —
-// confirmed against the already-documented matchmaking region byte (see
-// dbFindGathering's comment: 0x24 = NA, ~0x28 = EU) across 13 real captured
-// player profiles: PID 1672988155 (NA) = 0x24 exactly; every EU account
-// (including Nico's own, confirmed via live "eu_033_ave" etc. search calls
-// right after selecting Germany/Bavaria) clusters at 0x25/0x28/0x29. JP
-// hasn't been observed yet, so anything that isn't the NA byte defaults to
-// "eu" for now — revisit once a JP account's byte value is captured.
+// dsClubRegionPrefix derives the region prefix WSC's SearchObject tags use
+// ("eu_"/"us_") from the DataType of the player's own club-selection profile
+// object (updated via ChangeMeta) - DataType 2 = US (Americas cart), DataType
+// 3 = EU (matches dsSeedProfiles' real recovered-community-server seeds,
+// which are explicitly labelled by DataType this same way).
+//
+// The previous version of this function tried to read a "region byte" at
+// offset 0x5b of the 312-byte blob instead, based on a single confirmed NA
+// sample cross-referenced against an unrelated matchmaking-region comment.
+// That byte turned out NOT to encode region at all: a live-confirmed EU
+// account (Nico, via Germany/Bavaria) and a live-confirmed US account (real
+// player "nick" - client observed searching "us_032_ave" etc.) both had the
+// exact same byte value (0x29) at that offset, while their profile objects'
+// DataType correctly differed (3 vs 2 respectively). "nick" was invisible to
+// the old byte-based check entirely, since it only ever looked at DataType-3
+// objects - his real profile lives under DataType 2, so lookups for his PID
+// always fell through to "not found" -> "eu", even though his uploaded
+// scores needed "us_" tags to be findable by his own client's searches.
 func dsClubRegionPrefix(ownerPID uint32) string {
-	var region byte
-	found := false
+	prefix := "eu"
 	dsStore.Range(func(_, v interface{}) bool {
 		obj := v.(*dsObject)
-		if obj.OwnerPID == ownerPID && obj.DataType == 3 && len(obj.MetaBinary) > 0x5b {
-			region = obj.MetaBinary[0x5b]
-			found = true
+		if obj.OwnerPID != ownerPID {
+			return true
+		}
+		switch obj.DataType {
+		case 2:
+			prefix = "us"
+			return false
+		case 3:
+			prefix = "eu"
 			return false
 		}
 		return true
 	})
-	if !found {
-		return "eu"
-	}
-	if region == 0x24 {
-		return "us"
-	}
-	return "eu"
+	return prefix
 }
 
 // dsAllocRankingScore registers an UploadScore call as a searchable DataStore
@@ -267,6 +273,59 @@ func migrateRankingScoreTags() {
 	if migrated > 0 {
 		fmt.Printf("migrateRankingScoreTags: backfilled real-format tags on %d object(s)\n", migrated)
 		go dsSave()
+	}
+}
+
+// migrateRankingScoreRegions fixes ranking-score tags computed with the old
+// broken region heuristic (see dsClubRegionPrefix's comment) - a score tagged
+// with the wrong eu_/us_ prefix is permanently unfindable by the owner's own
+// client's SearchObject calls until they upload again, which may never
+// happen for a rarely-played sport. Rewrites any mismatched tag in place
+// using each object's now-correctly-derived region prefix.
+func migrateRankingScoreRegions() {
+	fixed := 0
+	dsStore.Range(func(_, v interface{}) bool {
+		obj := v.(*dsObject)
+		if obj.DataType != 0xFFFF || obj.OwnerPID == 0 {
+			return true
+		}
+		correct := dsClubRegionPrefix(obj.OwnerPID)
+		wrong := "eu"
+		if correct == "eu" {
+			wrong = "us"
+		}
+		changed := false
+		for i, t := range obj.Tags {
+			if strings.HasPrefix(t, wrong+"_") {
+				obj.Tags[i] = correct + "_" + strings.TrimPrefix(t, wrong+"_")
+				changed = true
+			}
+		}
+		if changed {
+			dsStore.Store(obj.DataID, obj)
+			fixed++
+		}
+		return true
+	})
+	if fixed > 0 {
+		fmt.Printf("migrateRankingScoreRegions: fixed region prefix on %d object(s)\n", fixed)
+		go dsSave()
+	}
+}
+
+// watchRankingScoreRegions re-runs migrateRankingScoreRegions() periodically instead
+// of only once at startup. A player's profile object can transiently lose its real
+// DataType (2/3) - e.g. a server-side DataStore reset while their console still thinks
+// the object exists sends a plain ChangeMeta instead of a fresh create, which recreates
+// it with DataType 0 (see project_wsc_ranking_persistence memory). Any scores uploaded
+// while that's the case get mistagged. Once the player goes back into the in-game club
+// screen and reselects (fixing their DataType), this ticker picks up the correction
+// without needing a full service restart.
+func watchRankingScoreRegions() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		migrateRankingScoreRegions()
 	}
 }
 
@@ -604,12 +663,15 @@ var nexServer *nex.Server
 func main() {
 	dsLoad()
 	migrateRankingScoreTags()
+	migrateRankingScoreRegions()
 	dsSeedProfiles()
 	connectDB()
 	loadRankingStoreFromMongo()
+	dsReplayRankingScoresFromMongo()
 	go startStatusServer()
 	go cleanupStaleGatherings()
 	go watchStaleConnections()
+	go watchRankingScoreRegions()
 
 	nexServer = nex.NewServer()
 	nexServer.SetPRUDPVersion(1)
@@ -1216,6 +1278,55 @@ func loadRankingStoreFromMongo() {
 		rankingAdd(pid, category, score, groups, param, uniqueID)
 	}
 	fmt.Printf("loadRankingStoreFromMongo: loaded %d ranking entries\n", len(rankingStore))
+}
+
+// dsReplayRankingScoresFromMongo re-registers ranking scores from the durable
+// ranking_scores collection as searchable DataStore objects (dsAllocRankingScore),
+// but only if the DataStore appears to have no ranking-score objects at all yet -
+// i.e. only after a wipe/loss of datastore.json, not on a normal restart where
+// dsLoad() already restored everything from the snapshot file. Without this, a
+// DataStore reset permanently loses SearchObject-findability for any score that
+// isn't freshly re-uploaded by the client, even though the score itself survives
+// safely in Mongo. This is exactly what caused a live "eu_base_rank" search to
+// return 0 results after the 2026-08-21 full datastore.json reset, despite that
+// base_rank score still being present in ranking_scores the whole time.
+func dsReplayRankingScoresFromMongo() {
+	hasAny := false
+	dsStore.Range(func(_, v interface{}) bool {
+		if v.(*dsObject).DataType == 0xFFFF {
+			hasAny = true
+			return false
+		}
+		return true
+	})
+	if hasAny {
+		return
+	}
+
+	cursor, err := rankingScoresCol.Find(context.Background(), bson.D{})
+	if err != nil {
+		fmt.Println("dsReplayRankingScoresFromMongo:", err)
+		return
+	}
+	var docs []bson.M
+	if err := cursor.All(context.Background(), &docs); err != nil {
+		fmt.Println("dsReplayRankingScoresFromMongo:", err)
+		return
+	}
+	for _, d := range docs {
+		pid := uint32(bsonInt(d["pid"]))
+		category := uint32(bsonInt(d["category"]))
+		score := uint32(bsonInt(d["score"]))
+		param := uint64(bsonInt(d["param"]))
+		groupsRaw, _ := d["groups"].(bson.A)
+		groups := make([]byte, len(groupsRaw))
+		for i, g := range groupsRaw {
+			groups[i] = byte(bsonInt(g))
+		}
+		dsAllocRankingScore(pid, category, score, param, groups)
+	}
+	fmt.Printf("dsReplayRankingScoresFromMongo: re-registered %d ranking score(s) as DataStore objects\n", len(docs))
+	go dsSave()
 }
 
 // handleGetRanking parses a real Ranking::GetRanking call and returns an
