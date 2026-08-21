@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
+	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
@@ -2229,7 +2231,202 @@ const bossCaptureDir = "/nico-pretendo-bridge/boss-capture"
 // encrypted file download isn't captured here — only the policylist + tasksheet legs.
 // Remove this (and the matching Inkay patch + nginx stream map entry) once the plaza
 // content format has been reverse-engineered from the captured samples.
+// wscSpotPassTasks: WSC's own SpotPass tasks (sp1_ans, sp1_rnk) that Pretendo's
+// real BOSS server has never implemented (404 on the task itself, not just a
+// missing file) — this is different from olvinfo-style "task exists but is
+// empty". We inject a valid, empty, open TaskSheet ourselves so the console
+// treats it as "no new content" instead of "task unavailable".
+const wscBossAppID = "4m8Xme1wKgzwslTJ"
+
+var wscSpotPassTasks = map[string]bool{
+	"sp1_ans": true,
+	"sp1_rnk": true,
+}
+
+// handleWSCSpotPassTasksheet serves a synthetic empty TaskSheet for WSC's own
+// SpotPass tasks at the task level (no filename in the URL). Returns true if
+// it handled the request.
+func handleWSCSpotPassTasksheet(w http.ResponseWriter, r *http.Request) bool {
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	// /p01/tasksheet/:id/:bossAppId/:taskId  (exactly 5 parts, no filename)
+	if len(parts) != 5 || parts[0] != "p01" || parts[1] != "tasksheet" {
+		return false
+	}
+	bossAppID, taskID := parts[3], parts[4]
+	if bossAppID != wscBossAppID || !wscSpotPassTasks[taskID] {
+		return false
+	}
+	xml := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<TaskSheet>
+  <TitleId>0005000010176900</TitleId>
+  <TaskId>%s</TaskId>
+  <ServiceStatus>open</ServiceStatus>
+  <Files>
+  </Files>
+</TaskSheet>
+`, taskID)
+	log.Printf("BOSS capture: %s %s -> injected empty TaskSheet (Pretendo doesn't implement WSC SpotPass)", r.Method, r.URL.Path)
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(xml))
+	return true
+}
+
+// wscSpotPassFileNames: known per-task filenames the console requests directly
+// (bypassing the task-level listing entirely — confirmed 2026-08-21 from real
+// console captures, it never hits handleWSCSpotPassTasksheet for WSC at all).
+var wscSpotPassFileNames = map[string]string{
+	"sp1_rnk": "rankingdata.dat",
+}
+
+var (
+	bossKeysOnce sync.Once
+	bossAESKey   []byte
+	bossHMACKey  []byte
+	bossKeysErr  error
+)
+
+func loadBossKeys() ([]byte, []byte, error) {
+	bossKeysOnce.Do(func() {
+		data, err := os.ReadFile("/home/nico/boss_keys.bin")
+		if err != nil {
+			bossKeysErr = err
+			return
+		}
+		if len(data) != 96 {
+			bossKeysErr = fmt.Errorf("boss_keys.bin: expected 96 bytes, got %d", len(data))
+			return
+		}
+		bossAESKey = data[0:16]
+		bossHMACKey = data[32:96]
+	})
+	return bossAESKey, bossHMACKey, bossKeysErr
+}
+
+// encryptBossFile implements the WiiU BOSS file format from PretendoNetwork/boss-crypto's
+// encryptWiiU: a 32-byte header (magic "boss", version, flags, 12-byte random IV) followed
+// by AES-128-CTR(HMAC-SHA256(content) || content), IV padded to 16 bytes with a big-endian
+// counter starting at 1.
+func encryptBossFile(content []byte) ([]byte, error) {
+	aesKey, hmacKey, err := loadBossKeys()
+	if err != nil {
+		return nil, err
+	}
+
+	mac := hmac.New(sha256.New, hmacKey)
+	mac.Write(content)
+	plaintext := append(mac.Sum(nil), content...)
+
+	iv := make([]byte, 12)
+	if _, err := rand.Read(iv); err != nil {
+		return nil, err
+	}
+	ctrIV := append(append([]byte{}, iv...), 0x00, 0x00, 0x00, 0x01)
+
+	block, err := aes.NewCipher(aesKey)
+	if err != nil {
+		return nil, err
+	}
+	stream := cipher.NewCTR(block, ctrIV)
+	encrypted := make([]byte, len(plaintext))
+	stream.XORKeyStream(encrypted, plaintext)
+
+	header := make([]byte, 0x20)
+	copy(header[0:4], "boss")
+	binary.BigEndian.PutUint32(header[4:8], 0x20001)
+	binary.BigEndian.PutUint16(header[8:10], 1)
+	binary.BigEndian.PutUint16(header[10:12], 2)
+	copy(header[12:24], iv)
+
+	return append(header, encrypted...), nil
+}
+
+// handleWSCSpotPassFile serves a synthetic single-File TaskSheet for WSC's own
+// SpotPass file lookups (e.g. sp1_rnk/rankingdata.dat) — the actual request
+// shape the console uses, bypassing the task-level listing entirely. The Url
+// points back at our own /p01/data/wsc/... path (boss.nicochristmann.net),
+// since npdi.cdn.pretendo.cc isn't redirected and wouldn't have our file.
+func handleWSCSpotPassFile(w http.ResponseWriter, r *http.Request) bool {
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	// /p01/tasksheet/:id/:bossAppId/:taskId/:fileName  (exactly 6 parts)
+	if len(parts) != 6 || parts[0] != "p01" || parts[1] != "tasksheet" {
+		return false
+	}
+	bossAppID, taskID, fileName := parts[3], parts[4], parts[5]
+	if bossAppID != wscBossAppID || wscSpotPassFileNames[taskID] != fileName {
+		return false
+	}
+
+	// Placeholder content: we don't know WSC's real internal rankingdata.dat
+	// format (no public documentation, Pretendo never implemented it either),
+	// so start with empty content — safest guess at "no ranking data yet"
+	// without risking the game parsing garbage as real entries.
+	encrypted, err := encryptBossFile([]byte{})
+	if err != nil {
+		log.Printf("BOSS capture: WSC spotpass file encrypt failed: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return true
+	}
+	hash := fmt.Sprintf("%x", md5.Sum(encrypted))
+
+	xmlBody := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<TaskSheet>
+  <TitleId>0005000010176900</TitleId>
+  <TaskId>%s</TaskId>
+  <ServiceStatus>open</ServiceStatus>
+  <Files>
+    <File>
+      <Filename>%s</Filename>
+      <DataId>1</DataId>
+      <Type>AppData</Type>
+      <Url>https://boss.nicochristmann.net/p01/data/wsc/%s/%s/%s</Url>
+      <Size>%d</Size>
+      <Notify>
+        <New>app</New>
+        <LED>false</LED>
+      </Notify>
+    </File>
+  </Files>
+</TaskSheet>
+`, taskID, fileName, taskID, fileName, hash, len(encrypted))
+
+	log.Printf("BOSS capture: %s %s -> injected TaskSheet + hosting placeholder %s (%d bytes encrypted)", r.Method, r.URL.Path, fileName, len(encrypted))
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(xmlBody))
+	return true
+}
+
+// handleWSCSpotPassData serves the actual encrypted placeholder file bytes
+// referenced by handleWSCSpotPassFile's injected <Url>.
+func handleWSCSpotPassData(w http.ResponseWriter, r *http.Request) bool {
+	if !strings.HasPrefix(r.URL.Path, "/p01/data/wsc/") {
+		return false
+	}
+	encrypted, err := encryptBossFile([]byte{})
+	if err != nil {
+		log.Printf("BOSS capture: WSC spotpass data encrypt failed: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return true
+	}
+	log.Printf("BOSS capture: %s %s -> served placeholder data (%d bytes)", r.Method, r.URL.Path, len(encrypted))
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.WriteHeader(http.StatusOK)
+	w.Write(encrypted)
+	return true
+}
+
 func handleBossCapture(w http.ResponseWriter, r *http.Request) {
+	if handleWSCSpotPassTasksheet(w, r) {
+		return
+	}
+	if handleWSCSpotPassFile(w, r) {
+		return
+	}
+	if handleWSCSpotPassData(w, r) {
+		return
+	}
+
 	var target string
 	var realHost string
 	switch {
