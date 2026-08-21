@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/hex"
@@ -8,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -604,6 +606,7 @@ func main() {
 	migrateRankingScoreTags()
 	dsSeedProfiles()
 	connectDB()
+	loadRankingStoreFromMongo()
 	go startStatusServer()
 	go cleanupStaleGatherings()
 	go watchStaleConnections()
@@ -736,6 +739,13 @@ func main() {
 				params := request.Parameters()
 				go func() {
 					handleUploadCommonData(client, callID, params)
+				}()
+			case ranking.MethodGetRanking:
+				client := packet.Sender()
+				callID := request.CallID()
+				params := request.Parameters()
+				go func() {
+					handleGetRanking(client, callID, params)
 				}()
 			default:
 				go sendResponse(packet.Sender(), ranking.ProtocolID, request.CallID(), request.MethodID(), []byte{})
@@ -1100,6 +1110,8 @@ func handleUploadScore(client *nex.Client, callID uint32, params []byte) {
 	obj := dsAllocRankingScore(pid, category, score, param, groups)
 	fmt.Printf("UploadScore: PID=%d stored as DataStore DataID=%d tags=%v\n", pid, obj.DataID, obj.Tags)
 
+	rankingAdd(pid, category, score, groups, param, uniqueID)
+
 	sendResponse(client, ranking.ProtocolID, callID, ranking.MethodUploadScore, []byte{})
 }
 
@@ -1128,6 +1140,172 @@ func handleUploadCommonData(client *nex.Client, callID uint32, params []byte) {
 
 	sendResponse(client, ranking.ProtocolID, callID, ranking.MethodUploadCommonData, []byte{})
 }
+
+// --- In-memory leaderboard (Ranking::GetRanking) ---
+//
+// Separate from dsStore/dsObject (which exists for DataStore::SearchObject —
+// the club-stats unlock, see dsAllocRankingScore) because GetRanking needs a
+// clean, directly-queryable/sortable record per pid+category+groups, not
+// something reconstructed by re-parsing debug tags. Backed by Mongo
+// (ranking_scores, via dbInsertRankingScore) as the durable copy; this is
+// just the fast in-memory view rebuilt from it at startup.
+
+type rankingEntry struct {
+	OwnerPID uint32
+	UniqueID uint64
+	Category uint32
+	Score    uint32
+	Groups   []byte
+	Param    uint64
+	Updated  time.Time
+}
+
+var (
+	rankingMu    sync.Mutex
+	rankingStore []rankingEntry
+)
+
+func rankingAdd(pid uint32, category, score uint32, groups []byte, param, uniqueID uint64) {
+	rankingMu.Lock()
+	defer rankingMu.Unlock()
+	for i := range rankingStore {
+		e := &rankingStore[i]
+		if e.OwnerPID == pid && e.Category == category && bytes.Equal(e.Groups, groups) {
+			e.Score = score
+			e.Param = param
+			e.UniqueID = uniqueID
+			e.Updated = time.Now()
+			return
+		}
+	}
+	rankingStore = append(rankingStore, rankingEntry{
+		OwnerPID: pid,
+		UniqueID: uniqueID,
+		Category: category,
+		Score:    score,
+		Groups:   append([]byte{}, groups...),
+		Param:    param,
+		Updated:  time.Now(),
+	})
+}
+
+// loadRankingStoreFromMongo rebuilds rankingStore from the durable copy in
+// ranking_scores at startup (mirrors dsLoad()'s role for dsStore).
+func loadRankingStoreFromMongo() {
+	cursor, err := rankingScoresCol.Find(context.Background(), bson.D{})
+	if err != nil {
+		fmt.Println("loadRankingStoreFromMongo:", err)
+		return
+	}
+	var docs []bson.M
+	if err := cursor.All(context.Background(), &docs); err != nil {
+		fmt.Println("loadRankingStoreFromMongo:", err)
+		return
+	}
+	for _, d := range docs {
+		pid := uint32(bsonInt(d["pid"]))
+		category := uint32(bsonInt(d["category"]))
+		score := uint32(bsonInt(d["score"]))
+		param := uint64(bsonInt(d["param"]))
+		uniqueID := uint64(bsonInt(d["unique_id"]))
+		groupsRaw, _ := d["groups"].(bson.A)
+		groups := make([]byte, len(groupsRaw))
+		for i, g := range groupsRaw {
+			groups[i] = byte(bsonInt(g))
+		}
+		rankingAdd(pid, category, score, groups, param, uniqueID)
+	}
+	fmt.Printf("loadRankingStoreFromMongo: loaded %d ranking entries\n", len(rankingStore))
+}
+
+// handleGetRanking parses a real Ranking::GetRanking call and returns an
+// actual RankingResult built from rankingStore, instead of the generic
+// empty-ack every other unhandled Ranking method still falls through to.
+// Wire format per NintendoClients' nintendo.nex.ranking (no structure-header
+// wrapper): mode u8, category u32 LE, then RankingOrderParam (order_calc u8,
+// group_index u8, group_num u8, time_scope u8, offset u32 LE, count u8),
+// then unique_id u64 LE, pid u32 LE.
+//
+// group_index/group_num filtering and time_scope aren't applied yet (V1) —
+// results are filtered by exact category match only, which is enough for
+// the common case (group_index defaults to 255 = "no group filter" on the
+// client). Response omits update_time (only present for nex.version>=40000;
+// WSC runs an older version) and common_data (not tracked per-entry here —
+// UploadCommonData's blob is stored separately, unassociated with a specific
+// ranking entry).
+func handleGetRanking(client *nex.Client, callID uint32, params []byte) {
+	pid := client.PID()
+	if len(params) < 26 {
+		fmt.Printf("GetRanking: PID=%d params too short (%d bytes), acking empty\n", pid, len(params))
+		sendResponse(client, ranking.ProtocolID, callID, ranking.MethodGetRanking, []byte{})
+		return
+	}
+	off := 0
+	mode := params[off]
+	off++
+	category := binary.LittleEndian.Uint32(params[off:])
+	off += 4
+	off++ // order_calc — unused in V1
+	off++ // group_index — unused in V1
+	off++ // group_num — unused in V1
+	off++ // time_scope — unused in V1
+	orderOffset := binary.LittleEndian.Uint32(params[off:])
+	off += 4
+	orderCount := params[off]
+	off++
+	off += 8 // unique_id — unused in V1
+	reqPID := binary.LittleEndian.Uint32(params[off:])
+
+	rankingMu.Lock()
+	var matches []rankingEntry
+	for _, e := range rankingStore {
+		if e.Category != category {
+			continue
+		}
+		if mode == ranking_ModeSelf && e.OwnerPID != pid && e.OwnerPID != reqPID {
+			continue
+		}
+		matches = append(matches, e)
+	}
+	rankingMu.Unlock()
+
+	sort.Slice(matches, func(i, j int) bool { return matches[i].Score > matches[j].Score })
+
+	start := int(orderOffset)
+	if start > len(matches) {
+		start = len(matches)
+	}
+	end := len(matches)
+	if orderCount > 0 && start+int(orderCount) < end {
+		end = start + int(orderCount)
+	}
+	page := matches[start:end]
+
+	fmt.Printf("GetRanking: PID=%d mode=%d category=%d -> %d/%d result(s)\n", pid, mode, category, len(page), len(matches))
+
+	buf := new(bytes.Buffer)
+	binary.Write(buf, binary.LittleEndian, uint32(len(page)))
+	for i, e := range page {
+		binary.Write(buf, binary.LittleEndian, e.OwnerPID)
+		binary.Write(buf, binary.LittleEndian, e.UniqueID)
+		binary.Write(buf, binary.LittleEndian, uint32(start+i+1)) // rank, 1-based
+		binary.Write(buf, binary.LittleEndian, e.Category)
+		binary.Write(buf, binary.LittleEndian, e.Score)
+		binary.Write(buf, binary.LittleEndian, uint32(len(e.Groups)))
+		buf.Write(e.Groups)
+		binary.Write(buf, binary.LittleEndian, e.Param)
+		binary.Write(buf, binary.LittleEndian, uint32(0)) // common_data length
+	}
+	binary.Write(buf, binary.LittleEndian, uint32(len(matches))) // total
+	binary.Write(buf, binary.LittleEndian, nexDateTime(time.Now()))
+
+	sendResponse(client, ranking.ProtocolID, callID, ranking.MethodGetRanking, buf.Bytes())
+}
+
+// ranking_ModeSelf mirrors RankingMode.SELF from NintendoClients (not
+// exported by the vendored Go ranking package, which only defines method
+// IDs, not the mode enum).
+const ranking_ModeSelf = 4
 
 func prepareGetObject(err error, client *nex.Client, callID uint32, param *datastore.DataStorePrepareGetParam) {
 	if err != nil {
