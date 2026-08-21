@@ -367,6 +367,7 @@ func main() {
 	http.HandleFunc("/my/login", myLoginHandler)
 	http.HandleFunc("/my/logout", myLogoutHandler)
 	http.HandleFunc("/my/discord", myDiscordHandler)
+	http.HandleFunc("/my/account", myAccountHandler)
 	http.HandleFunc("/my/", myHandler)
 	http.HandleFunc("/admin/", requireClientCert(adminUI))
 	http.HandleFunc("/admin/add", requireClientCert(adminAdd))
@@ -1427,6 +1428,10 @@ tr:last-child td{border-bottom:none}
   <a class="card" href="/inkay/my/discord">
     <h2>Discord Link</h2>
     <p>Link your PNID to Discord for WiiU Chat call notifications</p>
+  </a>
+  <a class="card" href="/inkay/my/account">
+    <h2>My Account</h2>
+    <p>Change your web password — sign in with your PNID and current web password</p>
   </a>
   <a class="card" href="/wsc-public/">
     <h2>WSC Status and Players/Sessions</h2>
@@ -2766,4 +2771,112 @@ func myLogoutHandler(w http.ResponseWriter, r *http.Request) {
 		MaxAge: -1,
 	})
 	http.Redirect(w, r, "/inkay/my/", http.StatusSeeOther)
+}
+
+// --- My Account (change password) ---
+
+var myAccountTmpl = template.Must(template.New("my-account").Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>My Account — Pretendo Bridge</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{font-family:system-ui,sans-serif;max-width:400px;margin:2rem auto;padding:0 1rem;color:#222}
+h1{font-size:1.3rem;margin-bottom:1.5rem}
+.nav{display:flex;align-items:center;gap:.5rem;margin-bottom:1.5rem;font-size:.875rem}
+.nav a{color:#2563eb}
+form.logout-form{display:inline;margin:0}
+button.logout-btn{background:none;border:none;color:#dc2626;font-size:.875rem;cursor:pointer;padding:0;text-decoration:underline}
+.error{background:#fee2e2;border:1px solid #fca5a5;color:#991b1b;border-radius:6px;padding:.6rem 1rem;margin-bottom:1rem;font-size:.875rem}
+.success{background:#dcfce7;border:1px solid #86efac;color:#166534;border-radius:6px;padding:.6rem 1rem;margin-bottom:1rem;font-size:.875rem}
+label{display:block;font-size:.8rem;font-weight:600;color:#555;margin-bottom:.3rem;margin-top:1rem}
+input{width:100%;box-sizing:border-box;border:1px solid #d1d5db;border-radius:6px;padding:.5rem .75rem;font:inherit}
+input:focus{outline:none;border-color:#6366f1;box-shadow:0 0 0 2px rgba(99,102,241,.15)}
+button.submit{margin-top:1.5rem;width:100%;background:#6366f1;color:#fff;border:none;border-radius:6px;padding:.65rem;font:inherit;cursor:pointer}
+button.submit:hover{background:#4f46e5}
+</style>
+</head>
+<body>
+<div class="nav">
+  <a href="/inkay/my/">← Back to My Status</a>
+  <span style="color:#d1d5db">|</span>
+  <form class="logout-form" method="post" action="/inkay/my/logout">
+    <button class="logout-btn" type="submit">Sign out</button>
+  </form>
+</div>
+<h1>My Account</h1>
+{{if .Error}}<div class="error">{{.Error}}</div>{{end}}
+{{if .Success}}<div class="success">{{.Success}}</div>{{end}}
+<form method="post" action="/inkay/my/account">
+  <label for="current_password">Current Web Password</label>
+  <input id="current_password" type="password" name="current_password" autocomplete="current-password" required>
+  <label for="new_password">New Web Password</label>
+  <input id="new_password" type="password" name="new_password" autocomplete="new-password" minlength="8" required>
+  <label for="confirm_password">Confirm New Password</label>
+  <input id="confirm_password" type="password" name="confirm_password" autocomplete="new-password" minlength="8" required>
+  <button class="submit" type="submit">Change Password</button>
+</form>
+</body>
+</html>`))
+
+type myAccountData struct {
+	Error   string
+	Success string
+}
+
+func myAccountHandler(w http.ResponseWriter, r *http.Request) {
+	pid, ok := mySessionPID(r)
+	if !ok {
+		http.Redirect(w, r, "/inkay/my/login", http.StatusFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html")
+
+	if r.Method != http.MethodPost {
+		myAccountTmpl.Execute(w, myAccountData{})
+		return
+	}
+
+	var pnid string
+	if err := db.QueryRow(`SELECT pnid FROM pnid_cache WHERE pid = $1`, pid).Scan(&pnid); err != nil || pnid == "" {
+		myAccountTmpl.Execute(w, myAccountData{Error: "Could not resolve your account, try signing in again."})
+		return
+	}
+
+	current := r.FormValue("current_password")
+	newPassword := r.FormValue("new_password")
+	confirm := r.FormValue("confirm_password")
+
+	var storedHash string
+	if err := db.QueryRow(`SELECT web_password_hash FROM wii_devices WHERE username = $1`, pnid).Scan(&storedHash); err != nil || storedHash == "" {
+		myAccountTmpl.Execute(w, myAccountData{Error: "No web password set for this account."})
+		return
+	}
+
+	currentHash := sha256.Sum256([]byte(current))
+	if hex.EncodeToString(currentHash[:]) != storedHash {
+		myAccountTmpl.Execute(w, myAccountData{Error: "Current password is incorrect."})
+		return
+	}
+
+	if len(newPassword) < 8 {
+		myAccountTmpl.Execute(w, myAccountData{Error: "New password must be at least 8 characters."})
+		return
+	}
+	if newPassword != confirm {
+		myAccountTmpl.Execute(w, myAccountData{Error: "New passwords do not match."})
+		return
+	}
+
+	newHash := sha256.Sum256([]byte(newPassword))
+	if _, err := db.Exec(`UPDATE wii_devices SET web_password_hash = $1 WHERE username = $2`, hex.EncodeToString(newHash[:]), pnid); err != nil {
+		log.Printf("myAccountHandler: db error updating password for %q: %v", pnid, err)
+		myAccountTmpl.Execute(w, myAccountData{Error: "Failed to update password, try again later."})
+		return
+	}
+
+	log.Printf("myAccountHandler: web password changed for %q (PID %d)", pnid, pid)
+	myAccountTmpl.Execute(w, myAccountData{Success: "Password updated."})
 }
