@@ -3,7 +3,9 @@ package main
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -12,6 +14,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
@@ -354,6 +357,7 @@ func main() {
 		}
 	}
 	go certRotationLoop()
+	loadClientCertPool()
 
 	http.HandleFunc("/", landingUI)
 	http.HandleFunc("/api/redirects", apiRedirects)
@@ -364,22 +368,22 @@ func main() {
 	http.HandleFunc("/my/logout", myLogoutHandler)
 	http.HandleFunc("/my/discord", myDiscordHandler)
 	http.HandleFunc("/my/", myHandler)
-	http.HandleFunc("/admin/", adminUI)
-	http.HandleFunc("/admin/add", adminAdd)
-	http.HandleFunc("/admin/delete", adminDelete)
-	http.HandleFunc("/admin/toggle", adminToggle)
+	http.HandleFunc("/admin/", requireClientCert(adminUI))
+	http.HandleFunc("/admin/add", requireClientCert(adminAdd))
+	http.HandleFunc("/admin/delete", requireClientCert(adminDelete))
+	http.HandleFunc("/admin/toggle", requireClientCert(adminToggle))
 
-	http.HandleFunc("/admin/users/", adminUsers)
-	http.HandleFunc("/admin/users/add", adminUserAdd)
-	http.HandleFunc("/admin/users/delete", adminUserDelete)
-	http.HandleFunc("/admin/bans/", adminBans)
-	http.HandleFunc("/admin/bans/add", adminBanAdd)
-	http.HandleFunc("/admin/bans/remove", adminBanRemove)
-	http.HandleFunc("/admin/review/", adminReview)
-	http.HandleFunc("/admin/review/approve", adminReviewApprove)
-	http.HandleFunc("/admin/review/dismiss", adminReviewDismiss)
-	http.HandleFunc("/admin/certs/rotate", adminCertsRotate)
-	http.HandleFunc("/admin/client-cert.p12", adminClientCert)
+	http.HandleFunc("/admin/users/", requireClientCert(adminUsers))
+	http.HandleFunc("/admin/users/add", requireClientCert(adminUserAdd))
+	http.HandleFunc("/admin/users/delete", requireClientCert(adminUserDelete))
+	http.HandleFunc("/admin/bans/", requireClientCert(adminBans))
+	http.HandleFunc("/admin/bans/add", requireClientCert(adminBanAdd))
+	http.HandleFunc("/admin/bans/remove", requireClientCert(adminBanRemove))
+	http.HandleFunc("/admin/review/", requireClientCert(adminReview))
+	http.HandleFunc("/admin/review/approve", requireClientCert(adminReviewApprove))
+	http.HandleFunc("/admin/review/dismiss", requireClientCert(adminReviewDismiss))
+	http.HandleFunc("/admin/certs/rotate", requireClientCert(adminCertsRotate))
+	http.HandleFunc("/admin/client-cert.p12", requireClientCert(adminClientCert))
 	http.HandleFunc("/wsc-public/", adminWSC)
 	http.HandleFunc("/wsc-public/nat/", wscNATInfo)
 	http.HandleFunc("/wsc-public/api/players", apiWSCPlayers)
@@ -1129,6 +1133,96 @@ const (
 	caCertPath       = "/var/ca/netcup-server/client-ca.pem"
 	caKeyPath        = "/var/ca/netcup-server/client-ca.key"
 )
+
+// clientCertPool holds the same CA (caCertPath) admin client certs are issued
+// from (see rotateCert/generateClientCert below). Used by requireClientCert
+// to independently verify certs forwarded by revivetendo-dashboard's Apache2
+// reverse proxy — nginx's own $ssl_client_verify only covers requests that
+// terminate TLS here directly (netcup-server.nicochristmann.net); the Apache2
+// path terminates TLS itself and forwards the raw cert via a header instead,
+// so the verification has to happen here rather than at the nginx layer.
+var clientCertPool *x509.CertPool
+
+func loadClientCertPool() {
+	pemBytes, err := os.ReadFile(caCertPath)
+	if err != nil {
+		log.Printf("loadClientCertPool: could not read %s: %v (Apache2-forwarded admin access will be rejected)", caCertPath, err)
+		return
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pemBytes) {
+		log.Printf("loadClientCertPool: no valid certs found in %s", caCertPath)
+		return
+	}
+	clientCertPool = pool
+}
+
+// requireClientCert gates a handler behind a verified admin client cert.
+// TLS terminates on the revivetendo-dashboard.nicochristmann.net Apache2
+// reverse proxy, which requests but does not itself judge the client cert
+// (SSLVerifyClient optional_no_ca) — it just forwards the raw URL-encoded
+// PEM via X-SSL-Client-Cert, and the actual trust decision happens here.
+// parseForwardedClientCert decodes a PEM certificate forwarded via an HTTP
+// header. Deliberately avoids encoding/pem's line-based scanner: a raw PEM's
+// embedded newlines can't survive an HTTP header value intact (may arrive
+// url-encoded, space-collapsed, or stripped entirely depending on how
+// Apache/mod_headers and any intermediate proxy handle it), so this just
+// locates the BEGIN/END markers directly and base64-decodes whatever's
+// between them after stripping all whitespace — works regardless of which
+// form the newlines survive in, or whether they survive at all.
+func parseForwardedClientCert(raw string) (*x509.Certificate, error) {
+	// PathUnescape (not QueryUnescape) — QueryUnescape treats '+' as a space
+	// per form-encoding convention, which would corrupt legitimate '+'
+	// characters in the base64 body when the value isn't actually
+	// percent-encoded (e.g. Apache forwarded the raw PEM as-is).
+	if unescaped, err := url.PathUnescape(raw); err == nil {
+		raw = unescaped
+	}
+	const beginMarker = "-----BEGIN CERTIFICATE-----"
+	const endMarker = "-----END CERTIFICATE-----"
+	start := strings.Index(raw, beginMarker)
+	end := strings.Index(raw, endMarker)
+	if start == -1 || end == -1 || end < start {
+		return nil, fmt.Errorf("no PEM certificate markers found")
+	}
+	body := raw[start+len(beginMarker) : end]
+	body = strings.Map(func(r rune) rune {
+		if r == ' ' || r == '\t' || r == '\r' || r == '\n' {
+			return -1
+		}
+		return r
+	}, body)
+	der, err := base64.StdEncoding.DecodeString(body)
+	if err != nil {
+		return nil, fmt.Errorf("base64 decode: %w", err)
+	}
+	return x509.ParseCertificate(der)
+}
+
+func requireClientCert(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		raw := r.Header.Get("X-SSL-Client-Cert")
+		if raw == "" || clientCertPool == nil {
+			http.Error(w, "client certificate required", http.StatusForbidden)
+			return
+		}
+		cert, err := parseForwardedClientCert(raw)
+		if err != nil {
+			http.Error(w, "client certificate required", http.StatusForbidden)
+			return
+		}
+		_, err = cert.Verify(x509.VerifyOptions{
+			Roots:     clientCertPool,
+			KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		})
+		if err != nil {
+			log.Printf("requireClientCert: verify failed for %s: %v", r.RemoteAddr, err)
+			http.Error(w, "invalid client certificate", http.StatusForbidden)
+			return
+		}
+		next(w, r)
+	}
+}
 
 type AdminCert struct {
 	ID        int
