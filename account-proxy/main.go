@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"bytes"
+	_ "embed"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
@@ -26,13 +27,18 @@ import (
 	"os"
 	"os/exec"
 	"encoding/json"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf16"
 
+	"github.com/andybalholm/brotli"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
+	"github.com/pires/go-proxyproto"
 	minio "github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	"go.mongodb.org/mongo-driver/bson"
@@ -485,6 +491,13 @@ func handle(w http.ResponseWriter, r *http.Request) {
 			bodyBuf, _ = io.ReadAll(r.Body)
 			r.Body = io.NopCloser(bytes.NewReader(bodyBuf))
 		}
+		// TEMPORARY - capture full request to compare a successful real-3DS
+		// login against a failing Azahar one, diagnosing intermittent
+		// 022-2932/1600 errors. Remove once resolved.
+		os.MkdirAll("/nico-pretendo-bridge/act-capture", 0755)
+		ts := time.Now().Format("20060102-150405.000")
+		reqLog := fmt.Sprintf("From: %s\nHeaders: %v\nBody: %s\n", realIP(r), r.Header, bodyBuf)
+		os.WriteFile(fmt.Sprintf("/nico-pretendo-bridge/act-capture/%s_access_token_generate.request.txt", ts), []byte(reqLog), 0644)
 		// Parse user_id from form body before proxying
 		if vals, err := url.ParseQuery(string(bodyBuf)); err == nil {
 			if uid := vals.Get("user_id"); uid != "" {
@@ -1292,6 +1305,64 @@ var wiiUTLSConfig = &tls.Config{
 	NextProtos: []string{"http/1.1"},
 }
 
+// threeDSTLSConfig mimics a real 3DS's TLS fingerprint, captured from an actual
+// console's ClientHello (empty SNI, versions=[TLS1.1,TLS1.0], ciphers=[57 53 51
+// 47 22 10 5 4] - i.e. RSA/DHE-RSA key exchange only, no ECDHE at all, unlike
+// wiiUTLSConfig). Go's crypto/tls has no DHE (non-ephemeral-EC) cipher suites,
+// so only the plain-RSA subset of that list is reproducible here, but that's
+// still meaningfully different from wiiUTLSConfig's ECDHE-heavy profile.
+// Used for doUpstream calls whose original request came from a 3DS, not a Wii
+// U - proxying through with the wrong platform's fingerprint means Pretendo's
+// real server sees a 3DS-shaped HTTP request arrive over a Wii-U-shaped TLS
+// handshake, a combination a real direct 3DS connection would never produce,
+// which is suspected to cause the intermittent 022-2932 login failures.
+var threeDSTLSConfig = &tls.Config{
+	MinVersion: tls.VersionTLS10,
+	MaxVersion: tls.VersionTLS11,
+	CipherSuites: []uint16{
+		tls.TLS_RSA_WITH_AES_256_CBC_SHA,
+		tls.TLS_RSA_WITH_AES_128_CBC_SHA,
+		tls.TLS_RSA_WITH_3DES_EDE_CBC_SHA,
+		tls.TLS_RSA_WITH_RC4_128_SHA,
+	},
+	NextProtos: []string{"http/1.1"},
+}
+
+// realConsoleDeviceModels: genuine Nintendo hardware model codes sent in
+// X-Nintendo-Device-Model (CTR=old 3DS, SPR=3DS XL, KTR=New 3DS, FTR=New 3DS
+// XL, WUP=Wii U). Confirmed via a real captured request/response comparison
+// (see feedback_azahar_device_model memory) that Azahar sends "RED" here -
+// not a real Nintendo code - and that this exact request/response pair
+// deterministically succeeds or fails 1:1 with which of these two values is
+// present, nothing else differing between the captures.
+var realConsoleDeviceModels = map[string]bool{
+	"CTR": true, "SPR": true, "KTR": true, "FTR": true, "WUP": true,
+}
+
+// upstreamTLSConfig picks the outbound TLS fingerprint for a proxied request
+// to Pretendo's real account server based on X-Nintendo-Device-Model. A real,
+// direct console-to-Pretendo connection's TLS handshake and its claimed
+// device model are always consistent (real hardware fingerprint + real model
+// code, or a plain app/emulator fingerprint + an emulator's own model
+// string). Since we sit in the middle and re-originate the connection
+// ourselves, forcing a console-shaped fingerprint onto a request that
+// honestly identifies as non-hardware (like Azahar's "RED") creates exactly
+// the mismatch a real direct connection would never produce - suspected
+// cause of the 022-2932 failures unique to that device model. For anything
+// that isn't a real, known console model, fall back to Go's own default TLS
+// behavior (nil CipherSuites/version pins) rather than spoofing any specific
+// hardware at all.
+func upstreamTLSConfig(headers http.Header) *tls.Config {
+	model := headers.Get("X-Nintendo-Device-Model")
+	if !realConsoleDeviceModels[model] {
+		return &tls.Config{}
+	}
+	if model == "WUP" {
+		return wiiUTLSConfig
+	}
+	return threeDSTLSConfig
+}
+
 // headers that must not be forwarded to the upstream
 var stripUpstream = map[string]bool{
 	"Content-Length":    true,
@@ -1309,7 +1380,7 @@ func doUpstreamGetPath(path string, headers http.Header) ([]byte, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	cfg := wiiUTLSConfig.Clone()
+	cfg := upstreamTLSConfig(headers).Clone()
 	cfg.ServerName = "account.pretendo.cc"
 	tlsConn := tls.Client(rawConn, cfg)
 	defer tlsConn.Close()
@@ -1429,7 +1500,7 @@ func doUpstream(r *http.Request) ([]byte, int, http.Header, error) {
 	if err != nil {
 		return nil, 0, nil, err
 	}
-	cfg := wiiUTLSConfig.Clone()
+	cfg := upstreamTLSConfig(r.Header).Clone()
 	cfg.ServerName = "account.pretendo.cc"
 	tlsConn := tls.Client(rawConn, cfg)
 	defer tlsConn.Close()
@@ -2224,10 +2295,71 @@ var wiiUHTTPClient = &http.Client{
 	},
 }
 
+// realNintendoHTTPClient is wiiUHTTPClient's config plus InsecureSkipVerify: real
+// Nintendo BOSS servers (npts.app.nintendo.net) still serve legacy certs with only a
+// CommonName and no SANs, which Go's crypto/x509 rejects outright since ~Go 1.15
+// ("certificate relies on legacy Common Name field, use SANs instead") - curl has no
+// such check and connects fine. We're intentionally querying Nintendo's own real,
+// known infrastructure read-only here, so skipping verification is acceptable.
+var realNintendoHTTPClient = &http.Client{
+	Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{
+			MinVersion:         tls.VersionTLS10,
+			MaxVersion:         tls.VersionTLS12,
+			CipherSuites:       wiiUCiphers,
+			InsecureSkipVerify: true,
+		},
+	},
+}
+
 // bossCaptureDir holds raw request/response logs from handleBossCapture, for offline
 // decryption with a dumped BOSS key once we've seen what real Wara Wara Plaza traffic
 // looks like. TEMPORARY — see handleBossCapture doc comment.
 const bossCaptureDir = "/nico-pretendo-bridge/boss-capture"
+
+// olv3dsCaptureDir: full request/response captures for real Nintendo 3DS
+// traffic through handleOLV. TEMPORARY — added to diagnose an ARM11 data
+// abort in the 3DS's olv process, which happened after the console
+// successfully received a real response for the first time (previously
+// blocked by an empty-SNI nginx routing gap). Scoped to 3DS User-Agents
+// only so it doesn't capture the much higher volume of normal Wii U
+// traffic. Remove once resolved.
+const olv3dsCaptureDir = "/nico-pretendo-bridge/olv-capture-3ds"
+
+func logOLV3DSExchange(r *http.Request, reqBody []byte, status int, respHeader http.Header, respBody []byte) {
+	os.MkdirAll(olv3dsCaptureDir, 0755)
+	ts := time.Now().Format("20060102-150405.000")
+	safePath := strings.ReplaceAll(strings.Trim(r.URL.Path, "/"), "/", "_")
+	base := fmt.Sprintf("%s/%s_%s", olv3dsCaptureDir, ts, safePath)
+	reqLog := fmt.Sprintf("%s %s\nQuery: %s\nHeaders: %v\nBody (hex): %x\n",
+		r.Method, r.URL.Path, r.URL.RawQuery, r.Header, reqBody)
+	os.WriteFile(base+".request.txt", []byte(reqLog), 0644)
+	respLog := fmt.Sprintf("Status: %d\nHeaders: %v\nBody (hex): %x\nBody (raw): %s\n",
+		status, respHeader, respBody, respBody)
+	os.WriteFile(base+".response.txt", []byte(respLog), 0644)
+}
+
+// logBossRequest saves the full incoming request (method, path, query string,
+// headers, body) to bossCaptureDir, matching the format handleBossCapture's
+// generic proxy path already uses. The synthetic handlers (handleWSCSpotPass*)
+// never captured this before, only a one-line summary - added to see the
+// query string real Nintendo captures show (e.g. ?c=US&l=en) and full headers
+// for a given real request, since WSC's actual request shape has repeatedly
+// turned out to matter (bossAppId varying, real vs. assumed field values).
+func logBossRequest(r *http.Request) {
+	reqBody, _ := io.ReadAll(r.Body)
+	r.Body.Close()
+	r.Body = io.NopCloser(bytes.NewReader(reqBody))
+
+	os.MkdirAll(bossCaptureDir, 0755)
+	ts := time.Now().Format("20060102-150405.000")
+	safePath := strings.ReplaceAll(strings.Trim(r.URL.Path, "/"), "/", "_")
+	base := fmt.Sprintf("%s/%s_%s", bossCaptureDir, ts, safePath)
+
+	reqLog := fmt.Sprintf("%s %s\nQuery: %s\nHeaders: %v\nBody (hex): %x\n",
+		r.Method, r.URL.Path, r.URL.RawQuery, r.Header, reqBody)
+	os.WriteFile(base+".request.txt", []byte(reqLog), 0644)
+}
 
 // handleBossCapture is a TEMPORARY diagnostic proxy for reverse-engineering the Wara
 // Wara Plaza BOSS content format (see feedback_wsc_ping_timeout-style memory once this
@@ -2244,9 +2376,9 @@ const bossCaptureDir = "/nico-pretendo-bridge/boss-capture"
 // real BOSS server has never implemented (404 on the task itself, not just a
 // missing file) — this is different from olvinfo-style "task exists but is
 // empty". We inject a valid, empty, open TaskSheet ourselves so the console
-// treats it as "no new content" instead of "task unavailable".
-const wscBossAppID = "4m8Xme1wKgzwslTJ"
-
+// treats it as "no new content" instead of "task unavailable". Matched by
+// taskID alone - bossAppId is per-registration, not a fixed constant (the
+// same sp1_rnk task has been seen with multiple different bossAppId values).
 var wscSpotPassTasks = map[string]bool{
 	"sp1_ans": true,
 	"sp1_rnk": true,
@@ -2261,24 +2393,65 @@ func handleWSCSpotPassTasksheet(w http.ResponseWriter, r *http.Request) bool {
 	if len(parts) != 5 || parts[0] != "p01" || parts[1] != "tasksheet" {
 		return false
 	}
-	bossAppID, taskID := parts[3], parts[4]
-	if bossAppID != wscBossAppID || !wscSpotPassTasks[taskID] {
+	taskID := parts[4]
+	// bossAppId is per-registration, not a fixed constant - confirmed 2026-08-21:
+	// the same sp1_rnk task has been seen with both "4m8Xme1wKgzwslTJ" and
+	// "pO72Hi5uqf5yuNd8" (the latter matching the real Nintendo capture too).
+	// Match on taskID alone.
+	if !wscSpotPassTasks[taskID] {
 		return false
 	}
+	logBossRequest(r)
 	xml := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <TaskSheet>
-  <TitleId>0005000010176900</TitleId>
+  <TitleId>%s</TitleId>
   <TaskId>%s</TaskId>
   <ServiceStatus>open</ServiceStatus>
   <Files>
   </Files>
 </TaskSheet>
-`, taskID)
+`, wscTitleIDForCountry(r.URL.Query().Get("c")), taskID)
 	log.Printf("BOSS capture: %s %s -> injected empty TaskSheet (Pretendo doesn't implement WSC SpotPass)", r.Method, r.URL.Path)
 	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	// nn::boss's HTTP client caps simultaneous connections per host
+	// (TaskResultCode HTTP_ERROR_CONN_HOST_MAX) - several BOSS requests land
+	// in quick succession during boot (policylist, task-level checks,
+	// tasksheet, file download), so signal a clean close on each response
+	// rather than leaving it to default keep-alive, which was likely
+	// exhausting that per-host connection limit.
+	w.Header().Set("Connection", "close")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(xml))
 	return true
+}
+
+// wscEURCountryCodes: ISO country codes covered by Wii Sports Club's EUR-region
+// release (Nintendo's PAL SKU covers all of Europe plus Australia/NZ/South
+// Africa). Anything not in this set falls back to the USA TitleId.
+var wscEURCountryCodes = map[string]bool{
+	"GB": true, "DE": true, "FR": true, "IT": true, "ES": true, "NL": true,
+	"BE": true, "AT": true, "CH": true, "PT": true, "IE": true, "SE": true,
+	"NO": true, "DK": true, "FI": true, "PL": true, "RU": true, "GR": true,
+	"CZ": true, "HU": true, "SK": true, "RO": true, "BG": true, "HR": true,
+	"SI": true, "LT": true, "LV": true, "EE": true, "LU": true, "MT": true,
+	"CY": true, "ZA": true, "AU": true, "NZ": true,
+}
+
+// wscTitleIDForCountry returns WSC's real, region-specific TitleId - confirmed
+// 2026-08-22 from a real captured TaskSheet for Nico's own bossAppId
+// (0005000010144e00, country=DE), which differs from the USA TitleId
+// (0005000010144d00, confirmed via requests/responses that succeeded for a
+// real US/CA console) only in that one byte. Serving the wrong region's
+// TitleId to a console running the other region's actual game is a very
+// plausible reason nn::boss would silently abort the download after
+// receiving an otherwise-valid TaskSheet (see project_wsc_boss_version_diff
+// memory - this supersedes the earlier firmware-version theory as the
+// primary suspect).
+func wscTitleIDForCountry(country string) string {
+	if wscEURCountryCodes[strings.ToUpper(country)] {
+		return "0005000010144e00"
+	}
+	return "0005000010144d00"
 }
 
 // wscSpotPassFileNames: known per-task filenames the console requests directly
@@ -2350,10 +2523,261 @@ func encryptBossFile(content []byte) ([]byte, error) {
 	return append(header, encrypted...), nil
 }
 
-// handleWSCSpotPassFile serves a synthetic single-File TaskSheet for WSC's own
-// SpotPass file lookups (e.g. sp1_rnk/rankingdata.dat) — the actual request
-// shape the console uses, bypassing the task-level listing entirely. The Url
-// points back at our own /p01/data/wsc/... path (boss.nicochristmann.net),
+// rankingDataTemplate is the real Wii Sports Club sp1_rnk/rankingdata.dat
+// content, captured from Nintendo's still-live BOSS CDN and HMAC-verified to
+// decrypt correctly with our own boss_keys.bin (confirming those are the
+// genuine Nintendo keys). Used as a structural template: generateRankingData
+// reuses its bytes verbatim except for each populated rank slot's first
+// sub-record's embedded Mii name, which gets patched in for our own
+// top-ranked players. The histogram values, the rest of the per-sub-record
+// fields, and the exact meaning of "3 sub-records per slot" are not fully
+// reverse-engineered yet (see plans/atomic-marinating-fog.md) so are
+// preserved unmodified rather than guessed.
+//
+//go:embed assets/rankingdata_template.bin
+var rankingDataTemplate []byte
+
+// rankingSlotMarker is the 4-byte marker found right after every sub-record's
+// 2-byte little-endian record ID in the real captured rankingdata.dat.
+var rankingSlotMarker = []byte{0x1e, 0x00, 0x49, 0x06}
+
+const (
+	rankingSubRecordSize = 336
+	rankingNameOffset    = 0xfa // relative to sub-record start, confirmed via real capture
+	rankingNameMaxRunes  = 10   // matches the Mii nickname's own max length
+)
+
+// rankingTemplateSlots returns, for each rank slot found in the template
+// (a run of 3 consecutive sub-records), the file offset of its first
+// sub-record.
+func rankingTemplateSlots() [][3]int {
+	var starts []int
+	i := 0
+	for {
+		idx := bytes.Index(rankingDataTemplate[i:], rankingSlotMarker)
+		if idx == -1 {
+			break
+		}
+		abs := i + idx
+		starts = append(starts, abs-2) // back up over the 2-byte record ID
+		i = abs + 1
+	}
+	var slots [][3]int
+	for i := 0; i+2 < len(starts); i += 3 {
+		slots = append(slots, [3]int{starts[i], starts[i+1], starts[i+2]})
+	}
+	return slots
+}
+
+// patchMiiName overwrites the fixed 20-byte UTF-16BE name field in a cloned
+// sub-record, null-padding/truncating to fit — the real Mii nickname limit
+// (10 characters) means this never needs to shift any surrounding bytes.
+func patchMiiName(subRecord []byte, name string) {
+	runes := []rune(name)
+	if len(runes) > rankingNameMaxRunes {
+		runes = runes[:rankingNameMaxRunes]
+	}
+	units := utf16.Encode(runes)
+	nameBytes := make([]byte, rankingNameMaxRunes*2)
+	for i, u := range units {
+		binary.BigEndian.PutUint16(nameBytes[i*2:i*2+2], u)
+	}
+	copy(subRecord[rankingNameOffset:rankingNameOffset+len(nameBytes)], nameBytes)
+}
+
+func bsonToUint32(v interface{}) uint32 {
+	switch n := v.(type) {
+	case int32:
+		return uint32(n)
+	case int64:
+		return uint32(n)
+	case float64:
+		return uint32(n)
+	}
+	return 0
+}
+
+// topRankedPlayers queries wsc-secure's ranking_scores collection (shared
+// Mongo database, wscMongoDB — see wsc-secure/db.go's dbInsertRankingScore)
+// for the best score per player in a given club/region, sorted descending.
+// groups[0] is the club code and groups[1] the region (2=US/3=EU) - see
+// plans/atomic-marinating-fog.md for how this was confirmed (wsc-secure's own
+// code comment mislabels groups[0] as a sport code).
+func topRankedPlayers(clubCode, region uint32, limit int) ([]uint32, error) {
+	col := wscMongoDB.Collection("ranking_scores")
+	cur, err := col.Find(context.Background(), bson.D{})
+	if err != nil {
+		return nil, err
+	}
+	defer cur.Close(context.Background())
+
+	best := map[uint32]uint32{}
+	seen := map[uint32]bool{}
+	for cur.Next(context.Background()) {
+		var doc bson.M
+		if err := cur.Decode(&doc); err != nil {
+			continue
+		}
+		groups, _ := doc["groups"].(bson.A)
+		if len(groups) < 2 {
+			continue
+		}
+		if bsonToUint32(groups[0]) != clubCode || bsonToUint32(groups[1]) != region {
+			continue
+		}
+		pid := bsonToUint32(doc["pid"])
+		score := bsonToUint32(doc["score"])
+		if pid == 0 {
+			continue
+		}
+		if !seen[pid] || score > best[pid] {
+			best[pid] = score
+			seen[pid] = true
+		}
+	}
+
+	pids := make([]uint32, 0, len(best))
+	for pid := range best {
+		pids = append(pids, pid)
+	}
+	sort.Slice(pids, func(i, j int) bool { return best[pids[i]] > best[pids[j]] })
+	if len(pids) > limit {
+		pids = pids[:limit]
+	}
+	return pids, nil
+}
+
+// miiNameForPID looks up a player's Mii nickname the same way
+// handleInternalLookup does.
+func miiNameForPID(pid uint32) string {
+	var name string
+	db.QueryRow(`SELECT mii_name FROM mii_names WHERE pid = $1`, pid).Scan(&name)
+	return name
+}
+
+// clubAndRegionForRequest determines the requesting console's own club/region
+// from its most recent ranking_scores upload, resolving the PID the same way
+// the rest of this file does (fetchRealPID, backed by pidCache which is
+// usually already warm from the console's own NEX login moments earlier).
+func clubAndRegionForRequest(r *http.Request) (uint32, uint32) {
+	pid := fetchRealPID(r)
+	if pid == 0 {
+		return 0, 0
+	}
+	col := wscMongoDB.Collection("ranking_scores")
+	opts := options.FindOne().SetSort(bson.D{{Key: "created_at", Value: -1}})
+	var doc bson.M
+	if err := col.FindOne(context.Background(), bson.D{{Key: "pid", Value: pid}}, opts).Decode(&doc); err != nil {
+		return 0, 0
+	}
+	groups, _ := doc["groups"].(bson.A)
+	if len(groups) < 2 {
+		return 0, 0
+	}
+	return bsonToUint32(groups[0]), bsonToUint32(groups[1])
+}
+
+// generateRankingData builds a real-format WSC rankingdata.dat for the given
+// club/region, using rankingDataTemplate as a structural base and patching in
+// our own top-ranked players' Mii names.
+//
+// This was briefly disabled (serving the template verbatim) after the
+// community reported the generated file was "dead wrong" and a re-check
+// found rankingTemplateSlots' marker misses at least one real record
+// boundary (a ~2272-byte gap at content offset 6080 that is NOT all zero and
+// looks like a further sub-record with a slightly different header) - so our
+// understanding of the full record layout is still incomplete. Re-enabled
+// because the actual, better-evidenced cause of every TaskRunNBDL failure
+// tonight (including with the template served byte-for-byte unmodified) is
+// most likely Pretendo's own policylist server sending a malformed
+// <UpdateTime> (invalid seconds values like :85, :94 - see
+// fixPolicylistUpdateTime), which would block BOSS from running any task
+// regardless of content. Patching stays narrowly scoped to the one 20-byte
+// Mii name field we've actually verified (patchMiiName/
+// TestPatchMiiNameRoundTrip) rather than anything touching the
+// not-fully-understood record internals.
+func generateRankingData(clubCode, region uint32) ([]byte, error) {
+	slots := rankingTemplateSlots()
+	if len(slots) == 0 {
+		return nil, fmt.Errorf("rankingdata template: no slots found")
+	}
+
+	players, err := topRankedPlayers(clubCode, region, len(slots))
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]byte, len(rankingDataTemplate))
+	copy(out, rankingDataTemplate)
+
+	for i, pid := range players {
+		name := miiNameForPID(pid)
+		if name == "" {
+			continue
+		}
+		firstSubStart := slots[i][0]
+		patchMiiName(out[firstSubStart:firstSubStart+rankingSubRecordSize], name)
+	}
+
+	return out, nil
+}
+
+// wscSpotPassDataCache maps the MD5 hash referenced in a TaskSheet's <Url> to
+// the exact encrypted bytes that hash was computed from, so
+// handleWSCSpotPassData serves the same content handleWSCSpotPassFile just
+// promised — previously each handler called encryptBossFile independently
+// with its own random IV, so the hash and the served bytes never matched.
+var wscSpotPassDataCache sync.Map
+
+// realNintendoDataID queries Nintendo's still-live real BOSS tasksheet server
+// for the DataId it assigns a given bossAppId/task/file combination. nn::boss
+// appears to track a per-bossAppId expected DataId in the console's own local
+// state (confirmed: Nico's real bossAppId "4m8Xme1wKgzwslTJ" resolves to a
+// real, different DataId/TitleId on Nintendo's server than a fresh/unrelated
+// bossAppId does) - serving a hardcoded placeholder regardless of bossAppId
+// may be why real, previously-Nintendo-registered consoles fail where a
+// fresh/never-used bossAppId doesn't. Falls back to false if the real server
+// can't be reached (e.g. WAF), so the caller can use a placeholder instead.
+func realNintendoDataID(bossAppID, taskID, fileName, rawQuery string) (string, bool) {
+	target := fmt.Sprintf("https://npts.app.nintendo.net/p01/tasksheet/1/%s/%s/%s", bossAppID, taskID, fileName)
+	if rawQuery != "" {
+		target += "?" + rawQuery
+	}
+	resp, err := realNintendoHTTPClient.Get(target)
+	if err != nil {
+		log.Printf("BOSS capture: real Nintendo DataId lookup failed: %v", err)
+		return "", false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("BOSS capture: real Nintendo DataId lookup status=%d", resp.StatusCode)
+		return "", false
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", false
+	}
+	var sheet struct {
+		Files struct {
+			File struct {
+				DataId string `xml:"DataId"`
+			} `xml:"File"`
+		} `xml:"Files"`
+	}
+	if err := xml.Unmarshal(body, &sheet); err != nil {
+		log.Printf("BOSS capture: real Nintendo DataId parse failed: %v", err)
+		return "", false
+	}
+	if sheet.Files.File.DataId == "" {
+		return "", false
+	}
+	return sheet.Files.File.DataId, true
+}
+
+// handleWSCSpotPassFile serves a real-format single-File TaskSheet for WSC's
+// own SpotPass file lookups (e.g. sp1_rnk/rankingdata.dat) — the actual
+// request shape the console uses, bypassing the task-level listing entirely.
+// The Url points back at our own /p01/data/wsc/... path (boss.nicochristmann.net),
 // since npdi.cdn.pretendo.cc isn't redirected and wouldn't have our file.
 func handleWSCSpotPassFile(w http.ResponseWriter, r *http.Request) bool {
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
@@ -2362,64 +2786,98 @@ func handleWSCSpotPassFile(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	bossAppID, taskID, fileName := parts[3], parts[4], parts[5]
-	if bossAppID != wscBossAppID || wscSpotPassFileNames[taskID] != fileName {
+	// bossAppId is per-registration, not a fixed constant - see
+	// handleWSCSpotPassTasksheet's comment. Match on taskID/fileName alone
+	// and echo back whatever bossAppId the console actually used.
+	if wscSpotPassFileNames[taskID] != fileName {
 		return false
 	}
 
-	// Placeholder content: we don't know WSC's real internal rankingdata.dat
-	// format (no public documentation, Pretendo never implemented it either),
-	// so start with empty content — safest guess at "no ranking data yet"
-	// without risking the game parsing garbage as real entries.
-	encrypted, err := encryptBossFile([]byte{})
+	logBossRequest(r)
+
+	clubCode, region := clubAndRegionForRequest(r)
+	content, err := generateRankingData(clubCode, region)
+	if err != nil {
+		log.Printf("BOSS capture: generateRankingData failed, falling back to empty: %v", err)
+		content = []byte{}
+	}
+
+	encrypted, err := encryptBossFile(content)
 	if err != nil {
 		log.Printf("BOSS capture: WSC spotpass file encrypt failed: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return true
 	}
 	hash := fmt.Sprintf("%x", md5.Sum(encrypted))
+	wscSpotPassDataCache.Store(hash, encrypted)
+
+	dataID := "1"
+	if real, ok := realNintendoDataID(bossAppID, taskID, fileName, r.URL.RawQuery); ok {
+		dataID = real
+		log.Printf("BOSS capture: using real Nintendo DataId=%s for bossAppId=%s", dataID, bossAppID)
+	}
 
 	xmlBody := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <TaskSheet>
-  <TitleId>0005000010176900</TitleId>
+  <TitleId>%s</TitleId>
   <TaskId>%s</TaskId>
   <ServiceStatus>open</ServiceStatus>
   <Files>
     <File>
       <Filename>%s</Filename>
-      <DataId>1</DataId>
+      <DataId>%s</DataId>
       <Type>AppData</Type>
       <Url>https://boss.nicochristmann.net/p01/data/wsc/%s/%s/%s</Url>
       <Size>%d</Size>
       <Notify>
-        <New>app</New>
+        <New></New>
         <LED>false</LED>
       </Notify>
     </File>
   </Files>
 </TaskSheet>
-`, taskID, fileName, taskID, fileName, hash, len(encrypted))
+`, wscTitleIDForCountry(r.URL.Query().Get("c")), taskID, fileName, dataID, taskID, fileName, hash, len(encrypted))
 
-	log.Printf("BOSS capture: %s %s -> injected TaskSheet + hosting placeholder %s (%d bytes encrypted)", r.Method, r.URL.Path, fileName, len(encrypted))
+	log.Printf("BOSS capture: %s %s -> generated real-format TaskSheet + %s (%d bytes encrypted, bossAppId=%s club=%d region=%d)", r.Method, r.URL.Path, fileName, len(encrypted), bossAppID, clubCode, region)
 	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.Header().Set("Connection", "close") // see handleWSCSpotPassTasksheet's comment
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(xmlBody))
 	return true
 }
 
-// handleWSCSpotPassData serves the actual encrypted placeholder file bytes
+// handleWSCSpotPassData serves the actual encrypted rankingdata.dat bytes
 // referenced by handleWSCSpotPassFile's injected <Url>.
 func handleWSCSpotPassData(w http.ResponseWriter, r *http.Request) bool {
 	if !strings.HasPrefix(r.URL.Path, "/p01/data/wsc/") {
 		return false
 	}
-	encrypted, err := encryptBossFile([]byte{})
-	if err != nil {
-		log.Printf("BOSS capture: WSC spotpass data encrypt failed: %v", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return true
+	logBossRequest(r)
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	hash := parts[len(parts)-1]
+
+	var encrypted []byte
+	if v, ok := wscSpotPassDataCache.Load(hash); ok {
+		encrypted = v.([]byte)
+	} else {
+		// No matching TaskSheet fetch happened first (shouldn't normally
+		// occur) - regenerate with no club/region filter rather than fail.
+		content, err := generateRankingData(0, 0)
+		if err != nil {
+			content = []byte{}
+		}
+		var encErr error
+		encrypted, encErr = encryptBossFile(content)
+		if encErr != nil {
+			log.Printf("BOSS capture: WSC spotpass data encrypt failed: %v", encErr)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return true
+		}
 	}
-	log.Printf("BOSS capture: %s %s -> served placeholder data (%d bytes)", r.Method, r.URL.Path, len(encrypted))
+
+	log.Printf("BOSS capture: %s %s -> served %d bytes", r.Method, r.URL.Path, len(encrypted))
 	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Connection", "close") // see handleWSCSpotPassTasksheet's comment
 	w.WriteHeader(http.StatusOK)
 	w.Write(encrypted)
 	return true
@@ -2487,20 +2945,82 @@ func handleBossCapture(w http.ResponseWriter, r *http.Request) {
 	os.WriteFile(base+".response.txt", []byte(respLog), 0644)
 	os.WriteFile(base+".response.bin", respBody, 0644)
 
+	respHeader := resp.Header
+	// Pretendo's real policylist server has a consistent bug: <UpdateTime>'s
+	// seconds field is malformed (seen values like :85, :94, :80 - seconds
+	// only go 0-59). WSC's own BOSS client likely rejects the whole
+	// PolicyList as invalid when it can't parse this, which would block
+	// every subsequent SpotPass task regardless of what content we serve -
+	// this may be the real cause behind Task Error Code 1040340 persisting
+	// through every fix made to sp1_rnk specifically. Since we can't fix
+	// Pretendo's server, correct the timestamp before relaying to the
+	// console. Serve uncompressed (drop Content-Encoding) rather than
+	// re-encoding brotli - not worth the extra dependency for ~300 bytes.
+	if strings.HasPrefix(r.URL.Path, "/p01/policylist/") && resp.StatusCode == http.StatusOK {
+		fixed, changed, err := fixPolicylistUpdateTime(respBody, resp.Header.Get("Content-Encoding"))
+		if err != nil {
+			log.Printf("BOSS capture: policylist fixup failed, relaying as-is: %v", err)
+		} else if changed {
+			log.Printf("BOSS capture: policylist UpdateTime corrected for %s", r.URL.Path)
+			respBody = fixed
+			respHeader = resp.Header.Clone()
+			respHeader.Del("Content-Encoding")
+			respHeader.Set("Content-Length", fmt.Sprintf("%d", len(respBody)))
+		}
+	}
+
 	log.Printf("BOSS capture: %s %s -> %s status=%d bytes=%d (saved %s)",
 		r.Method, r.URL.Path, target, resp.StatusCode, len(respBody), base)
 
-	for k, vs := range resp.Header {
+	for k, vs := range respHeader {
 		for _, v := range vs {
 			w.Header().Add(k, v)
 		}
 	}
+	w.Header().Set("Connection", "close") // see handleWSCSpotPassTasksheet's comment
 	w.WriteHeader(resp.StatusCode)
 	w.Write(respBody)
 }
 
+// policylistUpdateTimeRe matches PolicyList's <UpdateTime>YYYY-MM-DDTHH:MM:SS+0000</UpdateTime>.
+var policylistUpdateTimeRe = regexp.MustCompile(`<UpdateTime>[^<]+</UpdateTime>`)
+
+// fixPolicylistUpdateTime decompresses (if needed) a policylist response body,
+// replaces a malformed <UpdateTime> with the current, correctly-formatted
+// time, and returns the corrected plaintext body. changed is false (body nil)
+// if no UpdateTime tag was found, so the caller can leave the response alone.
+func fixPolicylistUpdateTime(body []byte, contentEncoding string) ([]byte, bool, error) {
+	plain := body
+	if contentEncoding == "br" {
+		decoded, err := io.ReadAll(brotli.NewReader(bytes.NewReader(body)))
+		if err != nil {
+			return nil, false, fmt.Errorf("brotli decode: %w", err)
+		}
+		plain = decoded
+	}
+
+	if !policylistUpdateTimeRe.Match(plain) {
+		return nil, false, nil
+	}
+
+	replacement := fmt.Sprintf("<UpdateTime>%s+0000</UpdateTime>", time.Now().UTC().Format("2006-01-02T15:04:05"))
+	fixed := policylistUpdateTimeRe.ReplaceAll(plain, []byte(replacement))
+	return fixed, true, nil
+}
+
 // handleOLV forwards OLV discovery/API requests to miiverse-api on port 8080.
 func handleOLV(w http.ResponseWriter, r *http.Request) {
+	// Match Juxt's own detectVersion.ts logic: anything not explicitly a Wii U
+	// UA is treated as 'ctr' (3DS) - don't assume a specific 3DS UA substring,
+	// since that was never confirmed against a real device (see TLS ClientHello
+	// with empty SNI, confirmed to be the 3DS, whose UA didn't match "Nintendo 3DS").
+	is3DS := !strings.Contains(r.UserAgent(), "Nintendo WiiU")
+	var reqBodyCopy []byte
+	if is3DS {
+		reqBodyCopy, _ = io.ReadAll(r.Body)
+		r.Body.Close()
+		r.Body = io.NopCloser(bytes.NewReader(reqBodyCopy))
+	}
 	// CDN assets: proxy directly to S3 so the Wii U (which trusts only our cert) can load them.
 	for _, prefix := range cdnPrefixes {
 		if strings.HasPrefix(r.URL.Path, prefix) {
@@ -2547,12 +3067,55 @@ func handleOLV(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
+	// olv.nicochristmann.net (host/api_host in the discovery XML, and every
+	// hardcoded https://olv.nicochristmann.net/... asset/icon URL Juxt renders
+	// into HTML) is shared with Wii U and still signed by the 4096-bit CA,
+	// which 3DS's AddRootCA cave doesn't trust (it only fits a 2048-bit CA -
+	// see the discovery_string/rootca.der change in the Nimbus fork). A single
+	// untrusted preload/image URL is enough for CTR WebKit to abort loading
+	// the rest of the page's resources, including the trailing <script> tag -
+	// which is why the toolbar/navbar JS never even got requested. Rewrite
+	// every occurrence, in both the XML discovery fields and HTML asset URLs,
+	// to the 3DS-only, 2048-bit-CA-signed host - without touching what Wii U
+	// receives.
+	var respBodyCopy []byte
+	if is3DS {
+		raw, _ := io.ReadAll(resp.Body)
+		raw = bytes.ReplaceAll(raw, []byte(">olv.nicochristmann.net<"), []byte(">olv3ds.nicochristmann.net<"))
+		raw = bytes.ReplaceAll(raw, []byte("https://olv.nicochristmann.net"), []byte("https://olv3ds.nicochristmann.net"))
+		respBodyCopy = raw
+	}
 	for k, vs := range resp.Header {
+		// Node/Express's own "Keep-Alive: timeout=5" is a local implementation
+		// detail that Cloudflare strips when proxying Pretendo's real responses -
+		// a real console never sees it there. Drop it here too.
+		if strings.EqualFold(k, "Keep-Alive") {
+			continue
+		}
+		if is3DS && strings.EqualFold(k, "Content-Length") {
+			continue
+		}
 		for _, v := range vs {
 			w.Header().Add(k, v)
 		}
 	}
+	if is3DS {
+		w.Header().Set("Content-Length", strconv.Itoa(len(respBodyCopy)))
+	}
+	// Forcing "Connection: close" here (removed) made every 3DS image/asset
+	// request open a brand-new TLS handshake instead of reusing one - the
+	// 3DS's ssl:C module can't reliably sustain many concurrent handshakes to
+	// the same host, which is what caused the intermittent "unexpected
+	// message" alerts (a genuine TLS Alert record from the 3DS itself,
+	// confirmed via a raw packet capture) on parallel icon loads. Let
+	// upstream's own Connection: keep-alive pass through instead.
 	w.WriteHeader(resp.StatusCode)
+	if is3DS {
+		w.Write(respBodyCopy)
+		logOLV3DSExchange(r, reqBodyCopy, resp.StatusCode, resp.Header, respBodyCopy)
+		log.Printf("OLV proxy: %s %s -> 127.0.0.1:%s status=%d bytes=%d (3DS, captured)", r.Method, r.URL.Path, port, resp.StatusCode, len(respBodyCopy))
+		return
+	}
 	n, _ := io.Copy(w, resp.Body)
 	log.Printf("OLV proxy: %s %s -> 127.0.0.1:%s status=%d bytes=%d", r.Method, r.URL.Path, port, resp.StatusCode, n)
 }
@@ -2586,6 +3149,19 @@ func startOLVProxy() {
 	if err != nil {
 		log.Fatalf("boss capture cert: %v", err)
 	}
+	// 3DS-only discovery host, signed by a separate 2048-bit CA sized to fit the
+	// Nimbus miiverse patch's fixed 848-byte AddRootCA cave - the shared
+	// nicochristmann-nn-ca.crt (4096-bit) overflows that cave by 517 bytes.
+	olv3dsCert, err := tls.LoadX509KeyPair(baseCerts+"/3ds/olv3ds-nicochristmann-net.crt", baseCerts+"/3ds/olv3ds-nicochristmann-net.key")
+	if err != nil {
+		log.Fatalf("3ds olv cert: %v", err)
+	}
+	// n3ds_host from the discovery response - only ever contacted by 3DS
+	// (Wii U doesn't read this field), so safe to re-sign with the 3DS CA too.
+	ctrOlvCert, err := tls.LoadX509KeyPair(baseCerts+"/3ds/ctr-olv-nicochristmann-net.crt", baseCerts+"/3ds/ctr-olv-nicochristmann-net.key")
+	if err != nil {
+		log.Fatalf("3ds ctr.olv cert: %v", err)
+	}
 
 	getCert := func(chi *tls.ClientHelloInfo) (*tls.Certificate, error) {
 		switch chi.ServerName {
@@ -2597,6 +3173,10 @@ func startOLVProxy() {
 			return &pretendoCert, nil
 		case "boss.nicochristmann.net":
 			return &bossCert, nil
+		case "olv3ds.nicochristmann.net":
+			return &olv3dsCert, nil
+		case "ctr.olv.nicochristmann.net":
+			return &ctrOlvCert, nil
 		default:
 			return &olvCert, nil
 		}
@@ -2629,7 +3209,22 @@ func startOLVProxy() {
 	if err != nil {
 		log.Fatalf("olv listen: %v", err)
 	}
-	tlsLn := tls.NewListener(ln, tlsCfg)
+	// nginx's stream module does raw TCP passthrough for SNI-based routing to
+	// this listener (no HTTP layer, so no X-Forwarded-For is possible) - every
+	// connection here otherwise looks like it came from nginx itself
+	// (127.0.0.1), silently breaking any IP-based lookup (e.g. fetchRealPID)
+	// for real client identity. nginx now sends a PROXY protocol header ahead
+	// of the TLS bytes (proxy_protocol on; in nginx.conf's stream block) so we
+	// can recover the real client IP. Policy is USE (not the library's default
+	// REQUIRE) so a direct connection without the header - e.g. local testing -
+	// still works instead of hanging on ErrNoProxyProtocol.
+	proxyLn := &proxyproto.Listener{
+		Listener: ln,
+		Policy: func(net.Addr) (proxyproto.Policy, error) {
+			return proxyproto.USE, nil
+		},
+	}
+	tlsLn := tls.NewListener(proxyLn, tlsCfg)
 	mux := http.NewServeMux()
 	mux.HandleFunc("boss.nicochristmann.net/", handleBossCapture) // TEMPORARY — see handleBossCapture doc comment.
 	mux.HandleFunc("/", handleOLV)

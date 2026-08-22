@@ -25,3 +25,8 @@ minecraft-secure/minecraft-secure
 
 # convenience symlink to the top-level (gitignored) certs/ dir
 account-proxy/certs
+
+# debug traffic captures (device certs, IPs, session tokens - not for a public repo)
+act-capture/
+boss-capture/
+olv-capture-3ds/
