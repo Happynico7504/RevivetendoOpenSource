@@ -2980,6 +2980,8 @@ input[type=text]{border:1px solid #d1d5db;border-radius:4px;padding:.4rem .6rem;
 .badge-ok{background:#dcfce7;color:#166534}
 .badge-pending{background:#fef9c3;color:#854d0e}
 .mono{font-family:monospace;font-size:.8rem}
+.mii-mini{width:32px;height:32px;border-radius:6px;vertical-align:middle;margin-right:.4rem;background:#f4f4f5}
+.who{display:flex;align-items:center}
 </style>
 </head>
 <body>
@@ -2987,15 +2989,15 @@ input[type=text]{border:1px solid #d1d5db;border-radius:4px;padding:.4rem .6rem;
 <h1>Swapdoodle SpotPass Notes</h1>
 {{if .Msg}}<div class="msg">{{.Msg}}</div>{{end}}
 {{if .Err}}<div class="err">{{.Err}}</div>{{end}}
-<div class="note">Real Swap Doodle notes, uploaded and delivered entirely through the console's own normal flow. "Received" reflects that specific recipient's own notification row (DataStore's native per-recipient read/read_date tracking) - a note sent to several friends shows one row and one Received status per friend.</div>
+<div class="note">Real Swap Doodle notes, uploaded and delivered entirely through the console's own normal flow. "Received" reflects that specific recipient's own notification row (DataStore's native per-recipient read/read_date tracking) - a note sent to several friends shows one row and one Received status per friend. Sender/recipient avatars reuse the same Mii render pipeline as the rest of the admin panel - the note's own drawing content isn't decoded yet.</div>
 
 <table>
 <tr><th>DataID</th><th>Sender</th><th>Recipient</th><th>Size</th><th>Status</th><th>Received</th><th>Created</th></tr>
 {{range .Notes}}
 <tr>
   <td class="mono">{{.DataID}}</td>
-  <td>{{if .OwnerPNID}}<strong>{{.OwnerPNID}}</strong><br><span class="mono" style="color:#999">{{.OwnerPID}}</span>{{else}}<span class="mono">{{.OwnerPID}}</span>{{end}}</td>
-  <td>{{if .RecipientPID}}{{if .RecipientPNID}}<strong>{{.RecipientPNID}}</strong><br><span class="mono" style="color:#999">{{.RecipientPID}}</span>{{else}}<span class="mono">{{.RecipientPID}}</span>{{end}}{{else}}<span style="color:#aaa">—</span>{{end}}</td>
+  <td><div class="who"><img class="mii-mini" src="https://sos-de-fra-1.exo.io/olv-data/mii/{{.OwnerPID}}/normal_face.png" alt="" onerror="this.style.display='none'">{{if .OwnerPNID}}<strong>{{.OwnerPNID}}</strong><br><span class="mono" style="color:#999">{{.OwnerPID}}</span>{{else}}<span class="mono">{{.OwnerPID}}</span>{{end}}</div></td>
+  <td>{{if .RecipientPID}}<div class="who"><img class="mii-mini" src="https://sos-de-fra-1.exo.io/olv-data/mii/{{.RecipientPID}}/normal_face.png" alt="" onerror="this.style.display='none'">{{if .RecipientPNID}}<strong>{{.RecipientPNID}}</strong><br><span class="mono" style="color:#999">{{.RecipientPID}}</span>{{else}}<span class="mono">{{.RecipientPID}}</span>{{end}}</div>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
   <td>{{.Size}} bytes</td>
   <td>{{if .UploadCompleted}}<span class="badge badge-ok">Completed</span>{{else}}<span class="badge badge-pending">Pending</span>{{end}}</td>
   <td>{{if .Read}}<span class="badge badge-ok">Yes</span>{{else}}<span class="badge badge-pending">Not yet</span>{{end}}</td>
