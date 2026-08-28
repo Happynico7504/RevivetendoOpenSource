@@ -365,6 +365,7 @@ func main() {
 
 	go startOLVProxy()
 	go initMiiImages()
+	go backfillDsMiiImages()
 
 	addr := "0.0.0.0:6666"
 	log.Printf("account proxy listening on %s (TLS)", addr)
@@ -1309,18 +1310,119 @@ func uploadMiiImages(pid uint32, miiDataB64 string) {
 	}
 }
 
-// extractMiiFromSwapdoodleNote is a stub - Swapdoodle's note object format is
-// a chunk-tagged container (confirmed magic "BPK1" at a fixed offset across
-// every real sample checked), but the actual embedded Mii data location
-// isn't reliably known yet. An earlier "TMII" tag match looked promising but
-// didn't hold up across multiple real samples (present in some, absent or
-// shifted in others - consistent with coincidental ASCII noise in encoded
-// bytes, not a real fixed chunk). See project_swapdoodle_note_format_moderation
-// memory for the full investigation. Always returns ok=false until the
-// format is properly cracked - callers must treat that as "not yet available",
-// not as "this PID has no Mii".
+// lz10Decompress implements Nintendo's standard LZ10 compression (the GBA/DS/
+// 3DS LZSS variant used across many first-party formats): a 4-byte header
+// (type byte 0x10, then a 3-byte little-endian decompressed size), followed
+// by 1-byte flag groups where each bit selects a literal byte (0) or a
+// back-reference (1, encoded as 2 bytes: high nibble of the first byte is
+// length-3, the rest is displacement-1). Confirmed 2026-08-28 by decompressing
+// a real captured Swapdoodle note object byte-for-byte (see
+// extractMiiFromSwapdoodleNote's doc comment) - not used anywhere else yet.
+func lz10Decompress(data []byte) ([]byte, error) {
+	if len(data) < 4 || data[0] != 0x10 {
+		return nil, fmt.Errorf("not LZ10 (type byte %#x)", data[0])
+	}
+	size := int(data[1]) | int(data[2])<<8 | int(data[3])<<16
+	out := make([]byte, 0, size)
+	pos := 4
+	for len(out) < size {
+		if pos >= len(data) {
+			return nil, fmt.Errorf("lz10: truncated input")
+		}
+		flags := data[pos]
+		pos++
+		for bit := 7; bit >= 0 && len(out) < size; bit-- {
+			if (flags>>uint(bit))&1 == 1 {
+				if pos+1 >= len(data) {
+					return nil, fmt.Errorf("lz10: truncated back-reference")
+				}
+				b1, b2 := data[pos], data[pos+1]
+				pos += 2
+				length := int(b1>>4) + 3
+				disp := (int(b1&0x0F)<<8 | int(b2)) + 1
+				start := len(out) - disp
+				if start < 0 {
+					return nil, fmt.Errorf("lz10: invalid back-reference")
+				}
+				for i := 0; i < length; i++ {
+					out = append(out, out[start+i])
+				}
+			} else {
+				if pos >= len(data) {
+					return nil, fmt.Errorf("lz10: truncated literal")
+				}
+				out = append(out, data[pos])
+				pos++
+			}
+		}
+	}
+	return out, nil
+}
+
+// parseBPK1Blocks parses Swapdoodle's BPK1 container format (documented on
+// 3dbrew's Swapdoodle page, credited to community researchers Miles and
+// MrNbaYoh) - a 0x40-byte header (magic "BPK1", block count, then fields not
+// needed here) followed by one 0x14-byte entry per block (4-byte data
+// offset, 4-byte size, 4-byte checksum, 8-byte NUL-padded name), then the
+// blocks' own data. Confirmed live 2026-08-28 against a real captured note:
+// every block's offset+size exactly matches the next block's start, ending
+// exactly at EOF - real block names found: SHEET1, COLSLT1, THUMB2 (a real
+// JPEG thumbnail), STATIN1, COMMON1, MIISTD1 (the sender's Mii), DSTINF1,
+// RCVINF1.
+func parseBPK1Blocks(data []byte) (map[string][]byte, error) {
+	if len(data) < 0x40 || string(data[0:4]) != "BPK1" {
+		return nil, fmt.Errorf("not a BPK1 structure")
+	}
+	numBlocks := binary.LittleEndian.Uint32(data[4:8])
+	blocks := make(map[string][]byte, numBlocks)
+	off := 0x40
+	for i := uint32(0); i < numBlocks; i++ {
+		if off+0x14 > len(data) {
+			return nil, fmt.Errorf("bpk1: truncated block table")
+		}
+		dataOffset := binary.LittleEndian.Uint32(data[off : off+4])
+		blockSize := binary.LittleEndian.Uint32(data[off+4 : off+8])
+		name := strings.TrimRight(string(data[off+0xC:off+0x14]), "\x00")
+		if uint64(dataOffset)+uint64(blockSize) > uint64(len(data)) {
+			return nil, fmt.Errorf("bpk1: block %q out of range", name)
+		}
+		blocks[name] = data[dataOffset : dataOffset+blockSize]
+		off += 0x14
+	}
+	return blocks, nil
+}
+
+// extractMiiFromSwapdoodleNote decodes a real Swapdoodle note object
+// (LZ10-compressed BPK1 container - see lz10Decompress/parseBPK1Blocks) and
+// returns its MIISTD1 block, the sender's embedded Mii. Confirmed live
+// 2026-08-28 against a real captured note by finding the sender's own PNID
+// name UTF-16LE-encoded inside the extracted bytes.
 func extractMiiFromSwapdoodleNote(noteBytes []byte) (miiData []byte, ok bool) {
-	return nil, false
+	decompressed, err := lz10Decompress(noteBytes)
+	if err != nil {
+		log.Printf("extractMiiFromSwapdoodleNote: lz10: %v", err)
+		return nil, false
+	}
+	blocks, err := parseBPK1Blocks(decompressed)
+	if err != nil {
+		log.Printf("extractMiiFromSwapdoodleNote: bpk1: %v", err)
+		return nil, false
+	}
+	mii, found := blocks["MIISTD1"]
+	if !found || len(mii) == 0 {
+		return nil, false
+	}
+	// MIISTD1 is 128 bytes, but the real Mii structure (the same shape the
+	// mii-unsecure.ariankordi.net renderer already used elsewhere in this
+	// file expects, which rejects anything over 96 bytes with "data length
+	// should be between 46-96 bytes") is only the first 96 - the trailing 32
+	// are padding. Confirmed live 2026-08-28: the first 96 bytes render a
+	// real PNG (200, valid image); every other 96-byte slice tried (offsets
+	// 16, 32) 500s.
+	if len(mii) > 96 {
+		mii = mii[:96]
+	}
+	return mii, true
 }
 
 // cacheDsMii is ds_devices' write path - the 3DS-PID-keyed equivalent of
@@ -1347,11 +1449,11 @@ func cacheDsMii(pid int64, rawMiiData []byte) {
 }
 
 // backfillDsMiiImages scans Swapdoodle's own note objects for owner PIDs
-// that ds_devices hasn't cached yet, fetches each one's most recent note
-// from S3, and attempts extraction. A no-op today (extractMiiFromSwapdoodleNote
-// always returns false) but the full pipeline - DB scan, S3 fetch, cache
-// write, S3 Mii render reuse - is wired end to end and ready for whenever
-// that stub is filled in.
+// that ds_devices hasn't cached yet, fetches one of their notes from S3
+// (any note works - MIISTD1 is the sender's own Mii, identical across every
+// note they've sent, not per-note content), and extracts+caches it via
+// extractMiiFromSwapdoodleNote/cacheDsMii. Run once at startup (see
+// go backfillDsMiiImages() in main()), same pattern as initMiiImages.
 func backfillDsMiiImages() {
 	if swapdoodleDB == nil || db == nil {
 		return
