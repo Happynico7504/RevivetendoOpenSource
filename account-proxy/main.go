@@ -4228,9 +4228,43 @@ func markSwapdoodleBossServed(dataID, pid int64) {
 // documented to behave. If background delivery regresses, this experiment
 // is the first thing to revert (see feedback_swapdoodle_read_flag_conflation
 // memory for the related history).
+// swapdoodleRingDataDir holds the real, genuine Nintendo-served ring-file
+// content (dstsetting.boss, dstdatList.bin.boss, nt1.boss, nt2.boss),
+// recovered 2026-08-28 from the community "3ds-boss-data" archive.org
+// collection (see reference_3ds_spotpass_archive memory) - real bytes
+// captured live from npts.app.nintendo.net in April 2024, just before
+// Nintendo shut the service down. Kept outside the git repo (like
+// /home/nico/boss_keys.bin) since this repo pushes to a public GitHub
+// remote and this is genuine copyrighted Nintendo content, not something
+// to publish. Falls back to the old synthetic placeholder if a file is
+// missing, so an unrecognized future ring file still gets *something*.
+const swapdoodleRingDataDir = "/home/nico/swapdoodle-ring-data"
+
+var swapdoodleRingFiles = map[string]string{
+	"/dstsetting":     "dstsetting.boss",
+	"/dstdatList.bin": "dstdatList.bin.boss",
+	"/nt1":            "nt1.boss",
+	"/nt2":            "nt2.boss",
+}
+
 func handleNpdlCDN(w http.ResponseWriter, r *http.Request) {
 	isRingEC1 := strings.Contains(r.URL.Path, "/RNG_EC1/") && strings.HasSuffix(r.URL.Path, ".dlp")
 	if strings.Contains(r.URL.Path, "/RNG_") && !isRingEC1 {
+		for suffix, filename := range swapdoodleRingFiles {
+			if !strings.HasSuffix(r.URL.Path, suffix) {
+				continue
+			}
+			data, err := os.ReadFile(swapdoodleRingDataDir + "/" + filename)
+			if err != nil {
+				log.Printf("npdl CDN: %s -> real ring file %s unavailable (%v), falling back to placeholder", r.URL.Path, filename, err)
+				break
+			}
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.WriteHeader(http.StatusOK)
+			w.Write(data)
+			log.Printf("npdl CDN: %s -> served real captured Nintendo content (%s, %d bytes)", r.URL.Path, filename, len(data))
+			return
+		}
 		// Experiment as of 2026-08-27 - previously always answered 304 Not
 		// Modified here (the "same synthetic-304 trick as dstsetting"
 		// mentioned in this function's doc comment). Per the BOSS
