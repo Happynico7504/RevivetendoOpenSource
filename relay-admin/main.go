@@ -2996,8 +2996,8 @@ input[type=text]{border:1px solid #d1d5db;border-radius:4px;padding:.4rem .6rem;
 {{range .Notes}}
 <tr>
   <td class="mono">{{.DataID}}</td>
-  <td><div class="who"><img class="mii-mini" src="https://sos-de-fra-1.exo.io/olv-data/mii/{{.OwnerPID}}/normal_face.png" alt="" onerror="this.style.display='none'">{{if .OwnerPNID}}<strong>{{.OwnerPNID}}</strong><br><span class="mono" style="color:#999">{{.OwnerPID}}</span>{{else}}<span class="mono">{{.OwnerPID}}</span>{{end}}</div></td>
-  <td>{{if .RecipientPID}}<div class="who"><img class="mii-mini" src="https://sos-de-fra-1.exo.io/olv-data/mii/{{.RecipientPID}}/normal_face.png" alt="" onerror="this.style.display='none'">{{if .RecipientPNID}}<strong>{{.RecipientPNID}}</strong><br><span class="mono" style="color:#999">{{.RecipientPID}}</span>{{else}}<span class="mono">{{.RecipientPID}}</span>{{end}}</div>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
+  <td><div class="who"><img class="mii-mini" src="https://sos-de-fra-1.exo.io/revivetendo-data/mii/{{.OwnerPID}}/normal_face.png" alt="" onerror="this.style.display='none'">{{if .OwnerPNID}}<strong>{{.OwnerPNID}}</strong><br><span class="mono" style="color:#999">{{.OwnerPID}}</span>{{else}}<span class="mono">{{.OwnerPID}}</span>{{end}}</div></td>
+  <td>{{if .RecipientPID}}<div class="who"><img class="mii-mini" src="https://sos-de-fra-1.exo.io/revivetendo-data/mii/{{.RecipientPID}}/normal_face.png" alt="" onerror="this.style.display='none'">{{if .RecipientPNID}}<strong>{{.RecipientPNID}}</strong><br><span class="mono" style="color:#999">{{.RecipientPID}}</span>{{else}}<span class="mono">{{.RecipientPID}}</span>{{end}}</div>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
   <td>{{.Size}} bytes</td>
   <td>{{if .UploadCompleted}}<span class="badge badge-ok">Completed</span>{{else}}<span class="badge badge-pending">Pending</span>{{end}}</td>
   <td>{{if .Read}}<span class="badge badge-ok">Yes</span>{{else}}<span class="badge badge-pending">Not yet</span>{{end}}</td>

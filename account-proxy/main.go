@@ -1236,6 +1236,37 @@ var miiExpressions = map[string]string{
 	"sorrow.png":              "sorrow",
 }
 
+// revivetendoDataBucket holds generic, non-Wii-U-account-specific project
+// data - starting with 3DS Mii renders (see uploadDsMiiImages). Deliberately
+// separate from s3Bucket (olv-data, the Wii U account/Mii bucket): even
+// though a PID can only ever belong to one real account (Swapdoodle's NEX
+// auth requires proving that account's real password - see
+// extractMiiFromSwapdoodleNote's neighbors), a 3DS account and a Wii U
+// account are still two independent registrations that can each hold any
+// PID value (confirmed live: the user's own 3DS PID and Wii U PID are two
+// different numbers - see user_identity memory). Writing 3DS-derived images
+// into the same bucket/key scheme as Wii U's relies on that never
+// coinciding by chance across two unrelated real accounts; a dedicated
+// bucket removes that dependency entirely instead of trusting it.
+const revivetendoDataBucket = "revivetendo-data"
+
+var revivetendoBucketOnce sync.Once
+
+// ensureBucketExists is idempotent - MakeBucket on a bucket that's already
+// there returns a "you already own this" error on every S3-compatible
+// provider, so that specific failure is expected and silently ignored.
+func ensureBucketExists(s3c *minio.Client, bucket string) {
+	exists, err := s3c.BucketExists(context.Background(), bucket)
+	if err == nil && exists {
+		return
+	}
+	if err := s3c.MakeBucket(context.Background(), bucket, minio.MakeBucketOptions{Region: s3Region}); err != nil {
+		log.Printf("ensureBucketExists: MakeBucket %s: %v", bucket, err)
+	} else {
+		log.Printf("ensureBucketExists: created bucket %s", bucket)
+	}
+}
+
 // uploadMiiImages renders each expression in miiExpressions from the user's raw
 // FFLStoreData and uploads them to S3. Pretendo's own CDN only ever serves a single
 // static "standard" face render (no per-expression endpoint exists there), so all
@@ -1245,6 +1276,25 @@ var miiExpressions = map[string]string{
 // smile_open_mouth/wink_left/surprise_open_mouth/frustrated/sorrow match exactly).
 // Skips if the images are already present in S3 to avoid redundant re-rendering.
 func uploadMiiImages(pid uint32, miiDataB64 string) {
+	renderAndUploadMii(pid, miiDataB64, s3Bucket)
+}
+
+// uploadDsMiiImages is uploadMiiImages' 3DS counterpart - same render
+// pipeline, but targets revivetendoDataBucket instead of the Wii U account
+// bucket. See revivetendoDataBucket's doc comment for why they're kept
+// separate.
+func uploadDsMiiImages(pid uint32, miiDataB64 string) {
+	if s3Endpoint != "" && s3AccessKey != "" {
+		if s3c, err := minio.New(s3Endpoint, &minio.Options{
+			Creds: credentials.NewStaticV4(s3AccessKey, s3SecretKey, ""), Region: s3Region, Secure: true,
+		}); err == nil {
+			revivetendoBucketOnce.Do(func() { ensureBucketExists(s3c, revivetendoDataBucket) })
+		}
+	}
+	renderAndUploadMii(pid, miiDataB64, revivetendoDataBucket)
+}
+
+func renderAndUploadMii(pid uint32, miiDataB64 string, bucket string) {
 	if s3Endpoint == "" || s3AccessKey == "" || miiDataB64 == "" {
 		return
 	}
@@ -1254,11 +1304,11 @@ func uploadMiiImages(pid uint32, miiDataB64 string) {
 		Secure: true,
 	})
 	if err != nil {
-		log.Printf("uploadMiiImages: s3 init: %v", err)
+		log.Printf("renderAndUploadMii: s3 init: %v", err)
 		return
 	}
 	checkKey := fmt.Sprintf("mii/%d/normal_face.png", pid)
-	if info, statErr := s3c.StatObject(context.Background(), s3Bucket, checkKey, minio.StatObjectOptions{}); statErr == nil {
+	if info, statErr := s3c.StatObject(context.Background(), bucket, checkKey, minio.StatObjectOptions{}); statErr == nil {
 		if time.Since(info.LastModified) < 3*24*time.Hour {
 			return // already uploaded and fresh
 		}
@@ -1266,7 +1316,7 @@ func uploadMiiImages(pid uint32, miiDataB64 string) {
 
 	miiBytes, err := base64.StdEncoding.DecodeString(miiDataB64)
 	if err != nil {
-		log.Printf("uploadMiiImages: decode mii data pid=%d: %v", pid, err)
+		log.Printf("renderAndUploadMii: decode mii data pid=%d: %v", pid, err)
 		return
 	}
 	renderDataParam := base64.RawURLEncoding.EncodeToString(miiBytes)
@@ -1278,24 +1328,24 @@ func uploadMiiImages(pid uint32, miiDataB64 string) {
 		)
 		resp, err := http.Get(renderURL)
 		if err != nil {
-			log.Printf("uploadMiiImages: render fetch pid=%d expression=%s: %v", pid, expression, err)
+			log.Printf("renderAndUploadMii: render fetch pid=%d expression=%s: %v", pid, expression, err)
 			continue
 		}
 		if resp.StatusCode != 200 {
-			log.Printf("uploadMiiImages: render fetch pid=%d expression=%s status=%d", pid, expression, resp.StatusCode)
+			log.Printf("renderAndUploadMii: render fetch pid=%d expression=%s status=%d", pid, expression, resp.StatusCode)
 			resp.Body.Close()
 			continue
 		}
 		pngData, readErr := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if readErr != nil {
-			log.Printf("uploadMiiImages: read render pid=%d expression=%s: %v", pid, expression, readErr)
+			log.Printf("renderAndUploadMii: read render pid=%d expression=%s: %v", pid, expression, readErr)
 			continue
 		}
 
 		key := fmt.Sprintf("mii/%d/%s", pid, filename)
 		_, err = s3c.PutObject(
-			context.Background(), s3Bucket, key,
+			context.Background(), bucket, key,
 			bytes.NewReader(pngData), int64(len(pngData)),
 			minio.PutObjectOptions{
 				ContentType:  "image/png",
@@ -1303,9 +1353,9 @@ func uploadMiiImages(pid uint32, miiDataB64 string) {
 			},
 		)
 		if err != nil {
-			log.Printf("uploadMiiImages: s3 put %s: %v", key, err)
+			log.Printf("renderAndUploadMii: s3 put %s/%s: %v", bucket, key, err)
 		} else {
-			log.Printf("uploadMiiImages: uploaded %s for PID %d", key, pid)
+			log.Printf("renderAndUploadMii: uploaded %s/%s for PID %d", bucket, key, pid)
 		}
 	}
 }
@@ -1429,10 +1479,11 @@ func extractMiiFromSwapdoodleNote(noteBytes []byte) (miiData []byte, ok bool) {
 // wii_devices for Mii caching, since Swapdoodle's own NASC/locator auth flow
 // never touches the Wii-U-shaped code that populates wii_devices (see
 // ds_devices' schema comment in main()). Stores the raw bytes AND pushes
-// them through the exact same uploadMiiImages S3 pipeline relay-admin
-// already reads from (mii/{pid}/normal_face.png etc.) - so once real Mii
-// bytes are available, the relay-admin template needs zero changes to pick
-// them up; it's already looking at that same S3 path for every PID.
+// them through the same render pipeline as uploadMiiImages, but into the
+// dedicated revivetendoDataBucket (mii/{pid}/normal_face.png etc. there,
+// not in the Wii U account bucket) - see revivetendoDataBucket's doc
+// comment for why. relay-admin's Swapdoodle notes page template must point
+// at this bucket for sender/recipient avatars, not the Wii U one.
 func cacheDsMii(pid int64, rawMiiData []byte) {
 	if db == nil || len(rawMiiData) == 0 {
 		return
@@ -1445,7 +1496,7 @@ func cacheDsMii(pid int64, rawMiiData []byte) {
 		log.Printf("cacheDsMii: db upsert pid=%d: %v", pid, err)
 		return
 	}
-	uploadMiiImages(uint32(pid), base64.StdEncoding.EncodeToString(rawMiiData))
+	uploadDsMiiImages(uint32(pid), base64.StdEncoding.EncodeToString(rawMiiData))
 }
 
 // backfillDsMiiImages scans Swapdoodle's own note objects for owner PIDs
