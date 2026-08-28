@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,7 +18,6 @@ import (
 	"time"
 
 	nex "github.com/PretendoNetwork/nex-go"
-	"go.mongodb.org/mongo-driver/bson"
 	"github.com/PretendoNetwork/nex-protocols-go/datastore"
 	match_making "github.com/PretendoNetwork/nex-protocols-go/match-making"
 	match_making_ext "github.com/PretendoNetwork/nex-protocols-go/match-making-ext"
@@ -26,6 +26,8 @@ import (
 	ranking "github.com/PretendoNetwork/nex-protocols-go/ranking"
 	secure_connection "github.com/PretendoNetwork/nex-protocols-go/secure-connection"
 	utility "github.com/PretendoNetwork/nex-protocols-go/utility"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 // --- In-memory DataStore ---
@@ -42,28 +44,37 @@ type dsObject struct {
 	Size       uint32    `json:"size"`
 	Created    time.Time `json:"created"`
 	Updated    time.Time `json:"updated"`
+
+	// RankCategory/RankGroups identify which ranking slot (see
+	// dsAllocRankingScore) this object holds, if any. Only set on objects
+	// created by dsAllocRankingScore - used to find-and-update the existing
+	// slot on a re-upload instead of piling up duplicate objects that
+	// SearchObject's unordered dsStore.Range could return in place of the
+	// newest one (the "club info doesn't update its stats" bug, 2026-08-23).
+	RankCategory uint32 `json:"rank_category,omitempty"`
+	RankGroups   []byte `json:"rank_groups,omitempty"`
 }
 
 var (
-	dsStore   sync.Map // uint64 → *dsObject
-	dsNextID  uint64 = 1
+	dsStore  sync.Map // uint64 → *dsObject
+	dsNextID uint64   = 1
 )
 
 func dsAlloc(ownerPID uint32, p *datastore.DataStorePreparePostParam) *dsObject {
 	id := atomic.AddUint64(&dsNextID, 1) - 1
 	now := time.Now()
 	obj := &dsObject{
-		DataID:    id,
-		OwnerPID:  ownerPID,
-		DataType:  p.DataType,
+		DataID:     id,
+		OwnerPID:   ownerPID,
+		DataType:   p.DataType,
 		MetaBinary: p.MetaBinary,
-		Tags:      p.Tags,
-		Name:      p.Name,
-		Flag:      p.Flag,
-		Period:    p.Period,
-		Size:      p.Size,
-		Created:   now,
-		Updated:   now,
+		Tags:       p.Tags,
+		Name:       p.Name,
+		Flag:       p.Flag,
+		Period:     p.Period,
+		Size:       p.Size,
+		Created:    now,
+		Updated:    now,
 	}
 	dsStore.Store(id, obj)
 	go dsSave()
@@ -108,6 +119,43 @@ func dsClubRegionPrefix(ownerPID uint32) string {
 	return prefix
 }
 
+// juxtMainCommunityByRegion holds the real Miiverse main-community IDs seeded
+// from Archiverse (see juxt/apps/miiverse-api/scripts/seedWscAllRegions.ts) -
+// fixed once seeded, since they're the real archived GameID values, not
+// randomly generated. Used only to scope resolveClubName's lookup to the
+// right region's community tree.
+var juxtMainCommunityByRegion = map[string]string{
+	"us": "14866558073079465304", // America
+	"eu": "14866558073079666960", // Europe
+	"jp": "14866558073078154134", // Japan
+}
+
+// resolveClubName looks up the real-world name for a club code by matching it
+// 1:1 against Juxt's communities collection: find the sub-community parented
+// under the matching region's real main community whose app_data equals the
+// zero-padded 3-digit code (the same "%03d" format WSC's own club-info screen
+// matches locally - see the app_data comment on Community.create in
+// seedWscAllRegions.ts). Only resolves what's actually been confirmed and
+// entered there (currently just GER Hesse = "033") - returns ok=false for
+// anything not yet known, rather than guessing.
+func resolveClubName(regionPrefix string, code uint32) (string, bool) {
+	mainID, ok := juxtMainCommunityByRegion[regionPrefix]
+	if !ok || juxtCommunitiesCol == nil {
+		return "", false
+	}
+	var doc struct {
+		Name string `bson:"name"`
+	}
+	err := juxtCommunitiesCol.FindOne(context.Background(), bson.M{
+		"parent":   mainID,
+		"app_data": fmt.Sprintf("%03d", code),
+	}).Decode(&doc)
+	if err != nil {
+		return "", false
+	}
+	return doc.Name, true
+}
+
 // dsAllocRankingScore registers an UploadScore call as a searchable DataStore
 // object. The club-code portion of the tag (groups[0], zero-padded to 3
 // digits) is confirmed against real SearchObject calls (e.g. groups=[32,...]
@@ -124,7 +172,6 @@ func dsClubRegionPrefix(ownerPID uint32) string {
 // find something rather than being precisely correct about which category
 // is which. See handleUploadScore's comment.
 func dsAllocRankingScore(ownerPID, category, score uint32, param uint64, groups []byte) *dsObject {
-	id := atomic.AddUint64(&dsNextID, 1) - 1
 	now := time.Now()
 	regionPrefix := dsClubRegionPrefix(ownerPID)
 	tags := []string{fmt.Sprintf("category_%d", category)}
@@ -145,14 +192,46 @@ func dsAllocRankingScore(ownerPID, category, score uint32, param uint64, groups 
 	metaBinary := make([]byte, 8)
 	binary.LittleEndian.PutUint32(metaBinary[0:], score)
 	binary.LittleEndian.PutUint32(metaBinary[4:], uint32(param))
+
+	// Find the existing ranking slot for this owner+category and update it in
+	// place rather than inserting a new object every upload - otherwise
+	// SearchObject's unordered dsStore.Range can keep returning an older
+	// duplicate forever instead of the latest score, which is exactly what
+	// made club info look frozen. Matches on category alone (not also
+	// groups/club) - confirmed 2026-08-23 that switching clubs still uploads
+	// under the same category with different groups, and matching groups too
+	// let that slip through and create a second permanent duplicate the exact
+	// same way the original bug did (a player has exactly one current record
+	// per stat, regardless of which club they're presently representing).
+	var existing *dsObject
+	dsStore.Range(func(_, v interface{}) bool {
+		obj := v.(*dsObject)
+		if obj.OwnerPID == ownerPID && obj.RankCategory == category {
+			existing = obj
+			return false
+		}
+		return true
+	})
+	if existing != nil {
+		existing.MetaBinary = metaBinary
+		existing.Tags = tags
+		existing.RankGroups = append([]byte{}, groups...)
+		existing.Updated = now
+		go dsSave()
+		return existing
+	}
+
+	id := atomic.AddUint64(&dsNextID, 1) - 1
 	obj := &dsObject{
-		DataID:     id,
-		OwnerPID:   ownerPID,
-		DataType:   0xFFFF,
-		MetaBinary: metaBinary,
-		Tags:       tags,
-		Created:    now,
-		Updated:    now,
+		DataID:       id,
+		OwnerPID:     ownerPID,
+		DataType:     0xFFFF,
+		MetaBinary:   metaBinary,
+		Tags:         tags,
+		Created:      now,
+		Updated:      now,
+		RankCategory: category,
+		RankGroups:   append([]byte{}, groups...),
 	}
 	dsStore.Store(id, obj)
 	go dsSave()
@@ -161,22 +240,22 @@ func dsAllocRankingScore(ownerPID, category, score uint32, param uint64, groups 
 
 func dsMetaInfo(obj *dsObject) *datastore.DataStoreMetaInfo {
 	meta := datastore.NewDataStoreMetaInfo()
-	meta.DataID    = obj.DataID
-	meta.OwnerID   = obj.OwnerPID
-	meta.Size      = obj.Size
-	meta.DataType  = obj.DataType
-	meta.Name      = obj.Name
+	meta.DataID = obj.DataID
+	meta.OwnerID = obj.OwnerPID
+	meta.Size = obj.Size
+	meta.DataType = obj.DataType
+	meta.Name = obj.Name
 	meta.MetaBinary = obj.MetaBinary
-	meta.Permission    = datastore.NewDataStorePermission()
+	meta.Permission = datastore.NewDataStorePermission()
 	meta.DelPermission = datastore.NewDataStorePermission()
-	meta.CreatedTime  = nex.NewDateTime(nexDateTime(obj.Created))
-	meta.UpdatedTime  = nex.NewDateTime(nexDateTime(obj.Updated))
+	meta.CreatedTime = nex.NewDateTime(nexDateTime(obj.Created))
+	meta.UpdatedTime = nex.NewDateTime(nexDateTime(obj.Updated))
 	meta.ReferredTime = nex.NewDateTime(0)
-	meta.ExpireTime   = nex.NewDateTime(0)
-	meta.Period   = obj.Period
-	meta.Flag     = obj.Flag
-	meta.Tags     = obj.Tags
-	meta.Ratings  = []*datastore.DataStoreRatingInfoWithSlot{}
+	meta.ExpireTime = nex.NewDateTime(0)
+	meta.Period = obj.Period
+	meta.Flag = obj.Flag
+	meta.Tags = obj.Tags
+	meta.Ratings = []*datastore.DataStoreRatingInfoWithSlot{}
 	return meta
 }
 
@@ -316,6 +395,65 @@ func migrateRankingScoreRegions() {
 	}
 }
 
+// migrateRankingScoreDedup collapses duplicate ranking-score objects created by
+// old dsAllocRankingScore calls from before it started updating an existing slot
+// in place instead of always inserting a new object (see that function's
+// comment - the "club info doesn't update its stats" bug, fixed 2026-08-23:
+// every UploadScore piled up another object with the same tags, and
+// SearchObject's unordered dsStore.Range could keep returning an older
+// duplicate forever instead of the latest score). Reconstructs each object's
+// (owner, category) key from its tags, since RankCategory didn't exist on
+// objects created before the fix, keeps only the most-recently-updated object
+// per key, and deletes the rest. Keyed on category alone, not also groups -
+// a player switching clubs still uploads under the same category with
+// different groups, and including groups in the key let that duplicate slip
+// through this same cleanup (confirmed 2026-08-23 on a real account that had
+// switched clubs).
+func migrateRankingScoreDedup() {
+	type rankKey struct {
+		pid      uint32
+		category uint32
+	}
+	best := map[rankKey]*dsObject{}
+	var stale []uint64
+	dsStore.Range(func(_, v interface{}) bool {
+		obj := v.(*dsObject)
+		if obj.DataType != 0xFFFF {
+			return true
+		}
+		var category uint32
+		var groups []byte
+		for _, t := range obj.Tags {
+			if n, err := strconv.Atoi(strings.TrimPrefix(t, "category_")); err == nil && strings.HasPrefix(t, "category_") {
+				category = uint32(n)
+			}
+			if n, err := strconv.Atoi(strings.TrimPrefix(t, "group_")); err == nil && strings.HasPrefix(t, "group_") {
+				groups = append(groups, byte(n))
+			}
+		}
+		k := rankKey{pid: obj.OwnerPID, category: category}
+		cur, ok := best[k]
+		if !ok || obj.Updated.After(cur.Updated) {
+			if ok {
+				stale = append(stale, cur.DataID)
+			}
+			best[k] = obj
+			obj.RankCategory = category
+			obj.RankGroups = groups
+		} else {
+			stale = append(stale, obj.DataID)
+		}
+		return true
+	})
+	for _, id := range stale {
+		dsStore.Delete(id)
+	}
+	if len(stale) > 0 {
+		fmt.Printf("migrateRankingScoreDedup: removed %d stale duplicate ranking object(s)\n", len(stale))
+		go dsSave()
+	}
+}
+
 // watchRankingScoreRegions re-runs migrateRankingScoreRegions() periodically instead
 // of only once at startup. A player's profile object can transiently lose its real
 // DataType (2/3) - e.g. a server-side DataStore reset while their console still thinks
@@ -438,6 +576,88 @@ var gatheringFailCount sync.Map // uint32 gid → int
 // baseline instead of reporting one bogus multi-hour "gap" across the reconnect.
 var lastPacketAt sync.Map // uint32 pid → time.Time
 
+// holePunchingSince tracks PIDs currently mid-NAT-traversal (both the requester and
+// every peer it's probing - RequestProbeInitiationExt's target list), so
+// watchStaleConnections can exempt them entirely instead of just tolerating a longer
+// idle gap. Cleared on ReportNATTraversalResult. The stored time.Time is a safety
+// expiry, not a display value: if a client crashes or drops mid-handshake and never
+// reports a result, this would otherwise exempt that PID from stale-cleanup forever.
+var holePunchingSince sync.Map // uint32 pid → time.Time (when marked)
+
+// holePunchExemptionMax bounds how long a hole-punching exemption can last before
+// watchStaleConnections stops trusting it and falls back to normal idle checking -
+// covers the case where ReportNATTraversalResult never arrives (client crash,
+// dropped connection mid-handshake) so an abandoned session isn't exempted forever.
+// Was 60s; confirmed too short on 2026-08-23 - a real natm=1/natf=2 pairing needed
+// over 60s (StaleDisconnect fired at idleFor=1m4s/1m50s) and then succeeded almost
+// instantly (rtt=165ms) on the very next attempt after being forced to reconnect.
+// Raised well past any observed real attempt; a stuck-forever exemption from an
+// abandoned handshake is far cheaper than killing one that would've succeeded.
+const holePunchExemptionMax = 5 * time.Minute
+
+func markHolePunching(pid uint32) {
+	holePunchingSince.Store(pid, time.Now())
+}
+
+func clearHolePunching(pid uint32) {
+	holePunchingSince.Delete(pid)
+}
+
+// isHolePunchExempt reports whether pid is currently within a live (unexpired)
+// hole-punching exemption window.
+func isHolePunchExempt(pid uint32) bool {
+	since, ok := holePunchingSince.Load(pid)
+	if !ok {
+		return false
+	}
+	return time.Since(since.(time.Time)) < holePunchExemptionMax
+}
+
+// natFailureBlockedUntil holds pids that just failed NAT traversal (typically a
+// symmetric NAT/strict firewall that can never hole-punch, not a one-off blip), and
+// when their matchmaking block expires. A player behind a NAT that can never
+// hole-punch would otherwise keep re-entering matchmaking, pairing with and wasting
+// the time of a new real opponent every attempt. Enforced in two places: a blocked
+// pid always gets its own solo gathering in handleAutoMatchmakeRaw rather than
+// joining a real waiting player, and dbFindGathering skips any candidate gathering
+// hosted by a currently-blocked pid - so blocked players are fully isolated from
+// real matchmaking in both directions without needing a client-visible rejection.
+var natFailureBlockedUntil sync.Map // uint32 pid → time.Time (block expiry)
+
+const natFailureBlockDuration = 5 * time.Minute
+
+func blockFromMatchmaking(pid uint32) {
+	natFailureBlockedUntil.Store(pid, time.Now().Add(natFailureBlockDuration))
+}
+
+func isBlockedFromMatchmaking(pid uint32) bool {
+	until, ok := natFailureBlockedUntil.Load(pid)
+	if !ok {
+		return false
+	}
+	if time.Now().After(until.(time.Time)) {
+		natFailureBlockedUntil.Delete(pid)
+		return false
+	}
+	return true
+}
+
+// stationPIDRe extracts the PID field from a PRUDP station string, e.g.
+// "prudp:/address=1.2.3.4;port=1;PID=1037540335;RVCID=11;...".
+var stationPIDRe = regexp.MustCompile(`;PID=(\d+)`)
+
+func extractStationPID(station string) (uint32, bool) {
+	m := stationPIDRe.FindStringSubmatch(station)
+	if m == nil {
+		return 0, false
+	}
+	n, err := strconv.ParseUint(m[1], 10, 32)
+	if err != nil {
+		return 0, false
+	}
+	return uint32(n), true
+}
+
 func packetTypeName(t uint16) string {
 	switch t {
 	case nex.SynPacket:
@@ -504,8 +724,14 @@ func logPacketGaps(packet *nex.PacketV1) {
 // cadence (~5-10s self-initiated Ping, p90=9s, holds even mid-match — see PacketGap
 // logs). Validated in shadow mode 2026-08-19 through a full bowling match: the active
 // participants held a rock-solid ~5s cadence with zero false flags, while abandoned
-// sessions sat idle and climbing with no PacketGap at all. Loosen this if real-world
-// jitter (bad WiFi, packet loss) ever produces false positives on genuinely-connected
+// sessions sat idle and climbing with no PacketGap at all.
+//
+// The matchmaking/NAT hole-punching phase legitimately breaks this cadence (both
+// peers go quiet toward the server for 20s+ while probing each other directly -
+// confirmed 2026-08-23) but is handled separately via isHolePunchExempt(), not by
+// loosening this threshold, so genuinely abandoned non-matchmaking sessions are
+// still caught promptly. Loosen this if real-world jitter (bad WiFi, packet loss)
+// ever produces false positives outside of hole-punching on genuinely-connected
 // players.
 const staleIdleThreshold = 15 * time.Second
 
@@ -536,6 +762,20 @@ func watchStaleConnections() {
 			if idleFor <= staleIdleThreshold {
 				return true
 			}
+			if isHolePunchExempt(pid) {
+				return true // mid-NAT-traversal - expected to be quiet toward the server
+			}
+			// Re-check immediately before acting: a packet may have arrived from
+			// this PID between the Range snapshot above and here (packet handling
+			// runs concurrently on its own goroutine(s) and updates lastPacketAt
+			// independently of this ticker). Without this, a genuinely-connected
+			// player whose idle gap lands right at the threshold could have their
+			// gathering/session wiped by a decision that was already stale by the
+			// time it executed - a real TOCTOU race, not just a loose threshold.
+			recheck, ok := lastPacketAt.Load(pid)
+			if !ok || !recheck.(time.Time).Equal(last.(time.Time)) {
+				return true // a new packet landed - no longer stale, skip this cycle
+			}
 			fmt.Printf("StaleDisconnect: PID=%d idleFor=%s — cleaning up gatherings and session (PRUDP session itself untouched)\n", pid, idleFor.Round(time.Second))
 			currentClient.Delete(pid)
 			connectedPIDs.Delete(pid)
@@ -561,6 +801,11 @@ type wscMatchInfo struct {
 	Players     []int64 `json:"players"`
 	PlayerCount int64   `json:"player_count"`
 	StartedAt   int64   `json:"started_at"`
+}
+
+type wscNatShameInfo struct {
+	PID          int64 `json:"pid"`
+	BlockedUntil int64 `json:"blocked_until"` // unix seconds
 }
 
 type wscGatheringInfo struct {
@@ -649,11 +894,27 @@ func startStatusServer() {
 			matches = []wscMatchInfo{}
 		}
 
+		now := time.Now()
+		var natShame []wscNatShameInfo
+		natFailureBlockedUntil.Range(func(k, v interface{}) bool {
+			until := v.(time.Time)
+			if now.After(until) {
+				natFailureBlockedUntil.Delete(k)
+				return true
+			}
+			natShame = append(natShame, wscNatShameInfo{PID: int64(k.(uint32)), BlockedUntil: until.Unix()})
+			return true
+		})
+		if natShame == nil {
+			natShame = []wscNatShameInfo{}
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"sessions":   sessions,
-			"gatherings": gatherings,
-			"matches":    matches,
+			"sessions":          sessions,
+			"gatherings":        gatherings,
+			"matches":           matches,
+			"nat_hall_of_shame": natShame,
 		})
 	})
 	if err := http.ListenAndServe("127.0.0.1:9015", mux); err != nil {
@@ -667,6 +928,7 @@ func main() {
 	dsLoad()
 	migrateRankingScoreTags()
 	migrateRankingScoreRegions()
+	migrateRankingScoreDedup()
 	dsSeedProfiles()
 	connectDB()
 	loadRankingStoreFromMongo()
@@ -822,14 +1084,14 @@ func main() {
 		// WSC to show "data could not be obtained" for things like its custom club
 		// protocol (0x83) and game-stats protocol (0x15).
 		knownProtocols := map[uint8]bool{
-			secure_connection.ProtocolID:  true, // 0x0A
-			match_making.ProtocolID:       true, // 0x0B
-			match_making_ext.ProtocolID:   true, // 0x32
+			secure_connection.ProtocolID:   true, // 0x0A
+			match_making.ProtocolID:        true, // 0x0B
+			match_making_ext.ProtocolID:    true, // 0x32
 			matchmake_extension.ProtocolID: true, // 0x6D
-			nat_traversal.ProtocolID:      true, // 0x03
-			utility.ProtocolID:            true, // 0x6E
-			datastore.ProtocolID:          true, // 0x73
-			ranking.ProtocolID:            true, // 0x70
+			nat_traversal.ProtocolID:       true, // 0x03
+			utility.ProtocolID:             true, // 0x6E
+			datastore.ProtocolID:           true, // 0x73
+			ranking.ProtocolID:             true, // 0x70
 		}
 		protoID := request.ProtocolID()
 		if !knownProtocols[protoID] {
@@ -1173,7 +1435,15 @@ func handleUploadScore(client *nex.Client, callID uint32, params []byte) {
 	dbInsertRankingScore(pid, category, score, order, updateMode, groups, param, uniqueID)
 
 	obj := dsAllocRankingScore(pid, category, score, param, groups)
-	fmt.Printf("UploadScore: PID=%d stored as DataStore DataID=%d tags=%v\n", pid, obj.DataID, obj.Tags)
+	if len(groups) > 0 && groups[0] != 0xFF {
+		if name, ok := resolveClubName(dsClubRegionPrefix(pid), uint32(groups[0])); ok {
+			fmt.Printf("UploadScore: PID=%d stored as DataStore DataID=%d tags=%v (club=%q)\n", pid, obj.DataID, obj.Tags, name)
+		} else {
+			fmt.Printf("UploadScore: PID=%d stored as DataStore DataID=%d tags=%v\n", pid, obj.DataID, obj.Tags)
+		}
+	} else {
+		fmt.Printf("UploadScore: PID=%d stored as DataStore DataID=%d tags=%v\n", pid, obj.DataID, obj.Tags)
+	}
 
 	rankingAdd(pid, category, score, groups, param, uniqueID)
 
@@ -1230,13 +1500,19 @@ var (
 	rankingStore []rankingEntry
 )
 
+// Matches on (pid, category) alone, not also groups - handleGetRanking's own
+// leaderboard query never filters by groups either, so a player switching
+// clubs previously ended up with two entries for the same category and would
+// show up twice in the same leaderboard (confirmed 2026-08-23, same root
+// cause as dsAllocRankingScore's identical bug).
 func rankingAdd(pid uint32, category, score uint32, groups []byte, param, uniqueID uint64) {
 	rankingMu.Lock()
 	defer rankingMu.Unlock()
 	for i := range rankingStore {
 		e := &rankingStore[i]
-		if e.OwnerPID == pid && e.Category == category && bytes.Equal(e.Groups, groups) {
+		if e.OwnerPID == pid && e.Category == category {
 			e.Score = score
+			e.Groups = append([]byte{}, groups...)
 			e.Param = param
 			e.UniqueID = uniqueID
 			e.Updated = time.Now()
@@ -1257,7 +1533,12 @@ func rankingAdd(pid uint32, category, score uint32, groups []byte, param, unique
 // loadRankingStoreFromMongo rebuilds rankingStore from the durable copy in
 // ranking_scores at startup (mirrors dsLoad()'s role for dsStore).
 func loadRankingStoreFromMongo() {
-	cursor, err := rankingScoresCol.Find(context.Background(), bson.D{})
+	// Sorted ascending by creation time - rankingAdd now overwrites the existing
+	// (pid, category) entry on replay rather than keying on groups too, so
+	// replay order determines which score "wins"; this guarantees it's always
+	// the most recent one, not whatever order Mongo's cursor happens to return.
+	opts := options.Find().SetSort(bson.D{{Key: "created_at", Value: 1}})
+	cursor, err := rankingScoresCol.Find(context.Background(), bson.D{}, opts)
 	if err != nil {
 		fmt.Println("loadRankingStoreFromMongo:", err)
 		return
@@ -1490,13 +1771,13 @@ func getMeta(err error, client *nex.Client, callID uint32, param *datastore.Data
 		fmt.Printf("GetMeta: PID=%d DataID=%d found\n", client.PID(), param.DataID)
 	} else {
 		meta = datastore.NewDataStoreMetaInfo()
-		meta.Permission    = datastore.NewDataStorePermission()
+		meta.Permission = datastore.NewDataStorePermission()
 		meta.DelPermission = datastore.NewDataStorePermission()
-		meta.CreatedTime   = nex.NewDateTime(0)
-		meta.UpdatedTime   = nex.NewDateTime(0)
-		meta.ReferredTime  = nex.NewDateTime(0)
-		meta.ExpireTime    = nex.NewDateTime(0)
-		meta.Tags    = []string{}
+		meta.CreatedTime = nex.NewDateTime(0)
+		meta.UpdatedTime = nex.NewDateTime(0)
+		meta.ReferredTime = nex.NewDateTime(0)
+		meta.ExpireTime = nex.NewDateTime(0)
+		meta.Tags = []string{}
 		meta.Ratings = []*datastore.DataStoreRatingInfoWithSlot{}
 		fmt.Printf("GetMeta: PID=%d DataID=%d not found\n", client.PID(), param.DataID)
 	}
@@ -1626,6 +1907,20 @@ func requestProbeInitiationExt(err error, client *nex.Client, callID uint32, tar
 
 	fmt.Printf("RequestProbeInitiationExt: PID=%d targets=%v probe=%s\n", client.PID(), targetList, stationToProbe)
 
+	// Exempt this client and every peer it's probing from stale-disconnect cleanup
+	// until ReportNATTraversalResult clears it (or holePunchExemptionMax expires) -
+	// both sides naturally go quiet toward the server during hole-punching, which
+	// previously got misread as a disconnect and wiped the gathering mid-handshake.
+	markHolePunching(client.PID())
+	for _, target := range targetList {
+		if pid, ok := extractStationPID(target); ok {
+			markHolePunching(pid)
+		}
+	}
+	if pid, ok := extractStationPID(stationToProbe); ok {
+		markHolePunching(pid)
+	}
+
 	sendResponse(client, nat_traversal.ProtocolID, callID, nat_traversal.MethodRequestProbeInitiationExt, nil)
 
 	// Forward InitiateProbe to each target
@@ -1722,7 +2017,14 @@ func handleAutoMatchmakeRaw(packet *nex.PacketV1) {
 	}
 	fmt.Printf("AutoMatchmakeRaw: PID=%d gameMode=%d (sport=0x%02x) maxPlayers=%d natm=%d\n", client.PID(), gameMode, gameMode>>24, maxPlayers, natm)
 
-	gid := dbFindGathering(gameMode, natm)
+	// A player who just failed NAT traversal always gets a fresh solo gathering
+	// instead of searching for a real one to join - see natFailureBlockedUntil's
+	// doc comment. dbFindGathering separately skips gatherings hosted BY a blocked
+	// pid, so this covers both directions.
+	var gid uint32
+	if !isBlockedFromMatchmaking(client.PID()) {
+		gid = dbFindGathering(gameMode, natm)
+	}
 	if gid == 0 {
 		gid = dbNewGathering(client.PID(), gameMode, maxPlayers, natm)
 		fmt.Printf("AutoMatchmake: PID=%d created gathering gid=%d gameMode=%d (sport=0x%02x) natm=%d\n", client.PID(), gid, gameMode, gameMode>>24, natm)
@@ -1783,6 +2085,7 @@ func reportNATTraversalResult(err error, client *nex.Client, callID uint32, cid 
 		return
 	}
 	fmt.Printf("ReportNATTraversalResult: PID=%d cid=%d result=%v rtt=%d\n", client.PID(), cid, result, rtt)
+	clearHolePunching(client.PID())
 	sendResponse(client, nat_traversal.ProtocolID, callID, nat_traversal.MethodReportNATTraversalResult, []byte{})
 	if result {
 		// Don't close here — CloseParticipation is the actual game-start signal.
@@ -1791,6 +2094,9 @@ func reportNATTraversalResult(err error, client *nex.Client, callID uint32, cid 
 		if gid := dbFindGatheringForPID(client.PID()); gid != 0 {
 			gatheringFailCount.Delete(gid)
 		}
+	} else {
+		fmt.Printf("NAT traversal FAILED: PID=%d — blocking from matchmaking for %s\n", client.PID(), natFailureBlockDuration)
+		blockFromMatchmaking(client.PID())
 	}
 }
 

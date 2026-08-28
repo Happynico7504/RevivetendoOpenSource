@@ -41,6 +41,9 @@ echo "==> building minecraft-authentication..."
 echo "==> building minecraft-secure..."
 (cd "$ROOT/minecraft-secure" && go build -o "$BUILD/mc-secure" .)
 
+echo "==> building swapdoodle server..."
+(cd "$ROOT/swapdoodle" && go build -o "$BUILD/swapdoodle" .)
+
 # Export all vars from the secure server .env into the environment
 set -a
 # shellcheck disable=SC1091
@@ -111,6 +114,9 @@ MC_AUTH_PID=$!
 	env $(cat .env | xargs) KERBEROS_PASSWORD="$MC_KERBEROS_PASSWORD" "$BUILD/mc-secure") &
 MC_SECURE_PID=$!
 
+(cd "$ROOT/swapdoodle" && autostart "$LOG/swapdoodle.log" "$BUILD/swapdoodle") &
+SWAPDOODLE_PID=$!
+
 (autostart "$LOG/discord-bot.log" python3 "$ROOT/discord-bot/bot.py") &
 BOT_PID=$!
 
@@ -122,7 +128,7 @@ fi
 
 cleanup() {
 	echo "==> shutting down..."
-	kill $ACCOUNT_PID $FRIENDS_PID $ADMIN_PID $PROXY_PID $MK8_AUTH_PID $MK8_SECURE_PID $ABSW_PID $WSC_AUTH_PID $WSC_SECURE_PID $MC_AUTH_PID $MC_SECURE_PID $BOT_PID ${MII_BOT_PID:-} 2>/dev/null || true
+	kill $ACCOUNT_PID $FRIENDS_PID $ADMIN_PID $PROXY_PID $MK8_AUTH_PID $MK8_SECURE_PID $ABSW_PID $WSC_AUTH_PID $WSC_SECURE_PID $MC_AUTH_PID $MC_SECURE_PID $SWAPDOODLE_PID $BOT_PID ${MII_BOT_PID:-} 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 

@@ -17,6 +17,7 @@ var gatheringsCol *mongo.Collection
 var matchHistoryCol *mongo.Collection
 var rankingScoresCol *mongo.Collection
 var rankingCommonDataCol *mongo.Collection
+var juxtCommunitiesCol *mongo.Collection
 
 func connectDB() {
 	uri := os.Getenv("MONGO_URI")
@@ -36,6 +37,11 @@ func connectDB() {
 	matchHistoryCol = db.Collection("match_history")
 	rankingScoresCol = db.Collection("ranking_scores")
 	rankingCommonDataCol = db.Collection("ranking_common_data")
+	// Same MongoDB instance, different logical database - Juxt (the Miiverse
+	// revival) owns the real club/community names, keyed by the same club code
+	// this server already uses in its own eu_NNN/us_NNN DataStore tags. See
+	// resolveClubName.
+	juxtCommunitiesCol = client.Database("juxt").Collection("communities")
 	// Clear stale data from previous run — all clients disconnect when the server restarts
 	sessionsCol.DeleteMany(context.Background(), bson.D{})
 	gatheringsCol.DeleteMany(context.Background(), bson.D{})
@@ -193,22 +199,36 @@ func dbFindGathering(gameMode uint32, requesterNatm uint32) uint32 {
 		}
 	}
 
+	skippedGids := bson.A{}
 	for {
+		queryFilter := filter
+		if len(skippedGids) > 0 {
+			queryFilter = append(bson.D{{Key: "gid", Value: bson.D{{Key: "$nin", Value: skippedGids}}}}, filter...)
+		}
 		var result bson.M
-		err := gatheringsCol.FindOne(ctx, filter).Decode(&result)
+		err := gatheringsCol.FindOne(ctx, queryFilter).Decode(&result)
 		if err != nil {
 			return 0
 		}
 		gid := uint32(result["gid"].(int64))
 		host := uint32(result["host"].(int64))
-		if _, ok := connectedPIDs.Load(host); ok {
-			return gid
+		if _, ok := connectedPIDs.Load(host); !ok {
+			// Host has disconnected — purge the stale gathering and keep looking
+			res, err := gatheringsCol.DeleteOne(ctx, bson.D{{Key: "gid", Value: gid}})
+			if err != nil || res.DeletedCount == 0 {
+				return 0
+			}
+			continue
 		}
-		// Host has disconnected — purge the stale gathering and keep looking
-		res, err := gatheringsCol.DeleteOne(ctx, bson.D{{Key: "gid", Value: gid}})
-		if err != nil || res.DeletedCount == 0 {
-			return 0
+		if isBlockedFromMatchmaking(host) {
+			// Host just failed NAT traversal and is serving out a matchmaking
+			// block - see natFailureBlockedUntil's doc comment. Their gathering
+			// is still legitimate (don't delete it), just not offered to other
+			// searchers for now.
+			skippedGids = append(skippedGids, int64(gid))
+			continue
 		}
+		return gid
 	}
 }
 

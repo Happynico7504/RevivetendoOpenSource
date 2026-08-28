@@ -9,6 +9,7 @@ certs/
 
 # runtime datastore state
 wsc-secure/datastore.json
+wsc-secure/datastore.json.bak-*
 
 # compiled Go binaries in source dirs
 account-proxy/account-proxy
@@ -30,3 +31,11 @@ account-proxy/certs
 act-capture/
 boss-capture/
 olv-capture-3ds/
+hpp-capture/
+
+# vendored/external - swapdoodle is its own separate git repo (SwapdoodleRevival/swapdoodle),
+# vendor-patches holds a locally patched copy of a dependency it needs (see
+# vendor-patches/nex-protocols-common-go-v2 - two handler registrations there don't
+# compile against this branch's own declared nex-protocols-go version upstream)
+swapdoodle/
+vendor-patches/

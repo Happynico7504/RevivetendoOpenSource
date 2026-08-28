@@ -62,7 +62,24 @@ ALTER TABLE nex_sessions ADD COLUMN IF NOT EXISTS pnid TEXT NOT NULL DEFAULT '';
 CREATE TABLE IF NOT EXISTS mii_names (
 	pid      INTEGER PRIMARY KEY,
 	mii_name TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS account_access_levels (
+	pid          BIGINT PRIMARY KEY,
+	access_level INTEGER NOT NULL,
+	note         TEXT NOT NULL DEFAULT '',
+	updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );`
+
+// accessLevelSeed migrates the previous hardcoded developerPIDs/moderatorPIDs
+// maps into account_access_levels on first startup after this change - only
+// runs if the row doesn't already exist, so a live-edited access_level
+// (accessLevelForPID is now DB-backed, not code-and-redeploy) is never
+// overwritten on a later restart.
+const accessLevelSeed = `
+INSERT INTO account_access_levels (pid, access_level, note) VALUES
+	(1435853600, 3, 'developer (Nico) - migrated from hardcoded developerPIDs'),
+	(1028021415, 2, 'moderator (Q_Pete) - migrated from hardcoded moderatorPIDs')
+ON CONFLICT (pid) DO NOTHING;`
 
 // ── Pretendo auth via account-proxy internal endpoint ─────────
 
@@ -142,15 +159,20 @@ func (s *accountServer) GetNEXData(ctx context.Context, req *pb.GetNEXDataReques
 	}, nil
 }
 
-var developerPIDs = map[uint32]bool{
-	1435853600: true,
-}
+// accessDB is set once in main() to the same *sql.DB used everywhere else in
+// this service. accessLevelForPID reads account_access_levels through it so
+// that granting/revoking developer (3) or moderator (>=2, see accountIsModerator
+// in juxt/apps/miiverse-api/src/services/internal/middleware/auth-populate.ts)
+// access is a live DB row, not a hardcoded map requiring a rebuild+restart.
+var accessDB *sql.DB
 
 func accessLevelForPID(pid uint32) uint32 {
-	if developerPIDs[pid] {
-		return 3
+	var level uint32
+	err := accessDB.QueryRow(`SELECT access_level FROM account_access_levels WHERE pid = $1`, pid).Scan(&level)
+	if err != nil {
+		return 0
 	}
-	return 0
+	return level
 }
 
 func (s *accountServer) GetUserData(ctx context.Context, req *pb.GetUserDataRequest) (*pb.GetUserDataResponse, error) {
@@ -748,6 +770,10 @@ func main() {
 	if _, err := db.Exec(schema); err != nil {
 		log.Fatalf("failed to create schema: %v", err)
 	}
+	if _, err := db.Exec(accessLevelSeed); err != nil {
+		log.Fatalf("failed to seed account_access_levels: %v", err)
+	}
+	accessDB = db
 
 	port := os.Getenv("PN_WUC_ACCOUNT_GRPC_PORT")
 	if port == "" {

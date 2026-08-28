@@ -24,6 +24,8 @@ import (
 
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
 var gameServerTitles = map[string]string{
@@ -190,6 +192,42 @@ CREATE TABLE IF NOT EXISTS banned_users (
 	created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Real Wii U Home Menu SpotPass system announcements (sysmsg1/sysmsg2, TitleId
+-- 000500101004d100) - format confirmed against a genuine decrypted 2023
+-- Nintendo eShop-closure message recovered from PretendoNetwork/BOSS's own
+-- seed data. Read by account-proxy's handleWiiUSysMsgTasksheet/File on every
+-- console poll - no rebuild or restart needed.
+CREATE TABLE IF NOT EXISTS wiiu_system_messages (
+	id             SERIAL      PRIMARY KEY,
+	subject        TEXT        NOT NULL,
+	body           TEXT        NOT NULL,
+	title_id       TEXT        NOT NULL DEFAULT '000500101004d100',
+	high_priority  BOOLEAN     NOT NULL DEFAULT false,
+	active         BOOLEAN     NOT NULL DEFAULT true,
+	region         TEXT        NOT NULL DEFAULT '',
+	created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE wiiu_system_messages ADD COLUMN IF NOT EXISTS region TEXT NOT NULL DEFAULT '';
+
+-- 3DS's own equivalent generic system-message channel (sysmsg1/sysmsg2/
+-- sysmsg3, TitleId 000400300000a102 or 000400300000b102 - likely region
+-- variants) - bossAppIds/TitleIds confirmed live against Pretendo's real BOSS
+-- server 2026-08-24, recovered from PretendoNetwork/BOSS's list-known-boss-
+-- apps.ts registry. Unlike the Wii U version, the inner <Message> XML format
+-- itself is NOT independently confirmed for 3DS (reused from the genuine
+-- Wii U example as a reasonable bet, not a verified 3DS sample).
+CREATE TABLE IF NOT EXISTS n3ds_system_messages (
+	id             SERIAL      PRIMARY KEY,
+	subject        TEXT        NOT NULL,
+	body           TEXT        NOT NULL,
+	title_id       TEXT        NOT NULL DEFAULT '000400300000a102',
+	high_priority  BOOLEAN     NOT NULL DEFAULT false,
+	active         BOOLEAN     NOT NULL DEFAULT true,
+	region         TEXT        NOT NULL DEFAULT '',
+	created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE n3ds_system_messages ADD COLUMN IF NOT EXISTS region TEXT NOT NULL DEFAULT '';
+
 CREATE TABLE IF NOT EXISTS review_queue (
 	pid            BIGINT      NOT NULL,
 	game_server_id TEXT        NOT NULL,
@@ -244,27 +282,35 @@ type Redirect struct {
 }
 
 type UserAccess struct {
-	PID          int64
-	PNID         string
-	GameServerID string
-	Note         string
-	CreatedAt    time.Time
+	PID          int64     `json:"pid"`
+	PNID         string    `json:"pnid,omitempty"`
+	GameServerID string    `json:"game_server_id"`
+	Note         string    `json:"note,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 type BannedUser struct {
-	PID       int64
-	PNID      string
-	Reason    string
-	CreatedAt time.Time
+	PID       int64     `json:"pid"`
+	PNID      string    `json:"pnid,omitempty"`
+	Reason    string    `json:"reason,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type AccessLevelEntry struct {
+	PID         int64     `json:"pid"`
+	PNID        string    `json:"pnid,omitempty"`
+	AccessLevel int       `json:"access_level"`
+	Note        string    `json:"note,omitempty"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 type ReviewEntry struct {
-	PID          int64
-	PNID         string
-	GameServerID string
-	FirstSeen    time.Time
-	LastSeen     time.Time
-	Attempts     int
+	PID          int64     `json:"pid"`
+	PNID         string    `json:"pnid,omitempty"`
+	GameServerID string    `json:"game_server_id"`
+	FirstSeen    time.Time `json:"first_seen"`
+	LastSeen     time.Time `json:"last_seen"`
+	Attempts     int       `json:"attempts"`
 }
 
 type RecentRequest struct {
@@ -291,6 +337,14 @@ type Stats struct {
 
 
 var db *sql.DB
+
+// swapdoodleDB/swapdoodleS3 are a separate connection to swapdoodle-server's
+// own Postgres DB/S3 bucket (not wiiuchat) - see adminSwapdoodle* handlers.
+// Credentials loaded from swapdoodle/.env at startup (see main()), same
+// approach as account-proxy's swapdoodleS3() client.
+var swapdoodleDB *sql.DB
+var swapdoodleS3 *minio.Client
+var swapdoodleS3Bucket string
 
 func fetchWiiUTitleDB() {
 	client := &http.Client{Timeout: 15 * time.Second}
@@ -343,6 +397,31 @@ func main() {
 	// Default existing open game-server redirects to whitelist so unknown users fall through to Pretendo.
 	db.Exec(`UPDATE redirects SET access_mode = 'whitelist' WHERE access_mode = 'open' AND game_server_id IS NOT NULL`)
 
+	// swapdoodle's own DB/S3 - separate from wiiuchat, see adminSwapdoodle*.
+	// Loaded via absolute path since this process's cwd is the repo root, not
+	// this service's own directory (confirmed via /proc/<pid>/cwd 2026-08-24 -
+	// a plain relative "../swapdoodle/.env" silently resolves outside the repo).
+	if sdEnv, err := godotenv.Read("/nico-pretendo-bridge/swapdoodle/.env"); err == nil {
+		swapdoodleDB, err = sql.Open("postgres", sdEnv["PN_SD_POSTGRES_URI"])
+		if err != nil {
+			log.Printf("swapdoodle db: %v", err)
+		}
+		s3Secure, err := strconv.ParseBool(strings.TrimSpace(sdEnv["PN_SD_CONFIG_S3_SECURE"]))
+		if err != nil {
+			s3Secure = true
+		}
+		swapdoodleS3, err = minio.New(sdEnv["PN_SD_CONFIG_S3_ENDPOINT"], &minio.Options{
+			Creds:  credentials.NewStaticV4(sdEnv["PN_SD_CONFIG_S3_ACCESS_KEY"], sdEnv["PN_SD_CONFIG_S3_ACCESS_SECRET"], ""),
+			Secure: s3Secure,
+		})
+		if err != nil {
+			log.Printf("swapdoodle s3: %v", err)
+		}
+		swapdoodleS3Bucket = sdEnv["PN_SD_CONFIG_S3_BUCKET"]
+	} else {
+		log.Printf("swapdoodle .env not found, swapdoodle admin page disabled: %v", err)
+	}
+
 	if _, err = db.Exec(seedRedirects); err != nil {
 		log.Fatalf("seed: %v", err)
 	}
@@ -380,11 +459,54 @@ func main() {
 	http.HandleFunc("/admin/bans/", requireClientCert(adminBans))
 	http.HandleFunc("/admin/bans/add", requireClientCert(adminBanAdd))
 	http.HandleFunc("/admin/bans/remove", requireClientCert(adminBanRemove))
+	http.HandleFunc("/admin/access/", requireClientCert(adminAccess))
+	http.HandleFunc("/admin/access/set", requireClientCert(adminAccessSet))
+	http.HandleFunc("/admin/access/remove", requireClientCert(adminAccessRemove))
+	http.HandleFunc("/admin/spotpass-wiiu/", requireClientCert(adminSpotpassWiiU))
+	http.HandleFunc("/admin/spotpass-wiiu/add", requireClientCert(adminSpotpassWiiUAdd))
+	http.HandleFunc("/admin/spotpass-wiiu/toggle", requireClientCert(adminSpotpassWiiUToggle))
+	http.HandleFunc("/admin/spotpass-wiiu/remove", requireClientCert(adminSpotpassWiiURemove))
+	http.HandleFunc("/admin/spotpass-3ds/", requireClientCert(adminSwapdoodle))
+	http.HandleFunc("/admin/spotpass-3ds-sysmsg/", requireClientCert(adminSpotpass3DSSysMsg))
+	http.HandleFunc("/admin/spotpass-3ds-sysmsg/add", requireClientCert(adminSpotpass3DSSysMsgAdd))
+	http.HandleFunc("/admin/spotpass-3ds-sysmsg/toggle", requireClientCert(adminSpotpass3DSSysMsgToggle))
+	http.HandleFunc("/admin/spotpass-3ds-sysmsg/remove", requireClientCert(adminSpotpass3DSSysMsgRemove))
 	http.HandleFunc("/admin/review/", requireClientCert(adminReview))
 	http.HandleFunc("/admin/review/approve", requireClientCert(adminReviewApprove))
 	http.HandleFunc("/admin/review/dismiss", requireClientCert(adminReviewDismiss))
 	http.HandleFunc("/admin/certs/rotate", requireClientCert(adminCertsRotate))
 	http.HandleFunc("/admin/client-cert.p12", requireClientCert(adminClientCert))
+
+	// JSON API for the native Android admin app - see "JSON admin API" section below.
+	http.HandleFunc("/admin/api/v1/ping", requireClientCert(apiV1Ping))
+	http.HandleFunc("/admin/api/v1/game-titles", requireClientCert(apiV1GameTitles))
+	http.HandleFunc("/admin/api/v1/cert-status", requireClientCert(apiV1CertStatus))
+	http.HandleFunc("/admin/api/v1/redirects", requireClientCert(apiV1Redirects))
+	http.HandleFunc("/admin/api/v1/redirects/add", requireClientCert(apiV1RedirectsAdd))
+	http.HandleFunc("/admin/api/v1/redirects/delete", requireClientCert(apiV1RedirectsDelete))
+	http.HandleFunc("/admin/api/v1/redirects/toggle", requireClientCert(apiV1RedirectsToggle))
+	http.HandleFunc("/admin/api/v1/users", requireClientCert(apiV1Users))
+	http.HandleFunc("/admin/api/v1/users/add", requireClientCert(apiV1UsersAdd))
+	http.HandleFunc("/admin/api/v1/users/delete", requireClientCert(apiV1UsersDelete))
+	http.HandleFunc("/admin/api/v1/bans", requireClientCert(apiV1Bans))
+	http.HandleFunc("/admin/api/v1/bans/add", requireClientCert(apiV1BansAdd))
+	http.HandleFunc("/admin/api/v1/bans/remove", requireClientCert(apiV1BansRemove))
+	http.HandleFunc("/admin/api/v1/access", requireClientCert(apiV1Access))
+	http.HandleFunc("/admin/api/v1/access/set", requireClientCert(apiV1AccessSet))
+	http.HandleFunc("/admin/api/v1/access/remove", requireClientCert(apiV1AccessRemove))
+	http.HandleFunc("/admin/api/v1/spotpass-wiiu", requireClientCert(apiV1SpotpassWiiU))
+	http.HandleFunc("/admin/api/v1/spotpass-wiiu/add", requireClientCert(apiV1SpotpassWiiUAdd))
+	http.HandleFunc("/admin/api/v1/spotpass-wiiu/toggle", requireClientCert(apiV1SpotpassWiiUToggle))
+	http.HandleFunc("/admin/api/v1/spotpass-wiiu/remove", requireClientCert(apiV1SpotpassWiiURemove))
+	http.HandleFunc("/admin/api/v1/spotpass-3ds", requireClientCert(apiV1Spotpass3DSNotes))
+	http.HandleFunc("/admin/api/v1/spotpass-3ds-sysmsg", requireClientCert(apiV1Spotpass3DSSysMsg))
+	http.HandleFunc("/admin/api/v1/spotpass-3ds-sysmsg/add", requireClientCert(apiV1Spotpass3DSSysMsgAdd))
+	http.HandleFunc("/admin/api/v1/spotpass-3ds-sysmsg/toggle", requireClientCert(apiV1Spotpass3DSSysMsgToggle))
+	http.HandleFunc("/admin/api/v1/spotpass-3ds-sysmsg/remove", requireClientCert(apiV1Spotpass3DSSysMsgRemove))
+	http.HandleFunc("/admin/api/v1/review", requireClientCert(apiV1Review))
+	http.HandleFunc("/admin/api/v1/review/approve", requireClientCert(apiV1ReviewApprove))
+	http.HandleFunc("/admin/api/v1/review/dismiss", requireClientCert(apiV1ReviewDismiss))
+
 	http.HandleFunc("/wsc-public/", adminWSC)
 	http.HandleFunc("/wsc-public/nat/", wscNATInfo)
 	http.HandleFunc("/wsc-public/api/players", apiWSCPlayers)
@@ -471,6 +593,9 @@ func allRedirects() []Redirect {
 		rows.Scan(&rd.ID, &rd.Type, &rd.Address, &rd.FromHost, &rd.ToHost, &rd.GameServerID, &rd.Port, &rd.AccessMode, &rd.Enabled, &rd.CreatedAt)
 		list = append(list, rd)
 	}
+	if list == nil {
+		list = []Redirect{}
+	}
 	return list
 }
 
@@ -490,6 +615,9 @@ func usersForGame(gameServerID string) []UserAccess {
 		rows.Scan(&u.PID, &u.PNID, &u.GameServerID, &u.Note, &u.CreatedAt)
 		list = append(list, u)
 	}
+	if list == nil {
+		list = []UserAccess{}
+	}
 	return list
 }
 
@@ -508,6 +636,31 @@ func allBans() []BannedUser {
 		var b BannedUser
 		rows.Scan(&b.PID, &b.PNID, &b.Reason, &b.CreatedAt)
 		list = append(list, b)
+	}
+	if list == nil {
+		list = []BannedUser{}
+	}
+	return list
+}
+
+func allAccessLevels() []AccessLevelEntry {
+	rows, err := db.Query(`
+		SELECT a.pid, COALESCE(p.pnid, ''), a.access_level, a.note, a.updated_at
+		FROM account_access_levels a
+		LEFT JOIN pnid_cache p ON p.pid = a.pid
+		ORDER BY a.access_level DESC, a.updated_at DESC`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var list []AccessLevelEntry
+	for rows.Next() {
+		var e AccessLevelEntry
+		rows.Scan(&e.PID, &e.PNID, &e.AccessLevel, &e.Note, &e.UpdatedAt)
+		list = append(list, e)
+	}
+	if list == nil {
+		list = []AccessLevelEntry{}
 	}
 	return list
 }
@@ -536,6 +689,9 @@ func onlineUsers() []OnlineUser {
 		}
 		list = append(list, u)
 	}
+	if list == nil {
+		list = []OnlineUser{}
+	}
 	return list
 }
 
@@ -554,6 +710,9 @@ func pendingReviews() []ReviewEntry {
 		var e ReviewEntry
 		rows.Scan(&e.PID, &e.PNID, &e.GameServerID, &e.FirstSeen, &e.LastSeen, &e.Attempts)
 		list = append(list, e)
+	}
+	if list == nil {
+		list = []ReviewEntry{}
 	}
 	return list
 }
@@ -604,11 +763,18 @@ type WSCMatchRow struct {
 	StartedAt   time.Time
 }
 
+type WSCNatShameRow struct {
+	PID          int64
+	PNID         string
+	BlockedUntil time.Time
+}
+
 type WSCDashData struct {
 	ServerUp   bool
 	Players    []WSCPlayerRow
 	Gatherings []WSCGatheringRow
 	Matches    []WSCMatchRow
+	NatShame   []WSCNatShameRow
 }
 
 func lookupPNIDs(pids []int64) map[int64]string {
@@ -672,6 +838,10 @@ func fetchWSCStatus() WSCDashData {
 			PlayerCount int64   `json:"player_count"`
 			StartedAt   int64   `json:"started_at"`
 		} `json:"matches"`
+		NatHallOfShame []struct {
+			PID          int64 `json:"pid"`
+			BlockedUntil int64 `json:"blocked_until"`
+		} `json:"nat_hall_of_shame"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		return data
@@ -693,6 +863,9 @@ func fetchWSCStatus() WSCDashData {
 		for _, p := range m.Players {
 			pidSet[p] = struct{}{}
 		}
+	}
+	for _, n := range raw.NatHallOfShame {
+		pidSet[n.PID] = struct{}{}
 	}
 	pids := make([]int64, 0, len(pidSet))
 	for pid := range pidSet {
@@ -753,6 +926,14 @@ func fetchWSCStatus() WSCDashData {
 			}
 		}
 		data.Matches = append(data.Matches, row)
+	}
+
+	for _, n := range raw.NatHallOfShame {
+		data.NatShame = append(data.NatShame, WSCNatShameRow{
+			PID:          n.PID,
+			PNID:         pnids[n.PID],
+			BlockedUntil: time.Unix(n.BlockedUntil, 0),
+		})
 	}
 	return data
 }
@@ -844,6 +1025,23 @@ tr:last-child td{border-bottom:none}
 </table>
 {{else}}
 <p style="color:#aaa;font-size:.9rem;margin-top:0">No matches recorded yet.</p>
+{{end}}
+
+<h2>NAT Hall of Shame{{if .NatShame}} <span style="background:#fee2e2;color:#991b1b;border-radius:999px;padding:.1rem .5rem;font-size:.75rem;font-weight:700;vertical-align:middle">{{len .NatShame}}</span>{{end}}</h2>
+{{if .NatShame}}
+<p style="color:#aaa;font-size:.85rem;margin-top:0">Players temporarily excluded from matchmaking after a failed NAT traversal attempt.</p>
+<table>
+<tr><th>PNID</th><th>PID</th><th>Blocked Until</th></tr>
+{{range .NatShame}}
+<tr>
+  <td>{{if .PNID}}<strong>@{{.PNID}}</strong>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
+  <td class="mono">{{.PID}}</td>
+  <td class="mono" style="white-space:nowrap">{{localTime .BlockedUntil "datetime-sec"}}</td>
+</tr>
+{{end}}
+</table>
+{{else}}
+<p style="color:#aaa;font-size:.9rem;margin-top:0">Nobody currently in the penalty box.</p>
 {{end}}
 
 <script>
@@ -990,6 +1188,9 @@ func apiWSCPlayers(w http.ResponseWriter, r *http.Request) {
 			pidSet[p.PID] = struct{}{}
 		}
 	}
+	for _, n := range data.NatShame {
+		pidSet[n.PID] = struct{}{}
+	}
 	pids := make([]int64, 0, len(pidSet))
 	for pid := range pidSet {
 		pids = append(pids, pid)
@@ -1010,10 +1211,17 @@ func apiWSCPlayers(w http.ResponseWriter, r *http.Request) {
 		Open        bool         `json:"open"`
 		Players     []PlayerJSON `json:"players"`
 	}
+	type NatShameJSON struct {
+		PID          int64  `json:"pid"`
+		PNID         string `json:"pnid"`
+		MiiName      string `json:"mii_name,omitempty"`
+		BlockedUntil int64  `json:"blocked_until"` // unix seconds
+	}
 	type ResponseJSON struct {
 		ServerUp   bool            `json:"server_up"`
 		Players    []PlayerJSON    `json:"players"`
 		Gatherings []GatheringJSON `json:"gatherings"`
+		NatShame   []NatShameJSON  `json:"nat_hall_of_shame"`
 	}
 
 	resp := ResponseJSON{ServerUp: data.ServerUp}
@@ -1041,6 +1249,14 @@ func apiWSCPlayers(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 		resp.Gatherings = append(resp.Gatherings, gj)
+	}
+	for _, n := range data.NatShame {
+		resp.NatShame = append(resp.NatShame, NatShameJSON{
+			PID:          n.PID,
+			PNID:         n.PNID,
+			MiiName:      miiNames[n.PID],
+			BlockedUntil: n.BlockedUntil.Unix(),
+		})
 	}
 	json.NewEncoder(w).Encode(resp)
 }
@@ -1581,6 +1797,9 @@ func publicUsers() []UserAccess {
 		rows.Scan(&u.PID, &u.PNID, &u.GameServerID, &u.Note, &u.CreatedAt)
 		list = append(list, u)
 	}
+	if list == nil {
+		list = []UserAccess{}
+	}
 	return list
 }
 
@@ -1713,6 +1932,10 @@ input[type=text],select{border:1px solid #d1d5db;border-radius:4px;padding:.4rem
   <a class="dl" href="/inkay/admin/client-cert.p12" download="inkay-admin.p12">⬇ Download client cert</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/review/">🕐 Review queue{{if .ReviewCount}} <span style="background:#ef4444;color:#fff;border-radius:999px;padding:.1rem .45rem;font-size:.75rem;font-weight:700">{{.ReviewCount}}</span>{{end}}</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/bans/">🚫 Banned users</a> &nbsp;|&nbsp;
+  <a href="/inkay/admin/access/">🔑 Access levels</a> &nbsp;|&nbsp;
+  <a href="/inkay/admin/spotpass-wiiu/">📢 Wii U SpotPass</a> &nbsp;|&nbsp;
+  <a href="/inkay/admin/spotpass-3ds/">📮 3DS Swapdoodle</a> &nbsp;|&nbsp;
+  <a href="/inkay/admin/spotpass-3ds-sysmsg/">📢 3DS SpotPass</a> &nbsp;|&nbsp;
   <a href="/wsc-public/">🎳 WSC</a>
 </p>
 <div style="display:flex;align-items:center;gap:1rem;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:.6rem 1rem;margin-bottom:1.5rem;font-size:.875rem">
@@ -2138,6 +2361,668 @@ input[type=text]{border:1px solid #d1d5db;border-radius:4px;padding:.4rem .6rem;
 </body>
 </html>`))
 
+var accessTmpl = template.Must(template.New("access").Funcs(tmplFuncs).Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Account Access Levels</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{font-family:system-ui,sans-serif;max-width:760px;margin:2rem auto;padding:0 1rem;color:#222}
+h1{font-size:1.4rem}
+a{color:#2563eb}
+table{width:100%;border-collapse:collapse;font-size:.9rem;margin-bottom:2rem}
+th{text-align:left;border-bottom:2px solid #e4e4e7;padding:.5rem .75rem;color:#666;font-weight:600}
+td{padding:.5rem .75rem;border-bottom:1px solid #f0f0f0;vertical-align:middle}
+tr:last-child td{border-bottom:none}
+button,input,select{font:inherit}
+button{cursor:pointer;border:none;border-radius:4px;padding:.3rem .7rem;font-size:.85rem}
+.btn-del{background:#fee2e2;color:#991b1b}
+fieldset{border:1px solid #e4e4e7;border-radius:8px;padding:1rem 1.25rem;margin-bottom:2rem}
+legend{font-weight:600;padding:0 .4rem}
+.row{display:flex;gap:.75rem;flex-wrap:wrap;align-items:flex-end}
+.field{display:flex;flex-direction:column;gap:.3rem;flex:1;min-width:160px}
+label{font-size:.8rem;color:#666;font-weight:600}
+input[type=text],select{border:1px solid #d1d5db;border-radius:4px;padding:.4rem .6rem;width:100%;box-sizing:border-box}
+.submit{background:#2563eb;color:#fff;padding:.4rem 1rem;cursor:pointer;border:none;border-radius:4px}
+.msg{background:#dcfce7;border:1px solid #bbf7d0;color:#166534;padding:.5rem 1rem;border-radius:6px;margin-bottom:1rem;font-size:.9rem}
+.note{background:#fff7ed;border:1px solid #fed7aa;border-radius:6px;padding:.75rem 1rem;margin-bottom:1.5rem;font-size:.9rem}
+.badge{display:inline-block;border-radius:999px;padding:.1rem .55rem;font-size:.75rem;font-weight:700}
+.badge-3{background:#ede9fe;color:#5b21b6}
+.badge-2{background:#dbeafe;color:#1e40af}
+</style>
+</head>
+<body>
+<p><a href="/inkay/admin/">← Back to admin</a></p>
+<h1>Account Access Levels</h1>
+{{if .Msg}}<div class="msg">{{.Msg}}</div>{{end}}
+<div class="note">Read by account-grpc's accessLevelForPID on every login/GetUserData call - no rebuild or restart needed. 3 = developer (full admin), 2 = moderator (Juxt's accountIsModerator guard), 0/missing = normal user.</div>
+
+<table>
+<tr><th>PNID</th><th>Level</th><th>Note</th><th>Updated</th><th></th></tr>
+{{range .Entries}}
+<tr>
+  <td>{{if .PNID}}<strong>{{.PNID}}</strong><br><span style="font-family:monospace;color:#999;font-size:.75rem">{{.PID}}</span>{{else}}<span style="font-family:monospace;font-size:.85rem">{{.PID}}</span>{{end}}</td>
+  <td>{{if eq .AccessLevel 3}}<span class="badge badge-3">3 · developer</span>{{else if eq .AccessLevel 2}}<span class="badge badge-2">2 · moderator</span>{{else}}{{.AccessLevel}}{{end}}</td>
+  <td>{{if .Note}}{{.Note}}{{else}}<span style="color:#aaa">—</span>{{end}}</td>
+  <td style="font-size:.8rem;color:#666">{{localTime .UpdatedAt "datetime"}}</td>
+  <td>
+    <form method="post" action="/inkay/admin/access/remove" onsubmit="return confirm('Remove access level for PID {{.PID}}? They will drop to a normal user (0).')">
+      <input type="hidden" name="pid" value="{{.PID}}">
+      <button class="btn-del" type="submit">Remove</button>
+    </form>
+  </td>
+</tr>
+{{else}}<tr><td colspan="5" style="color:#aaa">No custom access levels set</td></tr>
+{{end}}
+</table>
+
+<fieldset>
+<legend>Grant / update access level</legend>
+<form method="post" action="/inkay/admin/access/set">
+  <div class="row">
+    <div class="field" style="max-width:200px">
+      <label>PID</label>
+      <input type="text" name="pid" placeholder="1435853600" required>
+    </div>
+    <div class="field" style="max-width:160px">
+      <label>Level</label>
+      <select name="level" required>
+        <option value="3">3 - developer</option>
+        <option value="2" selected>2 - moderator</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Note (optional)</label>
+      <input type="text" name="note" placeholder="Juxt moderator">
+    </div>
+    <div class="field" style="max-width:100px">
+      <label>&nbsp;</label>
+      <button class="submit" type="submit">Save</button>
+    </div>
+  </div>
+</form>
+</fieldset>
+` + localTimeScript + `
+</body>
+</html>`))
+
+func adminAccess(w http.ResponseWriter, r *http.Request) {
+	msg := r.URL.Query().Get("msg")
+	data := struct {
+		Entries []AccessLevelEntry
+		Msg     string
+	}{allAccessLevels(), msg}
+	w.Header().Set("Content-Type", "text/html")
+	accessTmpl.Execute(w, data)
+}
+
+func adminAccessSet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/inkay/admin/access/", http.StatusSeeOther)
+		return
+	}
+	pid, err := strconv.ParseInt(r.FormValue("pid"), 10, 64)
+	if err != nil || pid <= 0 {
+		http.Redirect(w, r, "/inkay/admin/access/?msg=Invalid+PID", http.StatusSeeOther)
+		return
+	}
+	level, err := strconv.Atoi(r.FormValue("level"))
+	if err != nil || (level != 2 && level != 3) {
+		http.Redirect(w, r, "/inkay/admin/access/?msg=Invalid+level", http.StatusSeeOther)
+		return
+	}
+	note := r.FormValue("note")
+	_, err = db.Exec(`INSERT INTO account_access_levels (pid, access_level, note, updated_at) VALUES ($1, $2, $3, NOW())
+		ON CONFLICT (pid) DO UPDATE SET access_level = EXCLUDED.access_level, note = EXCLUDED.note, updated_at = NOW()`,
+		pid, level, note)
+	if err != nil {
+		log.Printf("access level upsert: %v", err)
+		http.Redirect(w, r, "/inkay/admin/access/?msg=DB+error", http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/inkay/admin/access/?msg=Access+level+saved", http.StatusSeeOther)
+}
+
+func adminAccessRemove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/inkay/admin/access/", http.StatusSeeOther)
+		return
+	}
+	pid, err := strconv.ParseInt(r.FormValue("pid"), 10, 64)
+	if err != nil {
+		http.Redirect(w, r, "/inkay/admin/access/?msg=Invalid+PID", http.StatusSeeOther)
+		return
+	}
+	db.Exec(`DELETE FROM account_access_levels WHERE pid = $1`, pid)
+	http.Redirect(w, r, "/inkay/admin/access/?msg=Access+level+removed", http.StatusSeeOther)
+}
+
+type WiiUSystemMessage struct {
+	ID           int       `json:"id"`
+	Subject      string    `json:"subject"`
+	Body         string    `json:"body"`
+	TitleID      string    `json:"title_id"`
+	HighPriority bool      `json:"high_priority"`
+	Active       bool      `json:"active"`
+	Region       string    `json:"region,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+func allWiiUSystemMessages() []WiiUSystemMessage {
+	rows, err := db.Query(`SELECT id, subject, body, title_id, high_priority, active, region, created_at FROM wiiu_system_messages ORDER BY id DESC`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var list []WiiUSystemMessage
+	for rows.Next() {
+		var m WiiUSystemMessage
+		rows.Scan(&m.ID, &m.Subject, &m.Body, &m.TitleID, &m.HighPriority, &m.Active, &m.Region, &m.CreatedAt)
+		list = append(list, m)
+	}
+	if list == nil {
+		list = []WiiUSystemMessage{}
+	}
+	return list
+}
+
+var sysmsgTmpl = template.Must(template.New("sysmsg").Funcs(tmplFuncs).Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Wii U SpotPass System Messages</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{font-family:system-ui,sans-serif;max-width:820px;margin:2rem auto;padding:0 1rem;color:#222}
+h1{font-size:1.4rem}
+a{color:#2563eb}
+table{width:100%;border-collapse:collapse;font-size:.9rem;margin-bottom:2rem}
+th{text-align:left;border-bottom:2px solid #e4e4e7;padding:.5rem .75rem;color:#666;font-weight:600}
+td{padding:.5rem .75rem;border-bottom:1px solid #f0f0f0;vertical-align:top}
+tr:last-child td{border-bottom:none}
+button,input,select,textarea{font:inherit}
+button{cursor:pointer;border:none;border-radius:4px;padding:.3rem .7rem;font-size:.85rem}
+.btn-del{background:#fee2e2;color:#991b1b}
+.btn-toggle{background:#e0e7ff;color:#3730a3}
+fieldset{border:1px solid #e4e4e7;border-radius:8px;padding:1rem 1.25rem;margin-bottom:2rem}
+legend{font-weight:600;padding:0 .4rem}
+.field{display:flex;flex-direction:column;gap:.3rem;margin-bottom:.75rem}
+label{font-size:.8rem;color:#666;font-weight:600}
+input[type=text],textarea{border:1px solid #d1d5db;border-radius:4px;padding:.4rem .6rem;width:100%;box-sizing:border-box;font-family:inherit}
+textarea{min-height:5rem;resize:vertical}
+.submit{background:#2563eb;color:#fff;padding:.4rem 1rem;cursor:pointer;border:none;border-radius:4px}
+.msg{background:#dcfce7;border:1px solid #bbf7d0;color:#166534;padding:.5rem 1rem;border-radius:6px;margin-bottom:1rem;font-size:.9rem}
+.note{background:#fff7ed;border:1px solid #fed7aa;border-radius:6px;padding:.75rem 1rem;margin-bottom:1.5rem;font-size:.9rem}
+.badge{display:inline-block;border-radius:999px;padding:.1rem .55rem;font-size:.75rem;font-weight:700}
+.badge-active{background:#dcfce7;color:#166534}
+.badge-inactive{background:#f3f4f6;color:#6b7280}
+.body-preview{white-space:pre-wrap;max-width:320px}
+</style>
+</head>
+<body>
+<p><a href="/inkay/admin/">← Back to admin</a></p>
+<h1>Wii U SpotPass System Messages</h1>
+{{if .Msg}}<div class="msg">{{.Msg}}</div>{{end}}
+<div class="note">Served via the console's own always-polled <code>sysmsg1</code>/<code>sysmsg2</code> BOSS tasks (Home Menu, TitleId 000500101004d100) - format confirmed against a genuine decrypted 2023 Nintendo message. Only <strong>active</strong> messages are sent; consoles pick these up on their next SpotPass check, no rebuild or restart needed.</div>
+
+<table>
+<tr><th>Subject / Body</th><th>Title ID</th><th>Region</th><th>Status</th><th>Created</th><th></th></tr>
+{{range .Messages}}
+<tr>
+  <td><strong>{{.Subject}}</strong><div class="body-preview">{{.Body}}</div></td>
+  <td style="font-family:monospace;font-size:.8rem">{{.TitleID}}</td>
+  <td>{{if .Region}}{{.Region}}{{else}}All{{end}}</td>
+  <td>{{if .Active}}<span class="badge badge-active">Active</span>{{else}}<span class="badge badge-inactive">Inactive</span>{{end}}</td>
+  <td style="font-size:.8rem;color:#666">{{localTime .CreatedAt "datetime"}}</td>
+  <td>
+    <form method="post" action="/inkay/admin/spotpass-wiiu/toggle" style="display:inline">
+      <input type="hidden" name="id" value="{{.ID}}">
+      <button class="btn-toggle" type="submit">{{if .Active}}Deactivate{{else}}Activate{{end}}</button>
+    </form>
+    <form method="post" action="/inkay/admin/spotpass-wiiu/remove" style="display:inline" onsubmit="return confirm('Delete this message permanently?')">
+      <input type="hidden" name="id" value="{{.ID}}">
+      <button class="btn-del" type="submit">Delete</button>
+    </form>
+  </td>
+</tr>
+{{else}}<tr><td colspan="6" style="color:#aaa">No system messages sent yet</td></tr>
+{{end}}
+</table>
+
+<fieldset>
+<legend>Send a new system message</legend>
+<form method="post" action="/inkay/admin/spotpass-wiiu/add">
+  <div class="field">
+    <label>Subject</label>
+    <input type="text" name="subject" placeholder="Nintendo eShop" required>
+  </div>
+  <div class="field">
+    <label>Body</label>
+    <textarea name="body" required></textarea>
+  </div>
+  <div class="field" style="max-width:240px">
+    <label>Region (blank = all regions)</label>
+    <select name="region">
+      <option value="">All regions</option>
+      <option value="USA">USA</option>
+      <option value="EUR">EUR</option>
+      <option value="JPN">JPN</option>
+    </select>
+  </div>
+  <button class="submit" type="submit">Send</button>
+</form>
+</fieldset>
+` + localTimeScript + `
+</body>
+</html>`))
+
+func adminSpotpassWiiU(w http.ResponseWriter, r *http.Request) {
+	msg := r.URL.Query().Get("msg")
+	data := struct {
+		Messages []WiiUSystemMessage
+		Msg      string
+	}{allWiiUSystemMessages(), msg}
+	w.Header().Set("Content-Type", "text/html")
+	sysmsgTmpl.Execute(w, data)
+}
+
+func adminSpotpassWiiUAdd(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/inkay/admin/spotpass-wiiu/", http.StatusSeeOther)
+		return
+	}
+	subject := strings.TrimSpace(r.FormValue("subject"))
+	body := strings.TrimSpace(r.FormValue("body"))
+	// * Always the generic Home Menu placeholder - account-proxy's
+	// * handleWiiUSysMsgTasksheet dynamically substitutes the requesting
+	// * console's own real region-specific self-id (wiiuHomeMenuTitleIDs)
+	// * at serve time, so every message is correctly region-split per
+	// * recipient automatically. No admin-editable title_id field anymore -
+	// * a custom game-specific reference isn't something this form should
+	// * produce.
+	titleID := "000500101004d100"
+	// * Always false, matching the one confirmed genuine real example - the
+	// * real effect of true is undocumented and untested, and TaskPriority
+	// * (the actually-documented BOSS priority concept) is a local,
+	// * per-task client API that can't be set from a server response at
+	// * all, so there's nothing meaningful to expose here.
+	highPriority := false
+	region := strings.ToUpper(strings.TrimSpace(r.FormValue("region")))
+	if region != "USA" && region != "EUR" && region != "JPN" {
+		region = ""
+	}
+	if subject == "" || body == "" {
+		http.Redirect(w, r, "/inkay/admin/spotpass-wiiu/?msg=Subject+and+body+are+required", http.StatusSeeOther)
+		return
+	}
+	_, err := db.Exec(`INSERT INTO wiiu_system_messages (subject, body, title_id, high_priority, region, active) VALUES ($1, $2, $3, $4, $5, true)`,
+		subject, body, titleID, highPriority, region)
+	if err != nil {
+		log.Printf("wiiu system message insert: %v", err)
+		http.Redirect(w, r, "/inkay/admin/spotpass-wiiu/?msg=DB+error", http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/inkay/admin/spotpass-wiiu/?msg=Message+sent", http.StatusSeeOther)
+}
+
+func adminSpotpassWiiUToggle(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/inkay/admin/spotpass-wiiu/", http.StatusSeeOther)
+		return
+	}
+	id, err := strconv.Atoi(r.FormValue("id"))
+	if err != nil {
+		http.Redirect(w, r, "/inkay/admin/spotpass-wiiu/?msg=Invalid+ID", http.StatusSeeOther)
+		return
+	}
+	db.Exec(`UPDATE wiiu_system_messages SET active = NOT active WHERE id = $1`, id)
+	http.Redirect(w, r, "/inkay/admin/spotpass-wiiu/?msg=Updated", http.StatusSeeOther)
+}
+
+func adminSpotpassWiiURemove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/inkay/admin/spotpass-wiiu/", http.StatusSeeOther)
+		return
+	}
+	id, err := strconv.Atoi(r.FormValue("id"))
+	if err != nil {
+		http.Redirect(w, r, "/inkay/admin/spotpass-wiiu/?msg=Invalid+ID", http.StatusSeeOther)
+		return
+	}
+	db.Exec(`DELETE FROM wiiu_system_messages WHERE id = $1`, id)
+	http.Redirect(w, r, "/inkay/admin/spotpass-wiiu/?msg=Message+deleted", http.StatusSeeOther)
+}
+
+func all3DSSystemMessages() []WiiUSystemMessage {
+	rows, err := db.Query(`SELECT id, subject, body, title_id, high_priority, active, region, created_at FROM n3ds_system_messages ORDER BY id DESC`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var list []WiiUSystemMessage
+	for rows.Next() {
+		var m WiiUSystemMessage
+		rows.Scan(&m.ID, &m.Subject, &m.Body, &m.TitleID, &m.HighPriority, &m.Active, &m.Region, &m.CreatedAt)
+		list = append(list, m)
+	}
+	if list == nil {
+		list = []WiiUSystemMessage{}
+	}
+	return list
+}
+
+// sysmsg3dsTmpl reuses sysmsgTmpl's exact layout/styling with 3DS-specific
+// copy and routes - see adminSpotpassWiiU's page for the shared design.
+var sysmsg3dsTmpl = template.Must(template.New("sysmsg3ds").Funcs(tmplFuncs).Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>3DS SpotPass System Messages</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{font-family:system-ui,sans-serif;max-width:820px;margin:2rem auto;padding:0 1rem;color:#222}
+h1{font-size:1.4rem}
+a{color:#2563eb}
+table{width:100%;border-collapse:collapse;font-size:.9rem;margin-bottom:2rem}
+th{text-align:left;border-bottom:2px solid #e4e4e7;padding:.5rem .75rem;color:#666;font-weight:600}
+td{padding:.5rem .75rem;border-bottom:1px solid #f0f0f0;vertical-align:top}
+tr:last-child td{border-bottom:none}
+button,input,select,textarea{font:inherit}
+button{cursor:pointer;border:none;border-radius:4px;padding:.3rem .7rem;font-size:.85rem}
+.btn-del{background:#fee2e2;color:#991b1b}
+.btn-toggle{background:#e0e7ff;color:#3730a3}
+fieldset{border:1px solid #e4e4e7;border-radius:8px;padding:1rem 1.25rem;margin-bottom:2rem}
+legend{font-weight:600;padding:0 .4rem}
+.field{display:flex;flex-direction:column;gap:.3rem;margin-bottom:.75rem}
+label{font-size:.8rem;color:#666;font-weight:600}
+input[type=text],textarea{border:1px solid #d1d5db;border-radius:4px;padding:.4rem .6rem;width:100%;box-sizing:border-box;font-family:inherit}
+textarea{min-height:5rem;resize:vertical}
+.submit{background:#2563eb;color:#fff;padding:.4rem 1rem;cursor:pointer;border:none;border-radius:4px}
+.msg{background:#dcfce7;border:1px solid #bbf7d0;color:#166534;padding:.5rem 1rem;border-radius:6px;margin-bottom:1rem;font-size:.9rem}
+.note{background:#fff7ed;border:1px solid #fed7aa;border-radius:6px;padding:.75rem 1rem;margin-bottom:1.5rem;font-size:.9rem}
+.badge{display:inline-block;border-radius:999px;padding:.1rem .55rem;font-size:.75rem;font-weight:700}
+.badge-active{background:#dcfce7;color:#166534}
+.badge-inactive{background:#f3f4f6;color:#6b7280}
+.body-preview{white-space:pre-wrap;max-width:320px}
+</style>
+</head>
+<body>
+<p><a href="/inkay/admin/">← Back to admin</a></p>
+<h1>3DS SpotPass System Messages</h1>
+{{if .Msg}}<div class="msg">{{.Msg}}</div>{{end}}
+<div class="note">Served via the console's own always-polled <code>sysmsg1</code>/<code>sysmsg2</code>/<code>sysmsg3</code> BOSS tasks (bossAppIds confirmed live against Pretendo's real server, TitleId 000400300000a102/b102). <strong>Unlike the Wii U version, the inner message format itself is unverified for 3DS</strong> - it reuses the genuine Wii U schema as a best guess, not a confirmed 3DS sample, so a message may not render correctly even if delivery succeeds.</div>
+
+<table>
+<tr><th>Subject / Body</th><th>Title ID</th><th>Region</th><th>Status</th><th>Created</th><th></th></tr>
+{{range .Messages}}
+<tr>
+  <td><strong>{{.Subject}}</strong><div class="body-preview">{{.Body}}</div></td>
+  <td style="font-family:monospace;font-size:.8rem">{{.TitleID}}</td>
+  <td>{{if .Region}}{{.Region}}{{else}}All{{end}}</td>
+  <td>{{if .Active}}<span class="badge badge-active">Active</span>{{else}}<span class="badge badge-inactive">Inactive</span>{{end}}</td>
+  <td style="font-size:.8rem;color:#666">{{localTime .CreatedAt "datetime"}}</td>
+  <td>
+    <form method="post" action="/inkay/admin/spotpass-3ds-sysmsg/toggle" style="display:inline">
+      <input type="hidden" name="id" value="{{.ID}}">
+      <button class="btn-toggle" type="submit">{{if .Active}}Deactivate{{else}}Activate{{end}}</button>
+    </form>
+    <form method="post" action="/inkay/admin/spotpass-3ds-sysmsg/remove" style="display:inline" onsubmit="return confirm('Delete this message permanently?')">
+      <input type="hidden" name="id" value="{{.ID}}">
+      <button class="btn-del" type="submit">Delete</button>
+    </form>
+  </td>
+</tr>
+{{else}}<tr><td colspan="6" style="color:#aaa">No system messages sent yet</td></tr>
+{{end}}
+</table>
+
+<fieldset>
+<legend>Send a new system message</legend>
+<form method="post" action="/inkay/admin/spotpass-3ds-sysmsg/add">
+  <div class="field">
+    <label>Subject</label>
+    <input type="text" name="subject" placeholder="Nintendo eShop" required>
+  </div>
+  <div class="field">
+    <label>Body</label>
+    <textarea name="body" required></textarea>
+  </div>
+  <div class="field" style="max-width:280px">
+    <label>Region (blank = all regions - not yet enforced for 3DS, no confirmed region-detection scheme)</label>
+    <select name="region">
+      <option value="">All regions</option>
+      <option value="USA">USA</option>
+      <option value="EUR">EUR</option>
+      <option value="JPN">JPN</option>
+    </select>
+  </div>
+  <button class="submit" type="submit">Send</button>
+</form>
+</fieldset>
+` + localTimeScript + `
+</body>
+</html>`))
+
+func adminSpotpass3DSSysMsg(w http.ResponseWriter, r *http.Request) {
+	msg := r.URL.Query().Get("msg")
+	data := struct {
+		Messages []WiiUSystemMessage
+		Msg      string
+	}{all3DSSystemMessages(), msg}
+	w.Header().Set("Content-Type", "text/html")
+	sysmsg3dsTmpl.Execute(w, data)
+}
+
+func adminSpotpass3DSSysMsgAdd(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/inkay/admin/spotpass-3ds-sysmsg/", http.StatusSeeOther)
+		return
+	}
+	subject := strings.TrimSpace(r.FormValue("subject"))
+	body := strings.TrimSpace(r.FormValue("body"))
+	// * Always the generic Home Menu placeholder - see
+	// * adminSpotpassWiiUAdd's comment, same reasoning for 3DS.
+	titleID := "000400300000a102"
+	// * Always false - see adminSpotpassWiiUAdd's comment.
+	highPriority := false
+	region := strings.ToUpper(strings.TrimSpace(r.FormValue("region")))
+	if region != "USA" && region != "EUR" && region != "JPN" {
+		region = ""
+	}
+	if subject == "" || body == "" {
+		http.Redirect(w, r, "/inkay/admin/spotpass-3ds-sysmsg/?msg=Subject+and+body+are+required", http.StatusSeeOther)
+		return
+	}
+	_, err := db.Exec(`INSERT INTO n3ds_system_messages (subject, body, title_id, high_priority, region, active) VALUES ($1, $2, $3, $4, $5, true)`,
+		subject, body, titleID, highPriority, region)
+	if err != nil {
+		log.Printf("3ds system message insert: %v", err)
+		http.Redirect(w, r, "/inkay/admin/spotpass-3ds-sysmsg/?msg=DB+error", http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/inkay/admin/spotpass-3ds-sysmsg/?msg=Message+sent", http.StatusSeeOther)
+}
+
+func adminSpotpass3DSSysMsgToggle(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/inkay/admin/spotpass-3ds-sysmsg/", http.StatusSeeOther)
+		return
+	}
+	id, err := strconv.Atoi(r.FormValue("id"))
+	if err != nil {
+		http.Redirect(w, r, "/inkay/admin/spotpass-3ds-sysmsg/?msg=Invalid+ID", http.StatusSeeOther)
+		return
+	}
+	db.Exec(`UPDATE n3ds_system_messages SET active = NOT active WHERE id = $1`, id)
+	http.Redirect(w, r, "/inkay/admin/spotpass-3ds-sysmsg/?msg=Updated", http.StatusSeeOther)
+}
+
+func adminSpotpass3DSSysMsgRemove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/inkay/admin/spotpass-3ds-sysmsg/", http.StatusSeeOther)
+		return
+	}
+	id, err := strconv.Atoi(r.FormValue("id"))
+	if err != nil {
+		http.Redirect(w, r, "/inkay/admin/spotpass-3ds-sysmsg/?msg=Invalid+ID", http.StatusSeeOther)
+		return
+	}
+	db.Exec(`DELETE FROM n3ds_system_messages WHERE id = $1`, id)
+	http.Redirect(w, r, "/inkay/admin/spotpass-3ds-sysmsg/?msg=Message+deleted", http.StatusSeeOther)
+}
+
+type SwapdoodleNote struct {
+	DataID          int64     `json:"data_id"`
+	OwnerPID        int64     `json:"owner_pid"`
+	OwnerPNID       string    `json:"owner_pnid,omitempty"`
+	RecipientPID    int64     `json:"recipient_pid,omitempty"`
+	RecipientPNID   string    `json:"recipient_pnid,omitempty"`
+	Size            int64     `json:"size"`
+	UploadCompleted bool      `json:"upload_completed"`
+	Read            bool      `json:"read"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
+// allSwapdoodleNotes lists every real note object (owner set, data_id != 0 -
+// excludes the internal dataID=0 self-check notifications GetNotificationUrl
+// creates on every poll), joined against its notification row for the
+// recipient. One row per (object, recipient) pair - a note broadcast to
+// several friends produces several rows here, each with its own accurate
+// Read status, rather than one ambiguous object-wide count.
+//
+// Read comes from datastore.notifications' own native "read"/"read_date"
+// columns (set per-recipient by the real GetNewArrivedNotifications call -
+// see get_new_arrived_notifications.go), not objects.reference_count - that
+// field is shared across every recipient of a broadcast note, so it can only
+// ever answer "has ANYONE fetched this", not "did THIS recipient get it".
+// Confirmed live 2026-08-26 that the two can disagree (a note can show
+// reference_count > 0 while a specific recipient's own notification row is
+// still unread).
+//
+// PNIDs are resolved separately via wiiuchat's pnid_cache since swapdoodle
+// lives in its own database - no cross-DB join possible.
+func allSwapdoodleNotes() []SwapdoodleNote {
+	if swapdoodleDB == nil {
+		return nil
+	}
+	rows, err := swapdoodleDB.Query(`
+		SELECT o.data_id, o.owner, o.size, o.upload_completed, o.creation_date, COALESCE(n.recipient_id, 0), COALESCE(n.read, false)
+		FROM datastore.objects o
+		LEFT JOIN datastore.notifications n ON n.data_id = o.data_id
+		WHERE o.owner IS NOT NULL AND o.data_id != 0
+		ORDER BY o.creation_date DESC
+		LIMIT 100`)
+	if err != nil {
+		log.Printf("swapdoodle notes query: %v", err)
+		return nil
+	}
+	defer rows.Close()
+
+	var list []SwapdoodleNote
+	pids := map[int64]bool{}
+	for rows.Next() {
+		var n SwapdoodleNote
+		if err := rows.Scan(&n.DataID, &n.OwnerPID, &n.Size, &n.UploadCompleted, &n.CreatedAt, &n.RecipientPID, &n.Read); err != nil {
+			continue
+		}
+		pids[n.OwnerPID] = true
+		if n.RecipientPID != 0 {
+			pids[n.RecipientPID] = true
+		}
+		list = append(list, n)
+	}
+
+	pnids := map[int64]string{}
+	for pid := range pids {
+		var pnid string
+		if err := db.QueryRow(`SELECT pnid FROM pnid_cache WHERE pid = $1`, pid).Scan(&pnid); err == nil {
+			pnids[pid] = pnid
+		}
+	}
+	for i := range list {
+		list[i].OwnerPNID = pnids[list[i].OwnerPID]
+		list[i].RecipientPNID = pnids[list[i].RecipientPID]
+	}
+	if list == nil {
+		list = []SwapdoodleNote{}
+	}
+	return list
+}
+
+var swapdoodleTmpl = template.Must(template.New("swapdoodle").Funcs(tmplFuncs).Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Swapdoodle SpotPass Notes</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{font-family:system-ui,sans-serif;max-width:820px;margin:2rem auto;padding:0 1rem;color:#222}
+h1{font-size:1.4rem}
+a{color:#2563eb}
+table{width:100%;border-collapse:collapse;font-size:.85rem;margin-bottom:2rem}
+th{text-align:left;border-bottom:2px solid #e4e4e7;padding:.5rem .75rem;color:#666;font-weight:600}
+td{padding:.5rem .75rem;border-bottom:1px solid #f0f0f0;vertical-align:middle}
+tr:last-child td{border-bottom:none}
+button,input{font:inherit}
+button{cursor:pointer;border:none;border-radius:4px;padding:.4rem 1rem;font-size:.85rem}
+fieldset{border:1px solid #e4e4e7;border-radius:8px;padding:1rem 1.25rem;margin-bottom:2rem}
+legend{font-weight:600;padding:0 .4rem}
+.row{display:flex;gap:.75rem;flex-wrap:wrap;align-items:flex-end}
+.field{display:flex;flex-direction:column;gap:.3rem;flex:1;min-width:160px}
+label{font-size:.8rem;color:#666;font-weight:600}
+input[type=text]{border:1px solid #d1d5db;border-radius:4px;padding:.4rem .6rem;width:100%;box-sizing:border-box}
+.submit{background:#2563eb;color:#fff}
+.msg{background:#dcfce7;border:1px solid #bbf7d0;color:#166534;padding:.5rem 1rem;border-radius:6px;margin-bottom:1rem;font-size:.9rem}
+.err{background:#fee2e2;border:1px solid #fecaca;color:#991b1b;padding:.5rem 1rem;border-radius:6px;margin-bottom:1rem;font-size:.9rem}
+.note{background:#fff7ed;border:1px solid #fed7aa;border-radius:6px;padding:.75rem 1rem;margin-bottom:1.5rem;font-size:.9rem}
+.badge{display:inline-block;border-radius:999px;padding:.1rem .55rem;font-size:.75rem;font-weight:700}
+.badge-ok{background:#dcfce7;color:#166534}
+.badge-pending{background:#fef9c3;color:#854d0e}
+.mono{font-family:monospace;font-size:.8rem}
+</style>
+</head>
+<body>
+<p><a href="/inkay/admin/">← Back to admin</a></p>
+<h1>Swapdoodle SpotPass Notes</h1>
+{{if .Msg}}<div class="msg">{{.Msg}}</div>{{end}}
+{{if .Err}}<div class="err">{{.Err}}</div>{{end}}
+<div class="note">Real Swap Doodle notes, uploaded and delivered entirely through the console's own normal flow. "Received" reflects that specific recipient's own notification row (DataStore's native per-recipient read/read_date tracking) - a note sent to several friends shows one row and one Received status per friend.</div>
+
+<table>
+<tr><th>DataID</th><th>Sender</th><th>Recipient</th><th>Size</th><th>Status</th><th>Received</th><th>Created</th></tr>
+{{range .Notes}}
+<tr>
+  <td class="mono">{{.DataID}}</td>
+  <td>{{if .OwnerPNID}}<strong>{{.OwnerPNID}}</strong><br><span class="mono" style="color:#999">{{.OwnerPID}}</span>{{else}}<span class="mono">{{.OwnerPID}}</span>{{end}}</td>
+  <td>{{if .RecipientPID}}{{if .RecipientPNID}}<strong>{{.RecipientPNID}}</strong><br><span class="mono" style="color:#999">{{.RecipientPID}}</span>{{else}}<span class="mono">{{.RecipientPID}}</span>{{end}}{{else}}<span style="color:#aaa">—</span>{{end}}</td>
+  <td>{{.Size}} bytes</td>
+  <td>{{if .UploadCompleted}}<span class="badge badge-ok">Completed</span>{{else}}<span class="badge badge-pending">Pending</span>{{end}}</td>
+  <td>{{if .Read}}<span class="badge badge-ok">Yes</span>{{else}}<span class="badge badge-pending">Not yet</span>{{end}}</td>
+  <td style="font-size:.8rem;color:#666">{{localTime .CreatedAt "datetime"}}</td>
+</tr>
+{{else}}<tr><td colspan="7" style="color:#aaa">No notes sent yet</td></tr>
+{{end}}
+</table>
+` + localTimeScript + `
+</body>
+</html>`))
+
+func adminSwapdoodle(w http.ResponseWriter, r *http.Request) {
+	data := struct {
+		Notes []SwapdoodleNote
+		Msg   string
+		Err   string
+	}{allSwapdoodleNotes(), r.URL.Query().Get("msg"), r.URL.Query().Get("err")}
+	w.Header().Set("Content-Type", "text/html")
+	swapdoodleTmpl.Execute(w, data)
+}
+
+// adminSwapdoodleSend replicates PreparePostObjectV1 -> S3 upload ->
+// CompletePostObjectV1 -> SendNotification server-side, matching the fields
+// real Swapdoodle uploads use (see project_swapdoodle_spotpass_working
+// memory): access_permission 4 (SpecifiedFriend), raw_flags 8
+// (UseNotificationOnPost), data_type 1, upload_completed true.
 func adminBans(w http.ResponseWriter, r *http.Request) {
 	msg := r.URL.Query().Get("msg")
 	data := struct {
@@ -2353,6 +3238,521 @@ func adminCertsRotate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, "/inkay/admin/?msg=New+cert+generated+—+re-download+client-cert.p12", http.StatusSeeOther)
+}
+
+// --- JSON admin API (for the native Android admin app) ---
+//
+// Mirrors every existing HTML admin action as a JSON equivalent under
+// /admin/api/v1/..., reusing the exact same underlying DB logic
+// (allRedirects, usersForGame, etc.) so the two paths can't drift. All of
+// these are wrapped in requireClientCert by their registration in main(),
+// same as the HTML routes. GETs return {"ok":true,"data":...}; POSTs accept
+// a JSON body (not form-urlencoded) and return {"ok":true} (plus "data" for
+// add endpoints, so the app can show the fresh list without a second round
+// trip); errors return {"ok":false,"error":"..."} with a non-2xx status.
+
+func writeJSON(w http.ResponseWriter, status int, payload interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(payload)
+}
+
+func writeJSONOK(w http.ResponseWriter, data interface{}) {
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "data": data})
+}
+
+func writeJSONOKNoData(w http.ResponseWriter) {
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
+}
+
+func writeJSONError(w http.ResponseWriter, status int, message string) {
+	writeJSON(w, status, map[string]interface{}{"ok": false, "error": message})
+}
+
+func requirePOST(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		writeJSONError(w, http.StatusMethodNotAllowed, "POST required")
+		return false
+	}
+	return true
+}
+
+func apiV1Ping(w http.ResponseWriter, r *http.Request) {
+	writeJSONOKNoData(w)
+}
+
+// usedGameServerIDs returns every distinct game_server_id actually
+// referenced anywhere admin-relevant (a configured redirect, a per-game
+// whitelist entry, or a review-queue sighting) - the only three tables that
+// carry this column. Keeps the game-picker dropdown scoped to games that
+// exist on THIS deployment instead of every title this codebase has ever
+// supported.
+func usedGameServerIDs() []string {
+	rows, err := db.Query(`
+		SELECT DISTINCT id FROM (
+			SELECT UPPER(game_server_id) AS id FROM redirects WHERE game_server_id IS NOT NULL AND game_server_id != ''
+			UNION
+			SELECT UPPER(game_server_id) AS id FROM user_access
+			UNION
+			SELECT UPPER(game_server_id) AS id FROM review_queue
+		) t ORDER BY id`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err == nil && id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// apiV1GameTitles exposes display names for currently-used game server IDs
+// only (see usedGameServerIDs) - falls back to the raw ID as its own label
+// for a used ID this codebase doesn't have a friendly name for, so it still
+// shows up as a pickable option rather than silently vanishing.
+func apiV1GameTitles(w http.ResponseWriter, r *http.Request) {
+	used := usedGameServerIDs()
+	result := make(map[string]string, len(used))
+	for _, id := range used {
+		if name, ok := gameServerTitles[id]; ok {
+			result[id] = name
+		} else {
+			result[id] = id
+		}
+	}
+	writeJSONOK(w, result)
+}
+
+func apiV1CertStatus(w http.ResponseWriter, r *http.Request) {
+	cert, err := latestAdminCert()
+	if err != nil || cert == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "no cert available yet")
+		return
+	}
+	expiresAt := cert.CreatedAt.Add(time.Duration(certValidDays) * 24 * time.Hour)
+	writeJSONOK(w, map[string]interface{}{
+		"issuedAt":          cert.CreatedAt.UTC().Format(time.RFC3339),
+		"expiresAt":         expiresAt.UTC().Format(time.RFC3339),
+		"daysUntilRotation": daysUntilRotation(cert),
+		"rotationDays":      certRotationDays,
+		"validDays":         certValidDays,
+	})
+}
+
+// --- Redirects ---
+
+func apiV1Redirects(w http.ResponseWriter, r *http.Request) {
+	writeJSONOK(w, allRedirects())
+}
+
+func apiV1RedirectsAdd(w http.ResponseWriter, r *http.Request) {
+	if !requirePOST(w, r) {
+		return
+	}
+	var body struct {
+		Type         string `json:"type"`
+		Address      string `json:"address"`
+		GameServerID string `json:"game_server_id"`
+		Port         int    `json:"port"`
+		FromHost     string `json:"from_host"`
+		ToHost       string `json:"to_host"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if body.FromHost == "" || body.ToHost == "" || (body.Type != "iosu" && body.Type != "dns") {
+		writeJSONError(w, http.StatusBadRequest, "type must be 'iosu' or 'dns'; from_host and to_host are required")
+		return
+	}
+	var addrVal, gameVal, portVal interface{}
+	if body.Address != "" {
+		addrVal = body.Address
+	}
+	if body.GameServerID != "" {
+		gameVal = body.GameServerID
+	}
+	if body.Port > 0 {
+		portVal = body.Port
+	}
+	_, err := db.Exec(`INSERT INTO redirects (type, address, game_server_id, port, from_host, to_host) VALUES ($1, $2, $3, $4, $5, $6)`,
+		body.Type, addrVal, gameVal, portVal, body.FromHost, body.ToHost)
+	if err != nil {
+		log.Printf("api redirects add: %v", err)
+		writeJSONError(w, http.StatusInternalServerError, "database error")
+		return
+	}
+	writeJSONOK(w, allRedirects())
+}
+
+func apiV1RedirectsDelete(w http.ResponseWriter, r *http.Request) {
+	if !requirePOST(w, r) {
+		return
+	}
+	var body struct {
+		ID int `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ID == 0 {
+		writeJSONError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	db.Exec(`DELETE FROM redirects WHERE id = $1`, body.ID)
+	writeJSONOKNoData(w)
+}
+
+func apiV1RedirectsToggle(w http.ResponseWriter, r *http.Request) {
+	if !requirePOST(w, r) {
+		return
+	}
+	var body struct {
+		ID int `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ID == 0 {
+		writeJSONError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	db.Exec(`UPDATE redirects SET enabled = NOT enabled WHERE id = $1`, body.ID)
+	writeJSONOKNoData(w)
+}
+
+// --- Per-game user whitelist ---
+
+func apiV1Users(w http.ResponseWriter, r *http.Request) {
+	game := r.URL.Query().Get("game")
+	if game == "" {
+		writeJSONError(w, http.StatusBadRequest, "missing 'game' query parameter")
+		return
+	}
+	writeJSONOK(w, usersForGame(game))
+}
+
+func apiV1UsersAdd(w http.ResponseWriter, r *http.Request) {
+	if !requirePOST(w, r) {
+		return
+	}
+	var body struct {
+		Game string `json:"game"`
+		PID  int64  `json:"pid"`
+		Note string `json:"note"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.PID <= 0 || body.Game == "" {
+		writeJSONError(w, http.StatusBadRequest, "game and a positive pid are required")
+		return
+	}
+	var noteVal interface{}
+	if body.Note != "" {
+		noteVal = body.Note
+	}
+	_, err := db.Exec(`INSERT INTO user_access (pid, game_server_id, note) VALUES ($1, UPPER($2), $3) ON CONFLICT (pid, game_server_id) DO UPDATE SET note = EXCLUDED.note`,
+		body.PID, body.Game, noteVal)
+	if err != nil {
+		log.Printf("api users add: %v", err)
+		writeJSONError(w, http.StatusInternalServerError, "database error")
+		return
+	}
+	writeJSONOK(w, usersForGame(body.Game))
+}
+
+func apiV1UsersDelete(w http.ResponseWriter, r *http.Request) {
+	if !requirePOST(w, r) {
+		return
+	}
+	var body struct {
+		Game string `json:"game"`
+		PID  int64  `json:"pid"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Game == "" {
+		writeJSONError(w, http.StatusBadRequest, "game and pid are required")
+		return
+	}
+	db.Exec(`DELETE FROM user_access WHERE pid = $1 AND UPPER(game_server_id) = UPPER($2)`, body.PID, body.Game)
+	writeJSONOKNoData(w)
+}
+
+// --- Bans ---
+
+func apiV1Bans(w http.ResponseWriter, r *http.Request) {
+	writeJSONOK(w, allBans())
+}
+
+func apiV1BansAdd(w http.ResponseWriter, r *http.Request) {
+	if !requirePOST(w, r) {
+		return
+	}
+	var body struct {
+		PID    int64  `json:"pid"`
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.PID <= 0 {
+		writeJSONError(w, http.StatusBadRequest, "invalid pid")
+		return
+	}
+	var reasonVal interface{}
+	if body.Reason != "" {
+		reasonVal = body.Reason
+	}
+	_, err := db.Exec(`INSERT INTO banned_users (pid, reason) VALUES ($1, $2) ON CONFLICT (pid) DO UPDATE SET reason = EXCLUDED.reason, created_at = NOW()`,
+		body.PID, reasonVal)
+	if err != nil {
+		log.Printf("api bans add: %v", err)
+		writeJSONError(w, http.StatusInternalServerError, "database error")
+		return
+	}
+	writeJSONOK(w, allBans())
+}
+
+func apiV1BansRemove(w http.ResponseWriter, r *http.Request) {
+	if !requirePOST(w, r) {
+		return
+	}
+	var body struct {
+		PID int64 `json:"pid"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid pid")
+		return
+	}
+	db.Exec(`DELETE FROM banned_users WHERE pid = $1`, body.PID)
+	writeJSONOKNoData(w)
+}
+
+// --- Access levels ---
+
+func apiV1Access(w http.ResponseWriter, r *http.Request) {
+	writeJSONOK(w, allAccessLevels())
+}
+
+func apiV1AccessSet(w http.ResponseWriter, r *http.Request) {
+	if !requirePOST(w, r) {
+		return
+	}
+	var body struct {
+		PID   int64  `json:"pid"`
+		Level int    `json:"level"`
+		Note  string `json:"note"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.PID <= 0 || (body.Level != 2 && body.Level != 3) {
+		writeJSONError(w, http.StatusBadRequest, "pid must be positive and level must be 2 or 3")
+		return
+	}
+	_, err := db.Exec(`INSERT INTO account_access_levels (pid, access_level, note, updated_at) VALUES ($1, $2, $3, NOW())
+		ON CONFLICT (pid) DO UPDATE SET access_level = EXCLUDED.access_level, note = EXCLUDED.note, updated_at = NOW()`,
+		body.PID, body.Level, body.Note)
+	if err != nil {
+		log.Printf("api access set: %v", err)
+		writeJSONError(w, http.StatusInternalServerError, "database error")
+		return
+	}
+	writeJSONOK(w, allAccessLevels())
+}
+
+func apiV1AccessRemove(w http.ResponseWriter, r *http.Request) {
+	if !requirePOST(w, r) {
+		return
+	}
+	var body struct {
+		PID int64 `json:"pid"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid pid")
+		return
+	}
+	db.Exec(`DELETE FROM account_access_levels WHERE pid = $1`, body.PID)
+	writeJSONOKNoData(w)
+}
+
+// --- SpotPass system messages (Wii U + 3DS share the same shape/logic,
+// just different tables via allWiiUSystemMessages/all3DSSystemMessages) ---
+
+func addSystemMessage(table, subject, body, titleID, region string) error {
+	subject = strings.TrimSpace(subject)
+	body = strings.TrimSpace(body)
+	if subject == "" || body == "" {
+		return fmt.Errorf("subject and body are required")
+	}
+	region = strings.ToUpper(strings.TrimSpace(region))
+	if region != "USA" && region != "EUR" && region != "JPN" {
+		region = ""
+	}
+	_, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (subject, body, title_id, high_priority, region, active) VALUES ($1, $2, $3, false, $4, true)`, table),
+		subject, body, titleID, region)
+	return err
+}
+
+func apiV1SpotpassWiiU(w http.ResponseWriter, r *http.Request) {
+	writeJSONOK(w, allWiiUSystemMessages())
+}
+
+func apiV1SpotpassWiiUAdd(w http.ResponseWriter, r *http.Request) {
+	if !requirePOST(w, r) {
+		return
+	}
+	var body struct {
+		Subject string `json:"subject"`
+		Body    string `json:"body"`
+		Region  string `json:"region"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	// Fixed title_id (Wii U Home Menu) - see adminSpotpassWiiUAdd's comment:
+	// account-proxy substitutes the requesting console's real region-specific
+	// self-id at serve time, so this placeholder is intentionally constant.
+	if err := addSystemMessage("wiiu_system_messages", body.Subject, body.Body, "000500101004d100", body.Region); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSONOK(w, allWiiUSystemMessages())
+}
+
+func apiV1SpotpassWiiUToggle(w http.ResponseWriter, r *http.Request) {
+	if !requirePOST(w, r) {
+		return
+	}
+	var body struct {
+		ID int `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ID == 0 {
+		writeJSONError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	db.Exec(`UPDATE wiiu_system_messages SET active = NOT active WHERE id = $1`, body.ID)
+	writeJSONOKNoData(w)
+}
+
+func apiV1SpotpassWiiURemove(w http.ResponseWriter, r *http.Request) {
+	if !requirePOST(w, r) {
+		return
+	}
+	var body struct {
+		ID int `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ID == 0 {
+		writeJSONError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	db.Exec(`DELETE FROM wiiu_system_messages WHERE id = $1`, body.ID)
+	writeJSONOKNoData(w)
+}
+
+func apiV1Spotpass3DSSysMsg(w http.ResponseWriter, r *http.Request) {
+	writeJSONOK(w, all3DSSystemMessages())
+}
+
+func apiV1Spotpass3DSSysMsgAdd(w http.ResponseWriter, r *http.Request) {
+	if !requirePOST(w, r) {
+		return
+	}
+	var body struct {
+		Subject string `json:"subject"`
+		Body    string `json:"body"`
+		Region  string `json:"region"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if err := addSystemMessage("n3ds_system_messages", body.Subject, body.Body, "000400300000a102", body.Region); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSONOK(w, all3DSSystemMessages())
+}
+
+func apiV1Spotpass3DSSysMsgToggle(w http.ResponseWriter, r *http.Request) {
+	if !requirePOST(w, r) {
+		return
+	}
+	var body struct {
+		ID int `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ID == 0 {
+		writeJSONError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	db.Exec(`UPDATE n3ds_system_messages SET active = NOT active WHERE id = $1`, body.ID)
+	writeJSONOKNoData(w)
+}
+
+func apiV1Spotpass3DSSysMsgRemove(w http.ResponseWriter, r *http.Request) {
+	if !requirePOST(w, r) {
+		return
+	}
+	var body struct {
+		ID int `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ID == 0 {
+		writeJSONError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	db.Exec(`DELETE FROM n3ds_system_messages WHERE id = $1`, body.ID)
+	writeJSONOKNoData(w)
+}
+
+// apiV1Spotpass3DSNotes is read-only, matching adminSwapdoodle - there is no
+// admin-triggered mutation for Swap Doodle notes, only real console traffic
+// creates them.
+func apiV1Spotpass3DSNotes(w http.ResponseWriter, r *http.Request) {
+	writeJSONOK(w, allSwapdoodleNotes())
+}
+
+// --- Review queue ---
+
+func apiV1Review(w http.ResponseWriter, r *http.Request) {
+	writeJSONOK(w, pendingReviews())
+}
+
+func apiV1ReviewApprove(w http.ResponseWriter, r *http.Request) {
+	if !requirePOST(w, r) {
+		return
+	}
+	var body struct {
+		PID  int64  `json:"pid"`
+		Game string `json:"game"`
+		Note string `json:"note"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.PID <= 0 || body.Game == "" {
+		writeJSONError(w, http.StatusBadRequest, "pid and game are required")
+		return
+	}
+	var noteVal interface{}
+	if body.Note != "" {
+		noteVal = body.Note
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "database error")
+		return
+	}
+	tx.Exec(`INSERT INTO user_access (pid, game_server_id, note) VALUES ($1, UPPER($2), $3) ON CONFLICT (pid, game_server_id) DO UPDATE SET note = EXCLUDED.note`, body.PID, body.Game, noteVal)
+	tx.Exec(`DELETE FROM review_queue WHERE pid = $1 AND UPPER(game_server_id) = UPPER($2)`, body.PID, body.Game)
+	if err := tx.Commit(); err != nil {
+		tx.Rollback()
+		writeJSONError(w, http.StatusInternalServerError, "database error")
+		return
+	}
+	writeJSONOK(w, pendingReviews())
+}
+
+func apiV1ReviewDismiss(w http.ResponseWriter, r *http.Request) {
+	if !requirePOST(w, r) {
+		return
+	}
+	var body struct {
+		PID  int64  `json:"pid"`
+		Game string `json:"game"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Game == "" {
+		writeJSONError(w, http.StatusBadRequest, "pid and game are required")
+		return
+	}
+	db.Exec(`DELETE FROM review_queue WHERE pid = $1 AND UPPER(game_server_id) = UPPER($2)`, body.PID, body.Game)
+	writeJSONOKNoData(w)
 }
 
 // --- My Status (per-user page, web password auth) ---

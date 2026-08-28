@@ -89,25 +89,38 @@ func TestRankingTemplateSlots(t *testing.T) {
 	}
 }
 
-func TestPatchMiiNameRoundTrip(t *testing.T) {
+func TestPatchMiiDataRoundTrip(t *testing.T) {
 	sub := make([]byte, rankingSubRecordSize)
 	copy(sub, rankingDataTemplate[:rankingSubRecordSize])
 
-	patchMiiName(sub, "Nico")
+	miiData := make([]byte, rankingMiiStructSize)
+	for i := range miiData {
+		miiData[i] = byte(i + 1) // avoid all-zero, which would look like a no-op
+	}
+	patchMiiData(sub, miiData)
 
-	name := sub[rankingNameOffset : rankingNameOffset+rankingNameMaxRunes*2]
-	want := []byte{0x00, 'N', 0x00, 'i', 0x00, 'c', 0x00, 'o', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-	if !bytes.Equal(name, want) {
-		t.Fatalf("patched name field = %x, want %x", name, want)
+	got := sub[rankingMiiStructOffset : rankingMiiStructOffset+rankingMiiStructSize]
+	if !bytes.Equal(got, miiData) {
+		t.Fatalf("patched Mii struct = %x, want %x", got, miiData)
 	}
 
-	// Bytes outside the fixed 20-byte name slot must be untouched.
-	if !bytes.Equal(sub[:rankingNameOffset], rankingDataTemplate[:rankingNameOffset]) {
-		t.Fatal("patchMiiName modified bytes before the name field")
+	// Bytes outside the 96-byte Mii struct must be untouched.
+	if !bytes.Equal(sub[:rankingMiiStructOffset], rankingDataTemplate[:rankingMiiStructOffset]) {
+		t.Fatal("patchMiiData modified bytes before the Mii struct")
 	}
-	after := rankingNameOffset + rankingNameMaxRunes*2
+	after := rankingMiiStructOffset + rankingMiiStructSize
 	if !bytes.Equal(sub[after:], rankingDataTemplate[after:rankingSubRecordSize]) {
-		t.Fatal("patchMiiName modified bytes after the name field")
+		t.Fatal("patchMiiData modified bytes after the Mii struct")
+	}
+}
+
+// TestMiiStructOffsetMatchesNameOffset confirms rankingMiiStructOffset lines
+// up with the independently-confirmed rankingNameOffset at the Mii struct's
+// own well-known nickname field offset (0x1a) - if these ever drift apart
+// (e.g. someone edits one constant without the other) this catches it.
+func TestMiiStructOffsetMatchesNameOffset(t *testing.T) {
+	if rankingMiiStructOffset+0x1a != rankingNameOffset {
+		t.Fatalf("rankingMiiStructOffset (0x%x) + 0x1a != rankingNameOffset (0x%x)", rankingMiiStructOffset, rankingNameOffset)
 	}
 }
 
@@ -119,7 +132,11 @@ func TestGenerateRankingDataEncryptDecryptRoundTrip(t *testing.T) {
 	content := make([]byte, len(rankingDataTemplate))
 	copy(content, rankingDataTemplate)
 	slots := rankingTemplateSlots()
-	patchMiiName(content[slots[0][0]:slots[0][0]+rankingSubRecordSize], "TestName")
+	testMiiData := make([]byte, rankingMiiStructSize)
+	for i := range testMiiData {
+		testMiiData[i] = byte(i + 1)
+	}
+	patchMiiData(content[slots[0][0]:slots[0][0]+rankingSubRecordSize], testMiiData)
 
 	encrypted, err := encryptBossFile(content)
 	if err != nil {
