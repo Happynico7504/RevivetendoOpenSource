@@ -4229,10 +4229,8 @@ func markSwapdoodleBossServed(dataID, pid int64) {
 // is the first thing to revert (see feedback_swapdoodle_read_flag_conflation
 // memory for the related history).
 func handleNpdlCDN(w http.ResponseWriter, r *http.Request) {
-	if strings.HasSuffix(r.URL.Path, "/dstsetting") ||
-		strings.HasSuffix(r.URL.Path, "/dstdatList.bin") ||
-		strings.HasSuffix(r.URL.Path, "/nt1") ||
-		strings.HasSuffix(r.URL.Path, "/nt2") {
+	isRingEC1 := strings.Contains(r.URL.Path, "/RNG_EC1/") && strings.HasSuffix(r.URL.Path, ".dlp")
+	if strings.Contains(r.URL.Path, "/RNG_") && !isRingEC1 {
 		// Experiment as of 2026-08-27 - previously always answered 304 Not
 		// Modified here (the "same synthetic-304 trick as dstsetting"
 		// mentioned in this function's doc comment). Per the BOSS
@@ -4255,6 +4253,16 @@ func handleNpdlCDN(w http.ResponseWriter, r *http.Request) {
 		// feedback_tls_config_per_connection_no_resumption and
 		// feedback_swapdoodle_invalid_dataid_notification for the other,
 		// already-confirmed fixes from this same debugging session).
+		//
+		// Matched by the generic "/RNG_*/" folder convention rather than an
+		// enumerated filename list (dstsetting, dstdatList.bin, nt1, nt2) as
+		// of 2026-08-28: any RNG_-prefixed folder other than RNG_EC1 is, per
+		// the same BOSS manual reasoning, a config/developer-content switch
+		// that's safe to satisfy unconditionally - covers ring files we've
+		// captured live (RNG_MD1, RNG_NT1, RNG_NT2) plus ones the console
+		// requests only from screens we haven't captured yet (e.g. the "LS1"
+		// tag seen on the letter-list screen, never observed in
+		// boss-capture/ - see feedback_swapdoodle_ls1_unknown_ring_file).
 		body := []byte("SD1")
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.WriteHeader(http.StatusOK)
