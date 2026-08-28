@@ -109,3 +109,27 @@ func TestMultiPageSwapdoodleNote(t *testing.T) {
 		}
 	}
 }
+
+// TestExtractRecipientsFromRealSwapdoodleNote verifies DSTINF1 decoding
+// against a real 2-recipient note - the embedded PIDs are confirmed real
+// accounts from this session (see extractRecipientsFromSwapdoodleNote doc).
+func TestExtractRecipientsFromRealSwapdoodleNote(t *testing.T) {
+	path := "/nico-pretendo-bridge/boss-capture/s3relayupload_20260824-042259.541.file.bin"
+	noteBytes, err := os.ReadFile(path)
+	if err != nil {
+		t.Skipf("real sample not present: %v", err)
+	}
+	recipients, ok := extractRecipientsFromSwapdoodleNote(noteBytes)
+	if !ok {
+		t.Fatal("extractRecipientsFromSwapdoodleNote returned ok=false")
+	}
+	want := []uint32{1329092152, 1427150011}
+	if len(recipients) != len(want) {
+		t.Fatalf("recipients = %v, want %v", recipients, want)
+	}
+	for i, pid := range want {
+		if recipients[i] != pid {
+			t.Errorf("recipient[%d] = %d, want %d", i, recipients[i], pid)
+		}
+	}
+}

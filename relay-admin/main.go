@@ -3032,6 +3032,10 @@ function toggleSwapdoodleDetail(id) {
     .then(function(d) {
       if (d.error) { body.textContent = 'Not available: ' + d.error; return; }
       var html = '<strong>' + d.page_count + ' page' + (d.page_count === 1 ? '' : 's') + '</strong>, ' + d.total_size + ' bytes total';
+      if (d.recipients && d.recipients.length) {
+        html += '<br>Recipients (from the note itself, not just the notification row): ';
+        html += d.recipients.map(function(r) { return r.pnid ? r.pnid : r.pid; }).join(', ');
+      }
       html += '<div class="detail-thumbs">';
       for (var i = 0; i < d.page_count; i++) {
         var points = (d.points_per_page && d.points_per_page[i] !== undefined) ? d.points_per_page[i] : '?';
@@ -3072,8 +3076,43 @@ func adminSwapdoodleNoteDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+
+	body, _ := io.ReadAll(resp.Body)
+	var parsed struct {
+		PageCount      int     `json:"page_count"`
+		PointsPerPage  []int   `json:"points_per_page"`
+		TotalSize      int     `json:"total_size"`
+		RecipientPIDs  []int64 `json:"recipient_pids"`
+		Error          string  `json:"error"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil || resp.StatusCode != http.StatusOK {
+		w.WriteHeader(resp.StatusCode)
+		w.Write(body)
+		return
+	}
+
+	// Resolve PNIDs for the note's own real recipient list (from DSTINF1,
+	// not datastore.notifications - see extractRecipientsFromSwapdoodleNote's
+	// doc comment in account-proxy for why they can differ) the same way
+	// allSwapdoodleNotes already does for the main table.
+	type recipient struct {
+		PID  int64  `json:"pid"`
+		PNID string `json:"pnid,omitempty"`
+	}
+	recipients := make([]recipient, len(parsed.RecipientPIDs))
+	for i, pid := range parsed.RecipientPIDs {
+		var pnid string
+		db.QueryRow(`SELECT pnid FROM pnid_cache WHERE pid = $1`, pid).Scan(&pnid)
+		recipients[i] = recipient{PID: pid, PNID: pnid}
+	}
+
+	out, _ := json.Marshal(struct {
+		PageCount     int         `json:"page_count"`
+		PointsPerPage []int       `json:"points_per_page"`
+		TotalSize     int         `json:"total_size"`
+		Recipients    []recipient `json:"recipients"`
+	}{parsed.PageCount, parsed.PointsPerPage, parsed.TotalSize, recipients})
+	w.Write(out)
 }
 
 // adminSwapdoodleThumbnail proxies account-proxy's internal per-page JPEG

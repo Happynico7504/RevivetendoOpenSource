@@ -1504,6 +1504,44 @@ func extractThumbnailsFromSwapdoodleNote(noteBytes []byte) (thumbnails [][]byte,
 	return thumbs, true
 }
 
+// extractRecipientsFromSwapdoodleNote decodes DSTINF1 - sender-level, not
+// per-page, like MIISTD1 - into the note's real recipient PID list:
+// [count: 4-byte LE][count x 4-byte LE recipient PID]. Confirmed live
+// 2026-08-28 by decoding embedded PIDs from several real captures and
+// matching them exactly against known real accounts from this session
+// (including the user's own Azahar test PID). This is the note's own
+// authoritative recipient list - independent of, and a broadcast note may
+// list more recipients than, datastore.notifications' rows (which only
+// exist per-recipient once that recipient's own client has interacted).
+func extractRecipientsFromSwapdoodleNote(noteBytes []byte) (recipientPIDs []uint32, ok bool) {
+	decompressed, err := lz10Decompress(noteBytes)
+	if err != nil {
+		return nil, false
+	}
+	blocks, err := parseBPK1Blocks(decompressed)
+	if err != nil {
+		return nil, false
+	}
+	dstPages, found := blocks["DSTINF1"]
+	if !found || len(dstPages) == 0 {
+		return nil, false
+	}
+	dst := dstPages[0]
+	if len(dst) < 4 {
+		return nil, false
+	}
+	count := binary.LittleEndian.Uint32(dst[0:4])
+	needed := 4 + int(count)*4
+	if needed > len(dst) {
+		return nil, false
+	}
+	recipientPIDs = make([]uint32, count)
+	for i := uint32(0); i < count; i++ {
+		recipientPIDs[i] = binary.LittleEndian.Uint32(dst[4+i*4 : 8+i*4])
+	}
+	return recipientPIDs, true
+}
+
 // fetchSwapdoodleNoteBytes downloads a note object straight from
 // swapdoodle-data by data_id, using the deterministic key shape confirmed
 // live across every real capture (ds/objects/%020d_%010d.bin, version
@@ -1559,7 +1597,10 @@ func handleInternalSwapdoodleNoteDetail(w http.ResponseWriter, r *http.Request) 
 	}
 	pageCount := len(blocks["THUMB2"])
 	pointCountsJSON, _ := json.Marshal(pointCounts)
-	fmt.Fprintf(w, `{"page_count":%d,"points_per_page":%s,"total_size":%d}`, pageCount, pointCountsJSON, len(noteBytes))
+	recipients, _ := extractRecipientsFromSwapdoodleNote(noteBytes)
+	recipientsJSON, _ := json.Marshal(recipients)
+	fmt.Fprintf(w, `{"page_count":%d,"points_per_page":%s,"total_size":%d,"recipient_pids":%s}`,
+		pageCount, pointCountsJSON, len(noteBytes), recipientsJSON)
 }
 
 // handleInternalSwapdoodleThumbnail serves one page's real THUMB2 JPEG
