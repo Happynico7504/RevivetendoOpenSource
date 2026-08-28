@@ -20,6 +20,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -1362,6 +1363,26 @@ func renderAndUploadMii(pid uint32, miiDataB64 string, bucket string) {
 	}
 }
 
+// errNotLZ10 is the specific, EXPECTED case - this data's type byte isn't
+// 0x10 at all, meaning it was never LZ10 to begin with. Distinct from a
+// genuine parse failure partway through an actual LZ10 stream (truncated/
+// corrupt input below), which would indicate a real bug. Confirmed live
+// 2026-08-28: a real minority of Swapdoodle notes (including one of the
+// user's own, data_id 38) have first bytes (0x30/0x66/0x60/0xa6/... -
+// scattered across the byte range, no pattern) that are neither LZ10 nor
+// the standard-Nintendo RLE type (0x30) - both hypotheses tested and
+// falsified against real captures (RLE's declared size came out to 9MB
+// from an 18KB input; the content shows maximum byte-value entropy in the
+// first 4KB, characteristic of real encryption, not compression). Some of
+// these are even byte-for-byte identical across unrelated data_ids/days
+// (same object appearing under 7 different notes), suggesting a fixed
+// default/placeholder asset rather than unique note content. No further
+// investigation without the real 3DS BOSS AES key (keyslot 0x38, not
+// obtainable in this environment - see
+// project_swapdoodle_note_format_moderation memory). Callers use this
+// sentinel to skip these quietly instead of logging them as errors.
+var errNotLZ10 = errors.New("not LZ10")
+
 // lz10Decompress implements Nintendo's standard LZ10 compression (the GBA/DS/
 // 3DS LZSS variant used across many first-party formats): a 4-byte header
 // (type byte 0x10, then a 3-byte little-endian decompressed size), followed
@@ -1372,7 +1393,7 @@ func renderAndUploadMii(pid uint32, miiDataB64 string, bucket string) {
 // extractMiiFromSwapdoodleNote's doc comment) - not used anywhere else yet.
 func lz10Decompress(data []byte) ([]byte, error) {
 	if len(data) < 4 || data[0] != 0x10 {
-		return nil, fmt.Errorf("not LZ10 (type byte %#x)", data[0])
+		return nil, errNotLZ10
 	}
 	size := int(data[1]) | int(data[2])<<8 | int(data[3])<<16
 	out := make([]byte, 0, size)
@@ -1449,20 +1470,38 @@ func parseBPK1Blocks(data []byte) (map[string][][]byte, error) {
 	return blocks, nil
 }
 
+// decodeSwapdoodleNote is the shared LZ10-decompress + BPK1-parse preamble
+// for every extractXFromSwapdoodleNote function below. Quietly skips (no
+// log) notes that are errNotLZ10 - a real, expected minority of notes are
+// encrypted with a scheme we don't have the key for, not a bug (see
+// errNotLZ10's doc comment) - but still logs anything else, since a parse
+// failure partway through an actual LZ10/BPK1 stream (truncated input,
+// checksum-range errors, etc.) would indicate a genuine problem worth
+// noticing.
+func decodeSwapdoodleNote(noteBytes []byte, caller string) (map[string][][]byte, bool) {
+	decompressed, err := lz10Decompress(noteBytes)
+	if err != nil {
+		if !errors.Is(err, errNotLZ10) {
+			log.Printf("%s: lz10: %v", caller, err)
+		}
+		return nil, false
+	}
+	blocks, err := parseBPK1Blocks(decompressed)
+	if err != nil {
+		log.Printf("%s: bpk1: %v", caller, err)
+		return nil, false
+	}
+	return blocks, true
+}
+
 // extractMiiFromSwapdoodleNote decodes a real Swapdoodle note object
 // (LZ10-compressed BPK1 container - see lz10Decompress/parseBPK1Blocks) and
 // returns its MIISTD1 block, the sender's embedded Mii. Confirmed live
 // 2026-08-28 against a real captured note by finding the sender's own PNID
 // name UTF-16LE-encoded inside the extracted bytes.
 func extractMiiFromSwapdoodleNote(noteBytes []byte) (miiData []byte, ok bool) {
-	decompressed, err := lz10Decompress(noteBytes)
-	if err != nil {
-		log.Printf("extractMiiFromSwapdoodleNote: lz10: %v", err)
-		return nil, false
-	}
-	blocks, err := parseBPK1Blocks(decompressed)
-	if err != nil {
-		log.Printf("extractMiiFromSwapdoodleNote: bpk1: %v", err)
+	blocks, ok := decodeSwapdoodleNote(noteBytes, "extractMiiFromSwapdoodleNote")
+	if !ok {
 		return nil, false
 	}
 	miiPages, found := blocks["MIISTD1"]
@@ -1489,12 +1528,8 @@ func extractMiiFromSwapdoodleNote(noteBytes []byte) (miiData []byte, ok bool) {
 // JPEG - confirmed live 2026-08-28 via real file magic + a Nintendo 3DS
 // Exif tag) in page order. A single-page note returns a 1-element slice.
 func extractThumbnailsFromSwapdoodleNote(noteBytes []byte) (thumbnails [][]byte, ok bool) {
-	decompressed, err := lz10Decompress(noteBytes)
-	if err != nil {
-		return nil, false
-	}
-	blocks, err := parseBPK1Blocks(decompressed)
-	if err != nil {
+	blocks, ok := decodeSwapdoodleNote(noteBytes, "extractThumbnailsFromSwapdoodleNote")
+	if !ok {
 		return nil, false
 	}
 	thumbs, found := blocks["THUMB2"]
@@ -1514,12 +1549,8 @@ func extractThumbnailsFromSwapdoodleNote(noteBytes []byte) (thumbnails [][]byte,
 // list more recipients than, datastore.notifications' rows (which only
 // exist per-recipient once that recipient's own client has interacted).
 func extractRecipientsFromSwapdoodleNote(noteBytes []byte) (recipientPIDs []uint32, ok bool) {
-	decompressed, err := lz10Decompress(noteBytes)
-	if err != nil {
-		return nil, false
-	}
-	blocks, err := parseBPK1Blocks(decompressed)
-	if err != nil {
+	blocks, ok := decodeSwapdoodleNote(noteBytes, "extractRecipientsFromSwapdoodleNote")
+	if !ok {
 		return nil, false
 	}
 	dstPages, found := blocks["DSTINF1"]

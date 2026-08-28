@@ -133,3 +133,28 @@ func TestExtractRecipientsFromRealSwapdoodleNote(t *testing.T) {
 		}
 	}
 }
+
+// TestSkipsUndecodableSwapdoodleNote verifies that a real note we can't
+// decode (encrypted with a scheme we don't have the key for - see
+// errNotLZ10's doc comment) is skipped cleanly (ok=false, no panic) by
+// every extractor, rather than erroring the whole batch.
+func TestSkipsUndecodableSwapdoodleNote(t *testing.T) {
+	path := "/nico-pretendo-bridge/boss-capture/s3relayupload_20260828-072541.484.file.bin"
+	noteBytes, err := os.ReadFile(path)
+	if err != nil {
+		t.Skipf("real sample not present: %v", err)
+	}
+	if noteBytes[0] == 0x10 {
+		t.Fatal("test sample is unexpectedly LZ10 now - pick a different known-undecodable sample")
+	}
+
+	if _, ok := extractMiiFromSwapdoodleNote(noteBytes); ok {
+		t.Error("extractMiiFromSwapdoodleNote: expected ok=false for undecodable content")
+	}
+	if _, ok := extractThumbnailsFromSwapdoodleNote(noteBytes); ok {
+		t.Error("extractThumbnailsFromSwapdoodleNote: expected ok=false for undecodable content")
+	}
+	if _, ok := extractRecipientsFromSwapdoodleNote(noteBytes); ok {
+		t.Error("extractRecipientsFromSwapdoodleNote: expected ok=false for undecodable content")
+	}
+}
