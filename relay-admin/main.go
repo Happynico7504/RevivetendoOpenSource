@@ -44,6 +44,7 @@ var gameServerTitles = map[string]string{
 }
 
 var tmplFuncs = template.FuncMap{
+	"add1": func(i int) int { return i + 1 },
 	"gameTitle": func(id string) string {
 		if id == "" {
 			return "—"
@@ -267,7 +268,6 @@ SELECT 'dns', 'account.pretendo.cc', '45.157.178.35', '101D9D00', 60016, 'open'
 WHERE NOT EXISTS (SELECT 1 FROM redirects WHERE game_server_id = '101D9D00');
 `
 
-
 type Redirect struct {
 	ID           int       `json:"id"`
 	Type         string    `json:"type"`
@@ -321,9 +321,9 @@ type RecentRequest struct {
 }
 
 type OnlineUser struct {
-	PID          int64
-	PNID         string
-	TitleID      int64
+	PID           int64
+	PNID          string
+	TitleID       int64
 	GameServerHex string
 	GameName      string
 }
@@ -334,7 +334,6 @@ type Stats struct {
 	Requests24h     int `json:"requests_last_24h"`
 	ActiveRedirects int `json:"active_redirects"`
 }
-
 
 var db *sql.DB
 
@@ -468,6 +467,7 @@ func main() {
 	http.HandleFunc("/admin/spotpass-wiiu/remove", requireClientCert(adminSpotpassWiiURemove))
 	http.HandleFunc("/admin/spotpass-3ds/", requireClientCert(adminSwapdoodle))
 	http.HandleFunc("/admin/spotpass-3ds/detail/", requireClientCert(adminSwapdoodleNoteDetail))
+	http.HandleFunc("/admin/spotpass-3ds/note/", requireClientCert(adminSwapdoodleNotePage))
 	http.HandleFunc("/admin/spotpass-3ds/thumbnail/", requireClientCert(adminSwapdoodleThumbnail))
 	http.HandleFunc("/admin/spotpass-3ds-sysmsg/", requireClientCert(adminSpotpass3DSSysMsg))
 	http.HandleFunc("/admin/spotpass-3ds-sysmsg/add", requireClientCert(adminSpotpass3DSSysMsgAdd))
@@ -551,7 +551,6 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(s)
 }
-
 
 func collectStats() Stats {
 	var s Stats
@@ -1872,11 +1871,11 @@ var cardTmpl = template.Must(template.New("card").Parse(`<svg xmlns="http://www.
 func statsCard(w http.ResponseWriter, r *http.Request) {
 	s := collectStats()
 	data := struct {
-		TotalPIDs      int
-		Requests24h    int
-		TotalRequests  int
+		TotalPIDs       int
+		Requests24h     int
+		TotalRequests   int
 		ActiveRedirects int
-		UpdatedAt      string
+		UpdatedAt       string
 	}{
 		s.TotalPIDs,
 		s.Requests24h,
@@ -2141,7 +2140,6 @@ func adminToggle(w http.ResponseWriter, r *http.Request) {
 	db.Exec(`UPDATE redirects SET enabled = NOT enabled WHERE id = $1`, id)
 	http.Redirect(w, r, "/inkay/admin/", http.StatusSeeOther)
 }
-
 
 // --- User access management ---
 
@@ -2952,6 +2950,144 @@ func allSwapdoodleNotes() []SwapdoodleNote {
 	return list
 }
 
+// swapdoodleNoteByDataID mirrors allSwapdoodleNotes' query, filtered to one
+// data_id, for the dedicated note detail page - still one row per
+// (object, recipient) pair, since a broadcast note can have several.
+func swapdoodleNoteByDataID(dataID int64) []SwapdoodleNote {
+	if swapdoodleDB == nil {
+		return nil
+	}
+	rows, err := swapdoodleDB.Query(`
+		SELECT o.data_id, o.owner, o.size, o.upload_completed, o.creation_date, COALESCE(n.recipient_id, 0), COALESCE(n.read, false)
+		FROM datastore.objects o
+		LEFT JOIN datastore.notifications n ON n.data_id = o.data_id
+		WHERE o.data_id = $1`, dataID)
+	if err != nil {
+		log.Printf("swapdoodle note query: %v", err)
+		return nil
+	}
+	defer rows.Close()
+
+	var list []SwapdoodleNote
+	pids := map[int64]bool{}
+	for rows.Next() {
+		var n SwapdoodleNote
+		if err := rows.Scan(&n.DataID, &n.OwnerPID, &n.Size, &n.UploadCompleted, &n.CreatedAt, &n.RecipientPID, &n.Read); err != nil {
+			continue
+		}
+		pids[n.OwnerPID] = true
+		if n.RecipientPID != 0 {
+			pids[n.RecipientPID] = true
+		}
+		list = append(list, n)
+	}
+	pnids := map[int64]string{}
+	for pid := range pids {
+		var pnid string
+		if err := db.QueryRow(`SELECT pnid FROM pnid_cache WHERE pid = $1`, pid).Scan(&pnid); err == nil {
+			pnids[pid] = pnid
+		}
+	}
+	for i := range list {
+		list[i].OwnerPNID = pnids[list[i].OwnerPID]
+		list[i].RecipientPNID = pnids[list[i].RecipientPID]
+	}
+	return list
+}
+
+var swapdoodleNoteTmpl = template.Must(template.New("swapdoodle-note").Funcs(tmplFuncs).Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Swapdoodle Note {{.DataID}}</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{font-family:system-ui,sans-serif;max-width:820px;margin:2rem auto;padding:0 1rem;color:#222}
+h1{font-size:1.4rem}
+a{color:#2563eb}
+.mono{font-family:monospace;font-size:.85rem}
+.badge{display:inline-block;border-radius:999px;padding:.1rem .55rem;font-size:.75rem;font-weight:700}
+.badge-ok{background:#dcfce7;color:#166534}
+.badge-pending{background:#fef9c3;color:#854d0e}
+.mii-mini{width:32px;height:32px;border-radius:6px;vertical-align:middle;margin-right:.4rem;background:#f4f4f5}
+.who{display:flex;align-items:center;margin:.3rem 0}
+table{width:100%;border-collapse:collapse;font-size:.85rem;margin:1rem 0}
+th{text-align:left;border-bottom:2px solid #e4e4e7;padding:.4rem .6rem;color:#666;font-weight:600}
+td{padding:.4rem .6rem;border-bottom:1px solid #f0f0f0}
+.section{margin:1.5rem 0}
+.section h2{font-size:1rem;color:#666;margin-bottom:.5rem}
+.thumbs{display:flex;gap:.8rem;flex-wrap:wrap}
+.thumbs figure{margin:0;text-align:center}
+.thumbs img{width:128px;height:128px;object-fit:cover;border-radius:8px;border:1px solid #e4e4e7;background:#fff}
+.thumbs figcaption{font-size:.75rem;color:#999;margin-top:.25rem}
+.err{background:#fee2e2;border:1px solid #fecaca;color:#991b1b;padding:.5rem 1rem;border-radius:6px;margin-bottom:1rem;font-size:.9rem}
+</style>
+</head>
+<body>
+<p><a href="/inkay/admin/spotpass-3ds/">← Back to Swapdoodle notes</a></p>
+<h1>Note <span class="mono">{{.DataID}}</span></h1>
+
+{{if .DetailErr}}<div class="err">Couldn't load note content: {{.DetailErr}}</div>{{end}}
+
+<div class="section">
+<h2>Delivery</h2>
+<table>
+<tr><th>Sender</th><th>Recipient (notified)</th><th>Size</th><th>Status</th><th>Received</th><th>Created</th></tr>
+{{range .Rows}}
+<tr>
+  <td><div class="who"><img class="mii-mini" src="https://sos-de-fra-1.exo.io/revivetendo-data/mii/{{.OwnerPID}}/normal_face.png" alt="" onerror="this.style.display='none'">{{if .OwnerPNID}}<strong>{{.OwnerPNID}}</strong>{{else}}<span class="mono">{{.OwnerPID}}</span>{{end}}</div></td>
+  <td>{{if .RecipientPID}}<div class="who"><img class="mii-mini" src="https://sos-de-fra-1.exo.io/revivetendo-data/mii/{{.RecipientPID}}/normal_face.png" alt="" onerror="this.style.display='none'">{{if .RecipientPNID}}<strong>{{.RecipientPNID}}</strong>{{else}}<span class="mono">{{.RecipientPID}}</span>{{end}}</div>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
+  <td>{{.Size}} bytes</td>
+  <td>{{if .UploadCompleted}}<span class="badge badge-ok">Completed</span>{{else}}<span class="badge badge-pending">Pending</span>{{end}}</td>
+  <td>{{if .Read}}<span class="badge badge-ok">Yes</span>{{else}}<span class="badge badge-pending">Not yet</span>{{end}}</td>
+  <td style="font-size:.8rem;color:#666">{{localTime .CreatedAt "datetime"}}</td>
+</tr>
+{{else}}<tr><td colspan="6" style="color:#aaa">No delivery rows for this data_id</td></tr>
+{{end}}
+</table>
+</div>
+
+{{if .Detail}}
+<div class="section">
+<h2>Note's own recipient list ({{len .Detail.Recipients}})</h2>
+<div class="note" style="font-size:.8rem;color:#999;margin-bottom:.5rem">From the note's own embedded DSTINF1 block, not the delivery table above - can include recipients who haven't checked in yet.</div>
+{{range .Detail.Recipients}}<div class="who"><img class="mii-mini" src="https://sos-de-fra-1.exo.io/revivetendo-data/mii/{{.PID}}/normal_face.png" alt="" onerror="this.style.display='none'">{{if .PNID}}{{.PNID}}{{else}}<span class="mono">{{.PID}}</span>{{end}}</div>{{end}}
+</div>
+
+<div class="section">
+<h2>{{.Detail.PageCount}} page{{if ne .Detail.PageCount 1}}s{{end}}, {{.Detail.TotalSize}} bytes total</h2>
+<div class="thumbs">
+{{range $i, $points := .Detail.PointsPerPage}}
+<figure><img src="/inkay/admin/spotpass-3ds/thumbnail/{{$.DataID}}/{{$i}}" alt="page {{$i}}" onerror="this.style.display='none'"><figcaption>page {{add1 $i}}, {{$points}} pts</figcaption></figure>
+{{end}}
+</div>
+</div>
+{{end}}
+</body>
+</html>`))
+
+func adminSwapdoodleNotePage(w http.ResponseWriter, r *http.Request) {
+	dataIDStr := strings.TrimPrefix(r.URL.Path, "/admin/spotpass-3ds/note/")
+	dataID, err := strconv.ParseInt(dataIDStr, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid data_id", http.StatusBadRequest)
+		return
+	}
+	detail, _, detailErr := fetchSwapdoodleNoteDetail(dataIDStr)
+	var detailErrMsg string
+	if detailErr != nil {
+		detailErrMsg = detailErr.Error()
+	}
+	data := struct {
+		DataID    int64
+		Rows      []SwapdoodleNote
+		Detail    *swapdoodleNoteDetail
+		DetailErr string
+	}{dataID, swapdoodleNoteByDataID(dataID), detail, detailErrMsg}
+	w.Header().Set("Content-Type", "text/html")
+	swapdoodleNoteTmpl.Execute(w, data)
+}
+
 var swapdoodleTmpl = template.Must(template.New("swapdoodle").Funcs(tmplFuncs).Parse(`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2986,12 +3122,6 @@ input[type=text]{border:1px solid #d1d5db;border-radius:4px;padding:.4rem .6rem;
 .who{display:flex;align-items:center}
 tr.note-row{cursor:pointer}
 tr.note-row:hover{background:#fafafa}
-tr.detail-row td{background:#fafafa;padding:1rem .75rem}
-.detail-body{font-size:.85rem;color:#555}
-.detail-thumbs{display:flex;gap:.6rem;flex-wrap:wrap;margin-top:.5rem}
-.detail-thumbs figure{margin:0;text-align:center}
-.detail-thumbs img{width:96px;height:96px;object-fit:cover;border-radius:6px;border:1px solid #e4e4e7;background:#fff}
-.detail-thumbs figcaption{font-size:.7rem;color:#999;margin-top:.2rem}
 </style>
 </head>
 <body>
@@ -2999,12 +3129,12 @@ tr.detail-row td{background:#fafafa;padding:1rem .75rem}
 <h1>Swapdoodle SpotPass Notes</h1>
 {{if .Msg}}<div class="msg">{{.Msg}}</div>{{end}}
 {{if .Err}}<div class="err">{{.Err}}</div>{{end}}
-<div class="note">Real Swap Doodle notes, uploaded and delivered entirely through the console's own normal flow. "Received" reflects that specific recipient's own notification row (DataStore's native per-recipient read/read_date tracking) - a note sent to several friends shows one row and one Received status per friend. Sender/recipient avatars reuse the same Mii render pipeline as the rest of the admin panel. Click a row for per-page thumbnails and stroke-point counts.</div>
+<div class="note">Real Swap Doodle notes, uploaded and delivered entirely through the console's own normal flow. "Received" reflects that specific recipient's own notification row (DataStore's native per-recipient read/read_date tracking) - a note sent to several friends shows one row and one Received status per friend. Sender/recipient avatars reuse the same Mii render pipeline as the rest of the admin panel. Click a row for the full note - per-page thumbnails, stroke-point counts, and the note's own recipient list.</div>
 
 <table>
 <tr><th>DataID</th><th>Sender</th><th>Recipient</th><th>Size</th><th>Status</th><th>Received</th><th>Created</th></tr>
 {{range .Notes}}
-<tr class="note-row" onclick="toggleSwapdoodleDetail({{.DataID}})">
+<tr class="note-row" onclick="location.href='/inkay/admin/spotpass-3ds/note/{{.DataID}}'">
   <td class="mono">{{.DataID}}</td>
   <td><div class="who"><img class="mii-mini" src="https://sos-de-fra-1.exo.io/revivetendo-data/mii/{{.OwnerPID}}/normal_face.png" alt="" onerror="this.style.display='none'">{{if .OwnerPNID}}<strong>{{.OwnerPNID}}</strong><br><span class="mono" style="color:#999">{{.OwnerPID}}</span>{{else}}<span class="mono">{{.OwnerPID}}</span>{{end}}</div></td>
   <td>{{if .RecipientPID}}<div class="who"><img class="mii-mini" src="https://sos-de-fra-1.exo.io/revivetendo-data/mii/{{.RecipientPID}}/normal_face.png" alt="" onerror="this.style.display='none'">{{if .RecipientPNID}}<strong>{{.RecipientPNID}}</strong><br><span class="mono" style="color:#999">{{.RecipientPID}}</span>{{else}}<span class="mono">{{.RecipientPID}}</span>{{end}}</div>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
@@ -3013,40 +3143,9 @@ tr.detail-row td{background:#fafafa;padding:1rem .75rem}
   <td>{{if .Read}}<span class="badge badge-ok">Yes</span>{{else}}<span class="badge badge-pending">Not yet</span>{{end}}</td>
   <td style="font-size:.8rem;color:#666">{{localTime .CreatedAt "datetime"}}</td>
 </tr>
-<tr class="detail-row" id="detail-{{.DataID}}" style="display:none"><td colspan="7"><div class="detail-body" id="detail-body-{{.DataID}}"></div></td></tr>
 {{else}}<tr><td colspan="7" style="color:#aaa">No notes sent yet</td></tr>
 {{end}}
 </table>
-<script>
-function toggleSwapdoodleDetail(id) {
-  var row = document.getElementById('detail-' + id);
-  if (!row) return;
-  if (row.style.display !== 'none') { row.style.display = 'none'; return; }
-  row.style.display = '';
-  var body = document.getElementById('detail-body-' + id);
-  if (body.dataset.loaded) return;
-  body.dataset.loaded = '1';
-  body.textContent = 'Loading…';
-  fetch('/inkay/admin/spotpass-3ds/detail/' + id)
-    .then(function(r) { return r.json(); })
-    .then(function(d) {
-      if (d.error) { body.textContent = 'Not available: ' + d.error; return; }
-      var html = '<strong>' + d.page_count + ' page' + (d.page_count === 1 ? '' : 's') + '</strong>, ' + d.total_size + ' bytes total';
-      if (d.recipients && d.recipients.length) {
-        html += '<br>Recipients (from the note itself, not just the notification row): ';
-        html += d.recipients.map(function(r) { return r.pnid ? r.pnid : r.pid; }).join(', ');
-      }
-      html += '<div class="detail-thumbs">';
-      for (var i = 0; i < d.page_count; i++) {
-        var points = (d.points_per_page && d.points_per_page[i] !== undefined) ? d.points_per_page[i] : '?';
-        html += '<figure><img src="/inkay/admin/spotpass-3ds/thumbnail/' + id + '/' + i + '" alt="page ' + (i+1) + '" onerror="this.style.display=\'none\'"><figcaption>page ' + (i+1) + ', ' + points + ' pts</figcaption></figure>';
-      }
-      html += '</div>';
-      body.innerHTML = html;
-    })
-    .catch(function(e) { body.textContent = 'Failed to load: ' + e; });
-}
-</script>
 ` + localTimeScript + `
 </body>
 </html>`))
@@ -3061,57 +3160,72 @@ func adminSwapdoodle(w http.ResponseWriter, r *http.Request) {
 	swapdoodleTmpl.Execute(w, data)
 }
 
-// adminSwapdoodleNoteDetail proxies account-proxy's internal per-note JSON
-// endpoint (page count, per-page stroke-point counts - see
-// handleInternalSwapdoodleNoteDetail's doc comment in account-proxy) for
-// the notes page's click-to-expand panel. Only account-proxy has the
-// swapdoodle-data S3 credentials/LZ10+BPK1 decoder, so this can't be done
-// directly from relay-admin.
-func adminSwapdoodleNoteDetail(w http.ResponseWriter, r *http.Request) {
-	dataID := strings.TrimPrefix(r.URL.Path, "/admin/spotpass-3ds/detail/")
+type swapdoodleRecipient struct {
+	PID  int64  `json:"pid"`
+	PNID string `json:"pnid,omitempty"`
+}
+
+type swapdoodleNoteDetail struct {
+	PageCount     int                   `json:"page_count"`
+	PointsPerPage []int                 `json:"points_per_page"`
+	TotalSize     int                   `json:"total_size"`
+	Recipients    []swapdoodleRecipient `json:"recipients"`
+}
+
+// fetchSwapdoodleNoteDetail calls account-proxy's internal per-note JSON
+// endpoint (page count, per-page stroke-point counts, DSTINF1's real
+// recipient list - see handleInternalSwapdoodleNoteDetail's doc comment in
+// account-proxy) and resolves each recipient PID's PNID via pnid_cache
+// (the same way the main notes table already does). Only account-proxy has
+// the swapdoodle-data S3 credentials/LZ10+BPK1 decoder, so this can't be
+// done directly from relay-admin. Shared by the JSON API endpoint (kept
+// for local admin scripting) and the SSR note detail page.
+func fetchSwapdoodleNoteDetail(dataID string) (*swapdoodleNoteDetail, int, error) {
 	resp, err := http.Get("http://127.0.0.1:9191/internal/swapdoodle-note-detail/" + dataID)
 	if err != nil {
-		http.Error(w, `{"error":"internal request failed"}`, http.StatusBadGateway)
-		return
+		return nil, http.StatusBadGateway, err
 	}
 	defer resp.Body.Close()
-	w.Header().Set("Content-Type", "application/json")
-
 	body, _ := io.ReadAll(resp.Body)
+
 	var parsed struct {
-		PageCount      int     `json:"page_count"`
-		PointsPerPage  []int   `json:"points_per_page"`
-		TotalSize      int     `json:"total_size"`
-		RecipientPIDs  []int64 `json:"recipient_pids"`
-		Error          string  `json:"error"`
+		PageCount     int     `json:"page_count"`
+		PointsPerPage []int   `json:"points_per_page"`
+		TotalSize     int     `json:"total_size"`
+		RecipientPIDs []int64 `json:"recipient_pids"`
+		Error         string  `json:"error"`
 	}
-	if err := json.Unmarshal(body, &parsed); err != nil || resp.StatusCode != http.StatusOK {
-		w.WriteHeader(resp.StatusCode)
-		w.Write(body)
-		return
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, resp.StatusCode, fmt.Errorf("bad response from account-proxy: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, resp.StatusCode, fmt.Errorf("%s", parsed.Error)
 	}
 
-	// Resolve PNIDs for the note's own real recipient list (from DSTINF1,
-	// not datastore.notifications - see extractRecipientsFromSwapdoodleNote's
-	// doc comment in account-proxy for why they can differ) the same way
-	// allSwapdoodleNotes already does for the main table.
-	type recipient struct {
-		PID  int64  `json:"pid"`
-		PNID string `json:"pnid,omitempty"`
-	}
-	recipients := make([]recipient, len(parsed.RecipientPIDs))
+	recipients := make([]swapdoodleRecipient, len(parsed.RecipientPIDs))
 	for i, pid := range parsed.RecipientPIDs {
 		var pnid string
 		db.QueryRow(`SELECT pnid FROM pnid_cache WHERE pid = $1`, pid).Scan(&pnid)
-		recipients[i] = recipient{PID: pid, PNID: pnid}
+		recipients[i] = swapdoodleRecipient{PID: pid, PNID: pnid}
 	}
+	return &swapdoodleNoteDetail{parsed.PageCount, parsed.PointsPerPage, parsed.TotalSize, recipients}, http.StatusOK, nil
+}
 
-	out, _ := json.Marshal(struct {
-		PageCount     int         `json:"page_count"`
-		PointsPerPage []int       `json:"points_per_page"`
-		TotalSize     int         `json:"total_size"`
-		Recipients    []recipient `json:"recipients"`
-	}{parsed.PageCount, parsed.PointsPerPage, parsed.TotalSize, recipients})
+// adminSwapdoodleNoteDetail is the JSON API - kept alongside the SSR page
+// (adminSwapdoodleNotePage) specifically so local scripting against
+// /admin/api/v1/... (and this endpoint) keeps working regardless of what
+// the browser/app UI does - see project_revivetendo_dashboard_apache2 and
+// project_relay_admin_android_webview memories.
+func adminSwapdoodleNoteDetail(w http.ResponseWriter, r *http.Request) {
+	dataID := strings.TrimPrefix(r.URL.Path, "/admin/spotpass-3ds/detail/")
+	detail, status, err := fetchSwapdoodleNoteDetail(dataID)
+	w.Header().Set("Content-Type", "application/json")
+	if err != nil {
+		w.WriteHeader(status)
+		fmt.Fprintf(w, `{"error":%q}`, err.Error())
+		return
+	}
+	out, _ := json.Marshal(detail)
 	w.Write(out)
 }
 
@@ -3871,7 +3985,7 @@ func apiV1ReviewDismiss(w http.ResponseWriter, r *http.Request) {
 // --- My Status (per-user page, web password auth) ---
 
 var mySessionStore sync.Map // token string → pid int64
-var mySyncTime    sync.Map // pid int64 → time.Time of last Pretendo sync
+var mySyncTime sync.Map     // pid int64 → time.Time of last Pretendo sync
 
 func myNewSession(pid int64) string {
 	b := make([]byte, 16)
@@ -3967,9 +4081,9 @@ h1{font-size:1.4rem;margin-bottom:.5rem}
 </html>`))
 
 type myDiscordData struct {
-	PNID           string
-	Code           string
-	ExpiresIn      string
+	PNID            string
+	Code            string
+	ExpiresIn       string
 	LinkedDiscordID string
 }
 
