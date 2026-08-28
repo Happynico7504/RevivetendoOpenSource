@@ -480,6 +480,7 @@ func main() {
 	http.HandleFunc("/admin/client-cert.p12", requireClientCert(adminClientCert))
 
 	// JSON API for the native Android admin app - see "JSON admin API" section below.
+	http.HandleFunc("/admin/api-docs/", requireClientCert(adminAPIDocs))
 	http.HandleFunc("/admin/api/v1/ping", requireClientCert(apiV1Ping))
 	http.HandleFunc("/admin/api/v1/game-titles", requireClientCert(apiV1GameTitles))
 	http.HandleFunc("/admin/api/v1/cert-status", requireClientCert(apiV1CertStatus))
@@ -1937,6 +1938,7 @@ input[type=text],select{border:1px solid #d1d5db;border-radius:4px;padding:.4rem
   <a href="/inkay/admin/spotpass-wiiu/">📢 Wii U SpotPass</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/spotpass-3ds/">📮 3DS Swapdoodle</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/spotpass-3ds-sysmsg/">📢 3DS SpotPass</a> &nbsp;|&nbsp;
+  <a href="/inkay/admin/api-docs/">📖 API docs</a> &nbsp;|&nbsp;
   <a href="/wsc-public/">🎳 WSC</a>
 </p>
 <div style="display:flex;align-items:center;gap:1rem;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:.6rem 1rem;margin-bottom:1.5rem;font-size:.875rem">
@@ -3467,7 +3469,7 @@ func adminCertsRotate(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/inkay/admin/?msg=New+cert+generated+—+re-download+client-cert.p12", http.StatusSeeOther)
 }
 
-// --- JSON admin API (for the native Android admin app) ---
+// --- JSON admin API (for local scripting) ---
 //
 // Mirrors every existing HTML admin action as a JSON equivalent under
 // /admin/api/v1/..., reusing the exact same underlying DB logic
@@ -3475,8 +3477,16 @@ func adminCertsRotate(w http.ResponseWriter, r *http.Request) {
 // these are wrapped in requireClientCert by their registration in main(),
 // same as the HTML routes. GETs return {"ok":true,"data":...}; POSTs accept
 // a JSON body (not form-urlencoded) and return {"ok":true} (plus "data" for
-// add endpoints, so the app can show the fresh list without a second round
+// add endpoints, so a caller can show the fresh list without a second round
 // trip); errors return {"ok":false,"error":"..."} with a non-2xx status.
+//
+// Originally built for the native Android admin app - that app now embeds a
+// WebView pointed at the HTML admin panel directly instead (see
+// project_android_admin_app_webview memory), so this API's only consumer
+// today is local admin scripting. Kept fully intact and documented
+// (adminAPIDocs/apiDocsTmpl below, at /admin/api-docs/) specifically so it
+// stays a stable, human-usable integration point regardless of what the
+// browser/app UI does.
 
 func writeJSON(w http.ResponseWriter, status int, payload interface{}) {
 	w.Header().Set("Content-Type", "application/json")
@@ -3506,6 +3516,184 @@ func requirePOST(w http.ResponseWriter, r *http.Request) bool {
 
 func apiV1Ping(w http.ResponseWriter, r *http.Request) {
 	writeJSONOKNoData(w)
+}
+
+// --- API documentation page (/admin/api-docs/) ---
+//
+// A hand-written reference for the JSON API above, kept next to it so drift
+// gets noticed - every method/path/field name here was read directly out of
+// the apiV1* handlers and their request/response structs, not guessed.
+var apiDocsTmpl = template.Must(template.New("api-docs").Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Admin API Docs</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{font-family:system-ui,sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem;color:#222;line-height:1.5}
+h1{font-size:1.4rem}
+h2{font-size:1.15rem;margin-top:2.5rem;padding-top:.5rem;border-top:1px solid #e4e4e7}
+h3{font-size:1rem;margin:1.5rem 0 .4rem;display:flex;align-items:center;gap:.5rem;font-family:monospace}
+a{color:#2563eb}
+code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.85rem}
+pre{background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:.75rem 1rem;overflow-x:auto}
+.note{background:#fff7ed;border:1px solid #fed7aa;border-radius:6px;padding:.75rem 1rem;margin:1rem 0;font-size:.9rem}
+.method{display:inline-block;padding:.1rem .5rem;border-radius:4px;font-size:.7rem;font-weight:700;font-family:system-ui,sans-serif}
+.get{background:#dbeafe;color:#1e40af}
+.post{background:#dcfce7;color:#166534}
+table.toc{width:100%;border-collapse:collapse;font-size:.85rem;margin:1rem 0}
+table.toc td{padding:.25rem .5rem;border-bottom:1px solid #f0f0f0}
+dl{margin:.5rem 0}
+dt{font-weight:600;font-size:.85rem;color:#444;margin-top:.5rem}
+dd{margin:.15rem 0 0;font-size:.85rem;color:#555}
+</style>
+</head>
+<body>
+<p><a href="/inkay/admin/">← Back to admin</a></p>
+<h1>Admin JSON API</h1>
+
+<p>Every route below lives under <code>/admin/api/v1/</code> (reachable externally at <code>https://revivetendo-dashboard.nicochristmann.net/inkay/admin/api/v1/...</code>) plus two additional read-only routes under <code>/admin/spotpass-3ds/</code>. This is the same API the Android admin app used before it moved to embedding the HTML admin panel directly in a WebView - it's kept fully intact specifically so it stays a stable way to script things locally (curl, a Python script, etc.) regardless of what the browser/app UI looks like.</p>
+
+<div class="note">
+<strong>Authentication:</strong> every route here requires the same mTLS client certificate as the HTML admin panel (see <a href="/inkay/admin/client-cert.p12">Download client cert</a> on the admin home page). With curl:
+<pre>curl --cert-type P12 --cert inkay-admin.p12: \
+  https://revivetendo-dashboard.nicochristmann.net/inkay/admin/api/v1/ping</pre>
+(trailing colon after the filename = empty PKCS12 password, matching how this cert is issued). If you'd rather use a separate cert/key pair, any client cert signed by this deployment's admin CA works the same way over plain HTTPS to relay-admin directly, without the Apache2 hop.
+</div>
+
+<div class="note">
+<strong>Response envelope:</strong> every endpoint responds with JSON in one of two shapes - GETs and successful POSTs return <code>{"ok": true, "data": ...}</code> (POSTs that mutate a list return the fresh list as <code>data</code>, so you don't need a second round trip); anything that fails returns <code>{"ok": false, "error": "..."}</code> with a non-2xx status. POST bodies are JSON (<code>Content-Type</code> doesn't matter, only valid JSON does), never form-encoded.
+</div>
+
+<table class="toc">
+<tr><td><a href="#meta">Meta</a></td><td>ping, game-titles, cert-status</td></tr>
+<tr><td><a href="#redirects">Redirects</a></td><td>list, add, delete, toggle</td></tr>
+<tr><td><a href="#users">Per-game user whitelist</a></td><td>list, add, delete</td></tr>
+<tr><td><a href="#bans">Bans</a></td><td>list, add, remove</td></tr>
+<tr><td><a href="#access">Access levels</a></td><td>list, set, remove</td></tr>
+<tr><td><a href="#sysmsg">SpotPass system messages</a></td><td>Wii U + 3DS, each: list, add, toggle, remove</td></tr>
+<tr><td><a href="#swapdoodle">Swapdoodle notes</a></td><td>list, per-note detail, per-page thumbnail</td></tr>
+<tr><td><a href="#review">Review queue</a></td><td>list, approve, dismiss</td></tr>
+</table>
+
+<h2 id="meta">Meta</h2>
+
+<h3><span class="method get">GET</span> /admin/api/v1/ping</h3>
+<p>Liveness check.</p>
+<dl><dt>Response</dt><dd><code>{"ok": true}</code></dd></dl>
+
+<h3><span class="method get">GET</span> /admin/api/v1/game-titles</h3>
+<p>Display names for every game server ID actually in use on this deployment (referenced by a redirect, a whitelist entry, or a review-queue sighting) - not the full list this codebase could ever support.</p>
+<dl><dt>Response <code>data</code></dt><dd><code>{"1005A000": "Wii Sports Club", ...}</code> - object keyed by uppercase game_server_id; an ID this codebase has no friendly name for maps to itself.</dd></dl>
+
+<h3><span class="method get">GET</span> /admin/api/v1/cert-status</h3>
+<p>The currently-issued admin client cert's age/rotation schedule.</p>
+<dl><dt>Response <code>data</code></dt><dd><code>{"issuedAt": "2026-...", "expiresAt": "2026-...", "daysUntilRotation": 12, "rotationDays": 25, "validDays": 30}</code> (RFC3339 timestamps)</dd></dl>
+
+<h2 id="redirects">Redirects</h2>
+
+<h3><span class="method get">GET</span> /admin/api/v1/redirects</h3>
+<dl><dt>Response <code>data</code></dt><dd>array of <code>{id, type, address?, from_host, to_host, game_server_id?, port?, access_mode, enabled, created_at}</code> - <code>type</code> is <code>"iosu"</code> or <code>"dns"</code>; <code>?</code> fields are omitted when empty.</dd></dl>
+
+<h3><span class="method post">POST</span> /admin/api/v1/redirects/add</h3>
+<dl>
+<dt>Body</dt><dd><code>{"type": "iosu"|"dns", "from_host": "...", "to_host": "...", "address"?: "...", "game_server_id"?: "...", "port"?: 1234}</code> - <code>type</code>, <code>from_host</code>, <code>to_host</code> are required.</dd>
+<dt>Response <code>data</code></dt><dd>the fresh redirects list (same shape as GET).</dd>
+</dl>
+
+<h3><span class="method post">POST</span> /admin/api/v1/redirects/delete</h3>
+<dl><dt>Body</dt><dd><code>{"id": 1}</code></dd><dt>Response</dt><dd><code>{"ok": true}</code></dd></dl>
+
+<h3><span class="method post">POST</span> /admin/api/v1/redirects/toggle</h3>
+<dl><dt>Body</dt><dd><code>{"id": 1}</code> - flips <code>enabled</code>.</dd><dt>Response</dt><dd><code>{"ok": true}</code></dd></dl>
+
+<h2 id="users">Per-game user whitelist</h2>
+
+<h3><span class="method get">GET</span> /admin/api/v1/users?game=...</h3>
+<dl><dt>Query</dt><dd><code>game</code> (required) - game_server_id, case-insensitive.</dd>
+<dt>Response <code>data</code></dt><dd>array of <code>{pid, pnid?, game_server_id, note?, created_at}</code></dd></dl>
+
+<h3><span class="method post">POST</span> /admin/api/v1/users/add</h3>
+<dl><dt>Body</dt><dd><code>{"game": "...", "pid": 1234567890, "note"?: "..."}</code> - upserts (re-adding an existing pid+game just updates the note).</dd>
+<dt>Response <code>data</code></dt><dd>the fresh list for that game (same shape as GET).</dd></dl>
+
+<h3><span class="method post">POST</span> /admin/api/v1/users/delete</h3>
+<dl><dt>Body</dt><dd><code>{"game": "...", "pid": 1234567890}</code></dd><dt>Response</dt><dd><code>{"ok": true}</code></dd></dl>
+
+<h2 id="bans">Bans</h2>
+
+<h3><span class="method get">GET</span> /admin/api/v1/bans</h3>
+<dl><dt>Response <code>data</code></dt><dd>array of <code>{pid, pnid?, reason?, created_at}</code></dd></dl>
+
+<h3><span class="method post">POST</span> /admin/api/v1/bans/add</h3>
+<dl><dt>Body</dt><dd><code>{"pid": 1234567890, "reason"?: "..."}</code> - upserts.</dd>
+<dt>Response <code>data</code></dt><dd>the fresh ban list.</dd></dl>
+
+<h3><span class="method post">POST</span> /admin/api/v1/bans/remove</h3>
+<dl><dt>Body</dt><dd><code>{"pid": 1234567890}</code></dd><dt>Response</dt><dd><code>{"ok": true}</code></dd></dl>
+
+<h2 id="access">Access levels</h2>
+<p>Grants elevated access (moderator/developer) to a PID.</p>
+
+<h3><span class="method get">GET</span> /admin/api/v1/access</h3>
+<dl><dt>Response <code>data</code></dt><dd>array of <code>{pid, pnid?, access_level, note?, updated_at}</code></dd></dl>
+
+<h3><span class="method post">POST</span> /admin/api/v1/access/set</h3>
+<dl><dt>Body</dt><dd><code>{"pid": 1234567890, "level": 2|3, "note"?: "..."}</code> - 2 = moderator, 3 = developer; upserts.</dd>
+<dt>Response <code>data</code></dt><dd>the fresh access-level list.</dd></dl>
+
+<h3><span class="method post">POST</span> /admin/api/v1/access/remove</h3>
+<dl><dt>Body</dt><dd><code>{"pid": 1234567890}</code></dd><dt>Response</dt><dd><code>{"ok": true}</code></dd></dl>
+
+<h2 id="sysmsg">SpotPass system messages</h2>
+<p>Wii U (<code>/spotpass-wiiu</code>) and 3DS (<code>/spotpass-3ds-sysmsg</code>) share the exact same request/response shape - listed once, routes differ only by that path segment.</p>
+
+<h3><span class="method get">GET</span> /admin/api/v1/spotpass-wiiu <span style="font-weight:400;font-size:.8rem;color:#999">(or .../spotpass-3ds-sysmsg)</span></h3>
+<dl><dt>Response <code>data</code></dt><dd>array of <code>{id, subject, body, title_id, high_priority, active, region?, created_at}</code></dd></dl>
+
+<h3><span class="method post">POST</span> /admin/api/v1/spotpass-wiiu/add <span style="font-weight:400;font-size:.8rem;color:#999">(or .../spotpass-3ds-sysmsg/add)</span></h3>
+<dl><dt>Body</dt><dd><code>{"subject": "...", "body": "...", "region"?: "USA"|"EUR"|"JPN"}</code> - subject and body are required; an unrecognized region is silently cleared rather than rejected. <code>title_id</code> is set automatically (fixed per platform - the real console substitutes its own region-specific self-ID at serve time).</dd>
+<dt>Response <code>data</code></dt><dd>the fresh message list.</dd></dl>
+
+<h3><span class="method post">POST</span> /admin/api/v1/spotpass-wiiu/toggle <span style="font-weight:400;font-size:.8rem;color:#999">(or .../spotpass-3ds-sysmsg/toggle)</span></h3>
+<dl><dt>Body</dt><dd><code>{"id": 1}</code> - flips <code>active</code>.</dd><dt>Response</dt><dd><code>{"ok": true}</code></dd></dl>
+
+<h3><span class="method post">POST</span> /admin/api/v1/spotpass-wiiu/remove <span style="font-weight:400;font-size:.8rem;color:#999">(or .../spotpass-3ds-sysmsg/remove)</span></h3>
+<dl><dt>Body</dt><dd><code>{"id": 1}</code></dd><dt>Response</dt><dd><code>{"ok": true}</code></dd></dl>
+
+<h2 id="swapdoodle">Swapdoodle notes</h2>
+<p>Read-only - there's no admin-triggered mutation, only real console traffic creates notes.</p>
+
+<h3><span class="method get">GET</span> /admin/api/v1/spotpass-3ds</h3>
+<dl><dt>Response <code>data</code></dt><dd>array of <code>{data_id, owner_pid, owner_pnid?, recipient_pid?, recipient_pnid?, size, upload_completed, read, created_at}</code> - one row per (note, notified recipient) pair, so a note sent to several friends appears as several rows.</dd></dl>
+
+<h3><span class="method get">GET</span> /admin/spotpass-3ds/detail/{data_id}</h3>
+<p style="font-size:.85rem;color:#999;margin-top:-.5rem">Not under <code>/api/v1/</code> - a newer, separate read endpoint, same auth.</p>
+<dl><dt>Response <code>data</code></dt><dd><code>{"page_count": N, "points_per_page": [...], "total_size": bytes, "recipients": [{"pid": ..., "pnid"?: "..."}]}</code> - decodes the note's own content (LZ10-compressed BPK1 container) rather than reading the delivery table: <code>recipients</code> comes from the note's own embedded destination list, which can include recipients who haven't checked in yet and so have no row in the plain notes list above.</dd></dl>
+
+<h3><span class="method get">GET</span> /admin/spotpass-3ds/thumbnail/{data_id}/{page}</h3>
+<p style="font-size:.85rem;color:#999;margin-top:-.5rem">Not under <code>/api/v1/</code> - same auth, but responds <code>image/jpeg</code> directly, not the JSON envelope.</p>
+<dl><dt>Response</dt><dd>the real JPEG thumbnail embedded in that page of the note. <code>page</code> is 0-indexed, up to <code>page_count - 1</code> from the detail endpoint above.</dd></dl>
+
+<h2 id="review">Review queue</h2>
+<p>PIDs that connected to a whitelisted game server but aren't yet approved.</p>
+
+<h3><span class="method get">GET</span> /admin/api/v1/review</h3>
+<dl><dt>Response <code>data</code></dt><dd>array of <code>{pid, pnid?, game_server_id, first_seen, last_seen, attempts}</code></dd></dl>
+
+<h3><span class="method post">POST</span> /admin/api/v1/review/approve</h3>
+<dl><dt>Body</dt><dd><code>{"pid": 1234567890, "game": "...", "note"?: "..."}</code> - adds to the per-game whitelist (equivalent to users/add) and removes the review-queue entry, atomically.</dd>
+<dt>Response <code>data</code></dt><dd>the fresh review queue.</dd></dl>
+
+<h3><span class="method post">POST</span> /admin/api/v1/review/dismiss</h3>
+<dl><dt>Body</dt><dd><code>{"pid": 1234567890, "game": "..."}</code> - removes the entry without whitelisting.</dd><dt>Response</dt><dd><code>{"ok": true}</code></dd></dl>
+
+</body>
+</html>`))
+
+func adminAPIDocs(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html")
+	apiDocsTmpl.Execute(w, nil)
 }
 
 // usedGameServerIDs returns every distinct game_server_id actually
