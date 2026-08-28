@@ -357,6 +357,8 @@ func main() {
 		mux.HandleFunc("/internal/presence/start/", handlePresenceStart)
 		mux.HandleFunc("/internal/presence/stop/", handlePresenceStop)
 		mux.HandleFunc("/internal/presence/command/", handlePresenceCommand)
+		mux.HandleFunc("/internal/swapdoodle-note-detail/", handleInternalSwapdoodleNoteDetail)
+		mux.HandleFunc("/internal/swapdoodle-thumbnail/", handleInternalSwapdoodleThumbnail)
 		log.Printf("account proxy internal listener on 127.0.0.1:9191")
 		if err := http.ListenAndServe("127.0.0.1:9191", mux); err != nil {
 			log.Fatalf("internal listener: %v", err)
@@ -1419,12 +1421,17 @@ func lz10Decompress(data []byte) ([]byte, error) {
 // exactly at EOF - real block names found: SHEET1, COLSLT1, THUMB2 (a real
 // JPEG thumbnail), STATIN1, COMMON1, MIISTD1 (the sender's Mii), DSTINF1,
 // RCVINF1.
-func parseBPK1Blocks(data []byte) (map[string][]byte, error) {
+// parseBPK1Blocks returns []byte per block NAME, in block-table order - a
+// slice, not a single value, because block names repeat for multi-page
+// notes (confirmed live 2026-08-28: a real 4-page note has 4 SHEET1 + 4
+// THUMB2 blocks, one pair per page). A plain map[string][]byte would
+// silently keep only the last page and drop the rest.
+func parseBPK1Blocks(data []byte) (map[string][][]byte, error) {
 	if len(data) < 0x40 || string(data[0:4]) != "BPK1" {
 		return nil, fmt.Errorf("not a BPK1 structure")
 	}
 	numBlocks := binary.LittleEndian.Uint32(data[4:8])
-	blocks := make(map[string][]byte, numBlocks)
+	blocks := make(map[string][][]byte, numBlocks)
 	off := 0x40
 	for i := uint32(0); i < numBlocks; i++ {
 		if off+0x14 > len(data) {
@@ -1436,7 +1443,7 @@ func parseBPK1Blocks(data []byte) (map[string][]byte, error) {
 		if uint64(dataOffset)+uint64(blockSize) > uint64(len(data)) {
 			return nil, fmt.Errorf("bpk1: block %q out of range", name)
 		}
-		blocks[name] = data[dataOffset : dataOffset+blockSize]
+		blocks[name] = append(blocks[name], data[dataOffset:dataOffset+blockSize])
 		off += 0x14
 	}
 	return blocks, nil
@@ -1458,21 +1465,130 @@ func extractMiiFromSwapdoodleNote(noteBytes []byte) (miiData []byte, ok bool) {
 		log.Printf("extractMiiFromSwapdoodleNote: bpk1: %v", err)
 		return nil, false
 	}
-	mii, found := blocks["MIISTD1"]
-	if !found || len(mii) == 0 {
+	miiPages, found := blocks["MIISTD1"]
+	if !found || len(miiPages) == 0 || len(miiPages[0]) == 0 {
 		return nil, false
 	}
-	// MIISTD1 is 128 bytes, but the real Mii structure (the same shape the
-	// mii-unsecure.ariankordi.net renderer already used elsewhere in this
-	// file expects, which rejects anything over 96 bytes with "data length
-	// should be between 46-96 bytes") is only the first 96 - the trailing 32
-	// are padding. Confirmed live 2026-08-28: the first 96 bytes render a
-	// real PNG (200, valid image); every other 96-byte slice tried (offsets
-	// 16, 32) 500s.
+	// MIISTD1 is sender-level, not per-page - always exactly one block even
+	// on multi-page notes (unlike SHEET1/THUMB2). It's 128 bytes, but the
+	// real Mii structure (the same shape the mii-unsecure.ariankordi.net
+	// renderer already used elsewhere in this file expects, which rejects
+	// anything over 96 bytes with "data length should be between 46-96
+	// bytes") is only the first 96 - the trailing 32 are padding. Confirmed
+	// live 2026-08-28: the first 96 bytes render a real PNG (200, valid
+	// image); every other 96-byte slice tried (offsets 16, 32) 500s.
+	mii := miiPages[0]
 	if len(mii) > 96 {
 		mii = mii[:96]
 	}
 	return mii, true
+}
+
+// extractThumbnailsFromSwapdoodleNote decodes a real Swapdoodle note object
+// and returns every page's THUMB2 block (each one a genuine, standalone
+// JPEG - confirmed live 2026-08-28 via real file magic + a Nintendo 3DS
+// Exif tag) in page order. A single-page note returns a 1-element slice.
+func extractThumbnailsFromSwapdoodleNote(noteBytes []byte) (thumbnails [][]byte, ok bool) {
+	decompressed, err := lz10Decompress(noteBytes)
+	if err != nil {
+		return nil, false
+	}
+	blocks, err := parseBPK1Blocks(decompressed)
+	if err != nil {
+		return nil, false
+	}
+	thumbs, found := blocks["THUMB2"]
+	if !found || len(thumbs) == 0 {
+		return nil, false
+	}
+	return thumbs, true
+}
+
+// fetchSwapdoodleNoteBytes downloads a note object straight from
+// swapdoodle-data by data_id, using the deterministic key shape confirmed
+// live across every real capture (ds/objects/%020d_%010d.bin, version
+// always 1 in every sample seen).
+func fetchSwapdoodleNoteBytes(dataID int64) ([]byte, error) {
+	client, err := swapdoodleS3()
+	if err != nil {
+		return nil, err
+	}
+	key := fmt.Sprintf("ds/objects/%020d_%010d.bin", dataID, 1)
+	obj, err := client.GetObject(context.Background(), "swapdoodle-data", key, minio.GetObjectOptions{})
+	if err != nil {
+		return nil, err
+	}
+	defer obj.Close()
+	return io.ReadAll(obj)
+}
+
+// handleInternalSwapdoodleNoteDetail returns per-page stroke-point counts
+// (SHEET1's field1, confirmed live to equal (blockSize-64)/4 across every
+// real sample checked) for relay-admin's "more info" panel - not the
+// stroke geometry itself (still not decoded, see
+// project_swapdoodle_note_format_moderation memory), just how much was
+// drawn on each page.
+func handleInternalSwapdoodleNoteDetail(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	dataID, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/internal/swapdoodle-note-detail/"), 10, 64)
+	if err != nil {
+		http.Error(w, `{"error":"invalid data_id"}`, 400)
+		return
+	}
+	noteBytes, err := fetchSwapdoodleNoteBytes(dataID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), 502)
+		return
+	}
+	decompressed, err := lz10Decompress(noteBytes)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), 500)
+		return
+	}
+	blocks, err := parseBPK1Blocks(decompressed)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), 500)
+		return
+	}
+	sheets := blocks["SHEET1"]
+	pointCounts := make([]int, len(sheets))
+	for i, sheet := range sheets {
+		if len(sheet) >= 8 {
+			pointCounts[i] = int(binary.LittleEndian.Uint32(sheet[4:8]))
+		}
+	}
+	pageCount := len(blocks["THUMB2"])
+	pointCountsJSON, _ := json.Marshal(pointCounts)
+	fmt.Fprintf(w, `{"page_count":%d,"points_per_page":%s,"total_size":%d}`, pageCount, pointCountsJSON, len(noteBytes))
+}
+
+// handleInternalSwapdoodleThumbnail serves one page's real THUMB2 JPEG
+// (path shape /internal/swapdoodle-thumbnail/{data_id}/{page}).
+func handleInternalSwapdoodleThumbnail(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/internal/swapdoodle-thumbnail/"), "/")
+	if len(parts) != 2 {
+		http.Error(w, "expected /internal/swapdoodle-thumbnail/{data_id}/{page}", 400)
+		return
+	}
+	dataID, err1 := strconv.ParseInt(parts[0], 10, 64)
+	page, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil || page < 0 {
+		http.Error(w, "invalid data_id/page", 400)
+		return
+	}
+	noteBytes, err := fetchSwapdoodleNoteBytes(dataID)
+	if err != nil {
+		http.Error(w, err.Error(), 502)
+		return
+	}
+	thumbs, ok := extractThumbnailsFromSwapdoodleNote(noteBytes)
+	if !ok || page >= len(thumbs) {
+		http.Error(w, "thumbnail not available", 404)
+		return
+	}
+	w.Header().Set("Content-Type", "image/jpeg")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Write(thumbs[page])
 }
 
 // cacheDsMii is ds_devices' write path - the 3DS-PID-keyed equivalent of

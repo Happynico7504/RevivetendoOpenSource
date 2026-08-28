@@ -467,6 +467,8 @@ func main() {
 	http.HandleFunc("/admin/spotpass-wiiu/toggle", requireClientCert(adminSpotpassWiiUToggle))
 	http.HandleFunc("/admin/spotpass-wiiu/remove", requireClientCert(adminSpotpassWiiURemove))
 	http.HandleFunc("/admin/spotpass-3ds/", requireClientCert(adminSwapdoodle))
+	http.HandleFunc("/admin/spotpass-3ds/detail/", requireClientCert(adminSwapdoodleNoteDetail))
+	http.HandleFunc("/admin/spotpass-3ds/thumbnail/", requireClientCert(adminSwapdoodleThumbnail))
 	http.HandleFunc("/admin/spotpass-3ds-sysmsg/", requireClientCert(adminSpotpass3DSSysMsg))
 	http.HandleFunc("/admin/spotpass-3ds-sysmsg/add", requireClientCert(adminSpotpass3DSSysMsgAdd))
 	http.HandleFunc("/admin/spotpass-3ds-sysmsg/toggle", requireClientCert(adminSpotpass3DSSysMsgToggle))
@@ -2982,6 +2984,14 @@ input[type=text]{border:1px solid #d1d5db;border-radius:4px;padding:.4rem .6rem;
 .mono{font-family:monospace;font-size:.8rem}
 .mii-mini{width:32px;height:32px;border-radius:6px;vertical-align:middle;margin-right:.4rem;background:#f4f4f5}
 .who{display:flex;align-items:center}
+tr.note-row{cursor:pointer}
+tr.note-row:hover{background:#fafafa}
+tr.detail-row td{background:#fafafa;padding:1rem .75rem}
+.detail-body{font-size:.85rem;color:#555}
+.detail-thumbs{display:flex;gap:.6rem;flex-wrap:wrap;margin-top:.5rem}
+.detail-thumbs figure{margin:0;text-align:center}
+.detail-thumbs img{width:96px;height:96px;object-fit:cover;border-radius:6px;border:1px solid #e4e4e7;background:#fff}
+.detail-thumbs figcaption{font-size:.7rem;color:#999;margin-top:.2rem}
 </style>
 </head>
 <body>
@@ -2989,12 +2999,12 @@ input[type=text]{border:1px solid #d1d5db;border-radius:4px;padding:.4rem .6rem;
 <h1>Swapdoodle SpotPass Notes</h1>
 {{if .Msg}}<div class="msg">{{.Msg}}</div>{{end}}
 {{if .Err}}<div class="err">{{.Err}}</div>{{end}}
-<div class="note">Real Swap Doodle notes, uploaded and delivered entirely through the console's own normal flow. "Received" reflects that specific recipient's own notification row (DataStore's native per-recipient read/read_date tracking) - a note sent to several friends shows one row and one Received status per friend. Sender/recipient avatars reuse the same Mii render pipeline as the rest of the admin panel - the note's own drawing content isn't decoded yet.</div>
+<div class="note">Real Swap Doodle notes, uploaded and delivered entirely through the console's own normal flow. "Received" reflects that specific recipient's own notification row (DataStore's native per-recipient read/read_date tracking) - a note sent to several friends shows one row and one Received status per friend. Sender/recipient avatars reuse the same Mii render pipeline as the rest of the admin panel. Click a row for per-page thumbnails and stroke-point counts.</div>
 
 <table>
 <tr><th>DataID</th><th>Sender</th><th>Recipient</th><th>Size</th><th>Status</th><th>Received</th><th>Created</th></tr>
 {{range .Notes}}
-<tr>
+<tr class="note-row" onclick="toggleSwapdoodleDetail({{.DataID}})">
   <td class="mono">{{.DataID}}</td>
   <td><div class="who"><img class="mii-mini" src="https://sos-de-fra-1.exo.io/revivetendo-data/mii/{{.OwnerPID}}/normal_face.png" alt="" onerror="this.style.display='none'">{{if .OwnerPNID}}<strong>{{.OwnerPNID}}</strong><br><span class="mono" style="color:#999">{{.OwnerPID}}</span>{{else}}<span class="mono">{{.OwnerPID}}</span>{{end}}</div></td>
   <td>{{if .RecipientPID}}<div class="who"><img class="mii-mini" src="https://sos-de-fra-1.exo.io/revivetendo-data/mii/{{.RecipientPID}}/normal_face.png" alt="" onerror="this.style.display='none'">{{if .RecipientPNID}}<strong>{{.RecipientPNID}}</strong><br><span class="mono" style="color:#999">{{.RecipientPID}}</span>{{else}}<span class="mono">{{.RecipientPID}}</span>{{end}}</div>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
@@ -3003,9 +3013,36 @@ input[type=text]{border:1px solid #d1d5db;border-radius:4px;padding:.4rem .6rem;
   <td>{{if .Read}}<span class="badge badge-ok">Yes</span>{{else}}<span class="badge badge-pending">Not yet</span>{{end}}</td>
   <td style="font-size:.8rem;color:#666">{{localTime .CreatedAt "datetime"}}</td>
 </tr>
+<tr class="detail-row" id="detail-{{.DataID}}" style="display:none"><td colspan="7"><div class="detail-body" id="detail-body-{{.DataID}}"></div></td></tr>
 {{else}}<tr><td colspan="7" style="color:#aaa">No notes sent yet</td></tr>
 {{end}}
 </table>
+<script>
+function toggleSwapdoodleDetail(id) {
+  var row = document.getElementById('detail-' + id);
+  if (!row) return;
+  if (row.style.display !== 'none') { row.style.display = 'none'; return; }
+  row.style.display = '';
+  var body = document.getElementById('detail-body-' + id);
+  if (body.dataset.loaded) return;
+  body.dataset.loaded = '1';
+  body.textContent = 'Loading…';
+  fetch('/inkay/admin/spotpass-3ds/detail/' + id)
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.error) { body.textContent = 'Not available: ' + d.error; return; }
+      var html = '<strong>' + d.page_count + ' page' + (d.page_count === 1 ? '' : 's') + '</strong>, ' + d.total_size + ' bytes total';
+      html += '<div class="detail-thumbs">';
+      for (var i = 0; i < d.page_count; i++) {
+        var points = (d.points_per_page && d.points_per_page[i] !== undefined) ? d.points_per_page[i] : '?';
+        html += '<figure><img src="/inkay/admin/spotpass-3ds/thumbnail/' + id + '/' + i + '" alt="page ' + (i+1) + '" onerror="this.style.display=\'none\'"><figcaption>page ' + (i+1) + ', ' + points + ' pts</figcaption></figure>';
+      }
+      html += '</div>';
+      body.innerHTML = html;
+    })
+    .catch(function(e) { body.textContent = 'Failed to load: ' + e; });
+}
+</script>
 ` + localTimeScript + `
 </body>
 </html>`))
@@ -3018,6 +3055,41 @@ func adminSwapdoodle(w http.ResponseWriter, r *http.Request) {
 	}{allSwapdoodleNotes(), r.URL.Query().Get("msg"), r.URL.Query().Get("err")}
 	w.Header().Set("Content-Type", "text/html")
 	swapdoodleTmpl.Execute(w, data)
+}
+
+// adminSwapdoodleNoteDetail proxies account-proxy's internal per-note JSON
+// endpoint (page count, per-page stroke-point counts - see
+// handleInternalSwapdoodleNoteDetail's doc comment in account-proxy) for
+// the notes page's click-to-expand panel. Only account-proxy has the
+// swapdoodle-data S3 credentials/LZ10+BPK1 decoder, so this can't be done
+// directly from relay-admin.
+func adminSwapdoodleNoteDetail(w http.ResponseWriter, r *http.Request) {
+	dataID := strings.TrimPrefix(r.URL.Path, "/admin/spotpass-3ds/detail/")
+	resp, err := http.Get("http://127.0.0.1:9191/internal/swapdoodle-note-detail/" + dataID)
+	if err != nil {
+		http.Error(w, `{"error":"internal request failed"}`, http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
+}
+
+// adminSwapdoodleThumbnail proxies account-proxy's internal per-page JPEG
+// endpoint - path shape /admin/spotpass-3ds/thumbnail/{data_id}/{page}.
+func adminSwapdoodleThumbnail(w http.ResponseWriter, r *http.Request) {
+	suffix := strings.TrimPrefix(r.URL.Path, "/admin/spotpass-3ds/thumbnail/")
+	resp, err := http.Get("http://127.0.0.1:9191/internal/swapdoodle-thumbnail/" + suffix)
+	if err != nil {
+		http.Error(w, "internal request failed", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	w.Header().Set("Content-Type", "image/jpeg")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
 }
 
 // adminSwapdoodleSend replicates PreparePostObjectV1 -> S3 upload ->

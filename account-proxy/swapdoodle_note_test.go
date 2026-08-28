@@ -34,18 +34,26 @@ func TestExtractMiiFromRealSwapdoodleNote(t *testing.T) {
 	}
 	for name, wantLen := range wantBlocks {
 		got, ok := blocks[name]
-		if !ok {
-			t.Errorf("missing block %q", name)
+		if !ok || len(got) != 1 {
+			t.Errorf("block %q: got %d page(s), want exactly 1", name, len(got))
 			continue
 		}
-		if len(got) != wantLen {
-			t.Errorf("block %q length = %d, want %d", name, len(got), wantLen)
+		if len(got[0]) != wantLen {
+			t.Errorf("block %q length = %d, want %d", name, len(got[0]), wantLen)
 		}
 	}
 
-	thumb := blocks["THUMB2"]
+	thumb := blocks["THUMB2"][0]
 	if len(thumb) < 4 || thumb[0] != 0xFF || thumb[1] != 0xD8 {
 		t.Errorf("THUMB2 doesn't start with a JPEG SOI marker: %x", thumb[:min(4, len(thumb))])
+	}
+
+	thumbs, ok := extractThumbnailsFromSwapdoodleNote(noteBytes)
+	if !ok || len(thumbs) != 1 {
+		t.Fatalf("extractThumbnailsFromSwapdoodleNote: ok=%v, got %d page(s), want 1", ok, len(thumbs))
+	}
+	if len(thumbs[0]) != 2653 {
+		t.Errorf("extracted thumbnail length = %d, want 2653", len(thumbs[0]))
 	}
 
 	mii, ok := extractMiiFromSwapdoodleNote(noteBytes)
@@ -59,5 +67,45 @@ func TestExtractMiiFromRealSwapdoodleNote(t *testing.T) {
 	// live against this exact sample (see extractMiiFromSwapdoodleNote doc).
 	if !strings.Contains(string(mii), "N\x00i\x00c\x00o\x00") {
 		t.Error("expected UTF-16LE 'Nico' not found in MIISTD1 block")
+	}
+}
+
+// TestMultiPageSwapdoodleNote verifies parseBPK1Blocks/extractThumbnailsFromSwapdoodleNote
+// against a real 4-page note - the specific case that would silently lose
+// pages with a plain map[string][]byte (see parseBPK1Blocks' doc comment).
+func TestMultiPageSwapdoodleNote(t *testing.T) {
+	path := "/nico-pretendo-bridge/boss-capture/s3relayupload_20260825-143138.061.file.bin"
+	noteBytes, err := os.ReadFile(path)
+	if err != nil {
+		t.Skipf("real sample not present: %v", err)
+	}
+
+	decompressed, err := lz10Decompress(noteBytes)
+	if err != nil {
+		t.Fatalf("lz10Decompress: %v", err)
+	}
+	blocks, err := parseBPK1Blocks(decompressed)
+	if err != nil {
+		t.Fatalf("parseBPK1Blocks: %v", err)
+	}
+	if got := len(blocks["SHEET1"]); got != 4 {
+		t.Errorf("SHEET1 pages = %d, want 4", got)
+	}
+	if got := len(blocks["THUMB2"]); got != 4 {
+		t.Errorf("THUMB2 pages = %d, want 4", got)
+	}
+	// MIISTD1 stays sender-level (one block) even on a multi-page note.
+	if got := len(blocks["MIISTD1"]); got != 1 {
+		t.Errorf("MIISTD1 pages = %d, want 1", got)
+	}
+
+	thumbs, ok := extractThumbnailsFromSwapdoodleNote(noteBytes)
+	if !ok || len(thumbs) != 4 {
+		t.Fatalf("extractThumbnailsFromSwapdoodleNote: ok=%v, got %d page(s), want 4", ok, len(thumbs))
+	}
+	for i, thumb := range thumbs {
+		if len(thumb) < 4 || thumb[0] != 0xFF || thumb[1] != 0xD8 {
+			t.Errorf("page %d thumbnail doesn't start with a JPEG SOI marker: %x", i, thumb[:min(4, len(thumb))])
+		}
 	}
 }
