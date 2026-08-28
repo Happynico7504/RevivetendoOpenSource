@@ -262,6 +262,20 @@ func main() {
 	}
 	db.Exec(`ALTER TABLE wii_devices ADD COLUMN IF NOT EXISTS pw_hash TEXT NOT NULL DEFAULT ''`)
 	db.Exec(`ALTER TABLE wii_devices ADD COLUMN IF NOT EXISTS web_password_hash TEXT NOT NULL DEFAULT ''`)
+	// ds_devices caches raw Mii bytes per 3DS PID, keyed the way wii_devices
+	// keys Wii U accounts - see cacheDsMii's doc comment for why this exists
+	// separately (wii_devices/uploadMiiImages only ever gets populated by
+	// Wii-U-shaped flows - /people/@me/profile interception and the
+	// wii_devices backfill - which Swapdoodle's PIDs never go through, since
+	// Swapdoodle authenticates entirely through its own NASC/locator path).
+	// mii_data is nullable and stays NULL until extractMiiFromSwapdoodleNote
+	// actually works - see project_swapdoodle_note_format_moderation memory.
+	db.Exec(`CREATE TABLE IF NOT EXISTS ds_devices (
+		pid              BIGINT      PRIMARY KEY,
+		mii_data         BYTEA,
+		mii_rendered_at  TIMESTAMPTZ,
+		updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`)
 	db.Exec(`CREATE TABLE IF NOT EXISTS web_logins (id BIGSERIAL PRIMARY KEY, pid BIGINT NOT NULL, ip TEXT NOT NULL, logged_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), success BOOLEAN NOT NULL)`)
 	db.Exec(`ALTER TABLE redirects ADD COLUMN IF NOT EXISTS game_server_id TEXT`)
 	db.Exec(`ALTER TABLE redirects ADD COLUMN IF NOT EXISTS port INTEGER`)
@@ -1291,6 +1305,95 @@ func uploadMiiImages(pid uint32, miiDataB64 string) {
 			log.Printf("uploadMiiImages: s3 put %s: %v", key, err)
 		} else {
 			log.Printf("uploadMiiImages: uploaded %s for PID %d", key, pid)
+		}
+	}
+}
+
+// extractMiiFromSwapdoodleNote is a stub - Swapdoodle's note object format is
+// a chunk-tagged container (confirmed magic "BPK1" at a fixed offset across
+// every real sample checked), but the actual embedded Mii data location
+// isn't reliably known yet. An earlier "TMII" tag match looked promising but
+// didn't hold up across multiple real samples (present in some, absent or
+// shifted in others - consistent with coincidental ASCII noise in encoded
+// bytes, not a real fixed chunk). See project_swapdoodle_note_format_moderation
+// memory for the full investigation. Always returns ok=false until the
+// format is properly cracked - callers must treat that as "not yet available",
+// not as "this PID has no Mii".
+func extractMiiFromSwapdoodleNote(noteBytes []byte) (miiData []byte, ok bool) {
+	return nil, false
+}
+
+// cacheDsMii is ds_devices' write path - the 3DS-PID-keyed equivalent of
+// wii_devices for Mii caching, since Swapdoodle's own NASC/locator auth flow
+// never touches the Wii-U-shaped code that populates wii_devices (see
+// ds_devices' schema comment in main()). Stores the raw bytes AND pushes
+// them through the exact same uploadMiiImages S3 pipeline relay-admin
+// already reads from (mii/{pid}/normal_face.png etc.) - so once real Mii
+// bytes are available, the relay-admin template needs zero changes to pick
+// them up; it's already looking at that same S3 path for every PID.
+func cacheDsMii(pid int64, rawMiiData []byte) {
+	if db == nil || len(rawMiiData) == 0 {
+		return
+	}
+	if _, err := db.Exec(`
+		INSERT INTO ds_devices (pid, mii_data, mii_rendered_at, updated_at)
+		VALUES ($1, $2, NOW(), NOW())
+		ON CONFLICT (pid) DO UPDATE SET mii_data = EXCLUDED.mii_data, mii_rendered_at = NOW(), updated_at = NOW()`,
+		pid, rawMiiData); err != nil {
+		log.Printf("cacheDsMii: db upsert pid=%d: %v", pid, err)
+		return
+	}
+	uploadMiiImages(uint32(pid), base64.StdEncoding.EncodeToString(rawMiiData))
+}
+
+// backfillDsMiiImages scans Swapdoodle's own note objects for owner PIDs
+// that ds_devices hasn't cached yet, fetches each one's most recent note
+// from S3, and attempts extraction. A no-op today (extractMiiFromSwapdoodleNote
+// always returns false) but the full pipeline - DB scan, S3 fetch, cache
+// write, S3 Mii render reuse - is wired end to end and ready for whenever
+// that stub is filled in.
+func backfillDsMiiImages() {
+	if swapdoodleDB == nil || db == nil {
+		return
+	}
+	rows, err := swapdoodleDB.Query(`
+		SELECT DISTINCT o.owner, o.data_id
+		FROM datastore.objects o
+		WHERE o.owner IS NOT NULL AND o.data_id != 0
+		ORDER BY o.owner`)
+	if err != nil {
+		log.Printf("backfillDsMiiImages: query: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	client, err := swapdoodleS3()
+	if err != nil {
+		log.Printf("backfillDsMiiImages: s3 init: %v", err)
+		return
+	}
+
+	for rows.Next() {
+		var pid, dataID int64
+		if err := rows.Scan(&pid, &dataID); err != nil {
+			continue
+		}
+		var exists bool
+		if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM ds_devices WHERE pid = $1)`, pid).Scan(&exists); err == nil && exists {
+			continue
+		}
+		key := fmt.Sprintf("ds/objects/%020d_%010d.bin", dataID, 1)
+		obj, err := client.GetObject(context.Background(), "swapdoodle-data", key, minio.GetObjectOptions{})
+		if err != nil {
+			continue
+		}
+		noteBytes, err := io.ReadAll(obj)
+		obj.Close()
+		if err != nil {
+			continue
+		}
+		if miiData, ok := extractMiiFromSwapdoodleNote(noteBytes); ok {
+			cacheDsMii(pid, miiData)
 		}
 	}
 }
