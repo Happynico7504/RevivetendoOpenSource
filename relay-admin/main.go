@@ -1284,7 +1284,13 @@ if(!PNID){
 }else{
   function render(data){
     var el=document.getElementById('overlay');
-    if(!data||!data.server_up){el.innerHTML='<div class="card"><span class="offline">WSC server offline</span></div>';return;}
+    // Not connected to the WSC server (or the server itself is down): show nothing at
+    // all - an empty, fully transparent page - rather than an "offline" card.
+    var connected=false;
+    if(data&&data.server_up){
+      (data.players||[]).forEach(function(p){if((p.pnid||'').toLowerCase()===PNID.toLowerCase())connected=true;});
+    }
+    if(!connected){el.innerHTML='';return;}
     var g=null;
     (data.gatherings||[]).forEach(function(gg){
       (gg.players||[]).forEach(function(p){if((p.pnid||'').toLowerCase()===PNID.toLowerCase())g=gg;});
