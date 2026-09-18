@@ -44,6 +44,11 @@ echo "==> building minecraft-secure..."
 echo "==> building swapdoodle server..."
 (cd "$ROOT/swapdoodle" && go build -o "$BUILD/swapdoodle" .)
 
+echo "==> building badge-arcade-authentication..."
+(cd "$ROOT/badge-arcade-authentication" && go build -o "$BUILD/badge-arcade-auth" .)
+echo "==> building badge-arcade-secure..."
+(cd "$ROOT/badge-arcade-secure" && go build -o "$BUILD/badge-arcade-secure" .)
+
 # Export all vars from the secure server .env into the environment
 set -a
 # shellcheck disable=SC1091
@@ -61,9 +66,37 @@ mkdir -p "$LOG"
 autostart() {
 	local log="$1"
 	shift
+	local code
 	while true; do
-		"$@" >>"$log" 2>&1 || true
-		echo "[$(date -Iseconds)] process exited (code $?), restarting in 45s..." >>"$log"
+		# The `if` here is load-bearing, not style: with `set -e` active script-wide,
+		# a bare `"$@" >>"$log" 2>&1` would abort this whole subshell the instant a
+		# supervised binary crashes, silently killing its own restart loop forever
+		# (each autostart runs in its own backgrounded subshell, so this wouldn't
+		# take down the rest of the bridge - but it WOULD mean that one service
+		# just stays dead until the next full "systemctl restart"). Testing the
+		# command's exit status via `if` is one of the few constructs `set -e`
+		# exempts from triggering errexit, same job the old bare `|| true` did -
+		# but that also collapsed $? to always 0 right after, so every restart
+		# logged "process exited (code 0)" regardless of whether it was a clean
+		# exit or an actual crash. Capturing the real code here fixes that.
+		if "$@" >>"$log" 2>&1; then
+			code=0
+		else
+			code=$?
+		fi
+		if [ "$code" -eq 0 ]; then
+			echo "[$(date -Iseconds)] process exited cleanly (code 0), restarting in 45s..." >>"$log"
+		else
+			# Bash reports a command killed by signal N as exit code 128+N (e.g.
+			# 139 = SIGSEGV, 134 = SIGABRT, 137 = SIGKILL/OOM-killed) - called out
+			# explicitly since these are the "genuine crash" cases worth noticing,
+			# as opposed to an ordinary nonzero exit from the program itself.
+			local note=""
+			if [ "$code" -gt 128 ]; then
+				note=" [killed by signal $((code - 128))]"
+			fi
+			echo "[$(date -Iseconds)] process CRASHED (exit code $code$note), restarting in 45s..." >>"$log"
+		fi
 		sleep 45
 	done
 }
@@ -117,6 +150,15 @@ MC_SECURE_PID=$!
 (cd "$ROOT/swapdoodle" && autostart "$LOG/swapdoodle.log" "$BUILD/swapdoodle") &
 SWAPDOODLE_PID=$!
 
+BA_KERBEROS_PASSWORD="$(openssl rand -hex 16)"
+(cd "$ROOT/badge-arcade-authentication" && autostart "$LOG/badge-arcade-authentication.log" \
+	env $(cat .env | xargs) KERBEROS_PASSWORD="$BA_KERBEROS_PASSWORD" "$BUILD/badge-arcade-auth") &
+BA_AUTH_PID=$!
+
+(cd "$ROOT/badge-arcade-secure" && autostart "$LOG/badge-arcade-secure.log" \
+	env $(cat .env | xargs) KERBEROS_PASSWORD="$BA_KERBEROS_PASSWORD" "$BUILD/badge-arcade-secure") &
+BA_SECURE_PID=$!
+
 (autostart "$LOG/discord-bot.log" python3 "$ROOT/discord-bot/bot.py") &
 BOT_PID=$!
 
@@ -128,7 +170,7 @@ fi
 
 cleanup() {
 	echo "==> shutting down..."
-	kill $ACCOUNT_PID $FRIENDS_PID $ADMIN_PID $PROXY_PID $MK8_AUTH_PID $MK8_SECURE_PID $ABSW_PID $WSC_AUTH_PID $WSC_SECURE_PID $MC_AUTH_PID $MC_SECURE_PID $SWAPDOODLE_PID $BOT_PID ${MII_BOT_PID:-} 2>/dev/null || true
+	kill $ACCOUNT_PID $FRIENDS_PID $ADMIN_PID $PROXY_PID $MK8_AUTH_PID $MK8_SECURE_PID $ABSW_PID $WSC_AUTH_PID $WSC_SECURE_PID $MC_AUTH_PID $MC_SECURE_PID $SWAPDOODLE_PID $BA_AUTH_PID $BA_SECURE_PID $BOT_PID ${MII_BOT_PID:-} 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 

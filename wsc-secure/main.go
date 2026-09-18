@@ -3,13 +3,16 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -82,10 +85,13 @@ func dsAlloc(ownerPID uint32, p *datastore.DataStorePreparePostParam) *dsObject 
 }
 
 // dsClubRegionPrefix derives the region prefix WSC's SearchObject tags use
-// ("eu_"/"us_") from the DataType of the player's own club-selection profile
-// object (updated via ChangeMeta) - DataType 2 = US (Americas cart), DataType
-// 3 = EU (matches dsSeedProfiles' real recovered-community-server seeds,
-// which are explicitly labelled by DataType this same way).
+// ("eu_"/"us_"/"jp_") from the DataType of the player's own club-selection
+// profile object (updated via ChangeMeta) - DataType 1 = JP, DataType 2 = US
+// (Americas cart), DataType 3 = EU (matches dsSeedProfiles' real recovered-
+// community-server seeds, which are explicitly labelled by DataType this same
+// way). Japan was missing here for a long time, so JP players' scores were
+// tagged "eu_" while their game searched "jp_" - migrateRankingScoreRegions
+// repairs those.
 //
 // The previous version of this function tried to read a "region byte" at
 // offset 0x5b of the 312-byte blob instead, based on a single confirmed NA
@@ -107,6 +113,9 @@ func dsClubRegionPrefix(ownerPID uint32) string {
 			return true
 		}
 		switch obj.DataType {
+		case 1:
+			prefix = "jp"
+			return false
 		case 2:
 			prefix = "us"
 			return false
@@ -133,11 +142,23 @@ var juxtMainCommunityByRegion = map[string]string{
 // resolveClubName looks up the real-world name for a club code by matching it
 // 1:1 against Juxt's communities collection: find the sub-community parented
 // under the matching region's real main community whose app_data equals the
-// zero-padded 3-digit code (the same "%03d" format WSC's own club-info screen
+// encoded zero-padded 3-digit code (see clubAppData; the same "%03d" format WSC's own club-info screen
 // matches locally - see the app_data comment on Community.create in
 // seedWscAllRegions.ts). Only resolves what's actually been confirmed and
 // entered there (currently just GER Hesse = "033") - returns ok=false for
 // anything not yet known, rather than guessing.
+// clubAppData is the base64 app_data value a club community must carry for
+// WSC to find it. WSC's client-side matcher (fn_02517D5C in wsc.rpx) base64-
+// decodes the community's app_data (an invalid value such as "AA033AA" fails
+// the whole download with 115-2006 "failed to decode data"), skips anything
+// under 5 bytes, NUL-terminates at size-2, and compares the "%03d" club code
+// against the bytes from offset 3 (lbzu pre-increments the pointer). So the
+// decoded bytes are [3 bytes][code][2 bytes] - 8 bytes for a 3-digit code. The
+// padding bytes are ignored by the matcher, so zeros are used.
+func clubAppData(code uint32) string {
+	return base64.StdEncoding.EncodeToString([]byte("\x00\x00\x00" + fmt.Sprintf("%03d", code) + "\x00\x00"))
+}
+
 func resolveClubName(regionPrefix string, code uint32) (string, bool) {
 	mainID, ok := juxtMainCommunityByRegion[regionPrefix]
 	if !ok || juxtCommunitiesCol == nil {
@@ -148,7 +169,7 @@ func resolveClubName(regionPrefix string, code uint32) (string, bool) {
 	}
 	err := juxtCommunitiesCol.FindOne(context.Background(), bson.M{
 		"parent":   mainID,
-		"app_data": fmt.Sprintf("%03d", code),
+		"app_data": clubAppData(code),
 	}).Decode(&doc)
 	if err != nil {
 		return "", false
@@ -372,15 +393,14 @@ func migrateRankingScoreRegions() {
 			return true
 		}
 		correct := dsClubRegionPrefix(obj.OwnerPID)
-		wrong := "eu"
-		if correct == "eu" {
-			wrong = "us"
-		}
 		changed := false
 		for i, t := range obj.Tags {
-			if strings.HasPrefix(t, wrong+"_") {
-				obj.Tags[i] = correct + "_" + strings.TrimPrefix(t, wrong+"_")
-				changed = true
+			for _, other := range []string{"eu", "us", "jp"} {
+				if other != correct && strings.HasPrefix(t, other+"_") {
+					obj.Tags[i] = correct + "_" + strings.TrimPrefix(t, other+"_")
+					changed = true
+					break
+				}
 			}
 		}
 		if changed {
@@ -586,14 +606,21 @@ var holePunchingSince sync.Map // uint32 pid → time.Time (when marked)
 
 // holePunchExemptionMax bounds how long a hole-punching exemption can last before
 // watchStaleConnections stops trusting it and falls back to normal idle checking -
-// covers the case where ReportNATTraversalResult never arrives (client crash,
-// dropped connection mid-handshake) so an abandoned session isn't exempted forever.
+// this is now purely a backstop for the case where NOBODY in the gathering ever
+// calls ReportNATTraversalResult at all (client crash, or quits before either side
+// reports) - reportNATTraversalResult itself clears the exemption for the whole
+// gathering the moment any one participant reports, see that function's own doc
+// comment, so this ceiling is rarely what actually resolves it in practice.
 // Was 60s; confirmed too short on 2026-08-23 - a real natm=1/natf=2 pairing needed
 // over 60s (StaleDisconnect fired at idleFor=1m4s/1m50s) and then succeeded almost
 // instantly (rtt=165ms) on the very next attempt after being forced to reconnect.
-// Raised well past any observed real attempt; a stuck-forever exemption from an
-// abandoned handshake is far cheaper than killing one that would've succeeded.
-const holePunchExemptionMax = 5 * time.Minute
+// Raised to 5 minutes at the time, "well past any observed real attempt" - but that
+// was never based on an actual need past ~2 minutes, and a 5-minute blind spot on
+// the connected-players dashboard for a player who simply quit mid-probe (confirmed
+// 2026-09-16: idleFor=4m21s) is a real cost. Lowered to 3 minutes - still comfortable
+// margin above the one documented legitimate slow case, while cutting the
+// nobody-ever-reports worst case by 40%.
+const holePunchExemptionMax = 3 * time.Minute
 
 func markHolePunching(pid uint32) {
 	holePunchingSince.Store(pid, time.Now())
@@ -611,6 +638,42 @@ func isHolePunchExempt(pid uint32) bool {
 		return false
 	}
 	return time.Since(since.(time.Time)) < holePunchExemptionMax
+}
+
+// matchStartGraceUntil gives a player a short grace window right after
+// CloseParticipation (the real match-start signal - see its handler, which
+// clears the hole-punch exemption at the same moment) during which
+// watchStaleConnections won't flag them stale. Separate from
+// holePunchingSince/holePunchExemptionMax on purpose: that one covers the
+// (up to 5-minute) NAT-probing phase and is cleared right at match start,
+// but real consoles apparently take a real, if short, pause right around
+// match start too (loading screens/transitions) before their normal ~5-9s
+// ping cadence resumes - confirmed 2026-09-15 when clearing the hole-punch
+// exemption at CloseParticipation (see [[feedback_wsc_holepunch_exemption_stuck_match]])
+// immediately produced 3 false StaleDisconnects at idleFor=18s/20s/23s right
+// after real match starts, visible live on the user's stream overlay as the
+// opponent vanishing while the match kept working a few more seconds. 5
+// minutes was far too generous a grace for this (that's the bug just fixed);
+// the bare 15s staleIdleThreshold turned out too tight. 45s splits the
+// difference well past every overshoot observed so far.
+var matchStartGraceUntil sync.Map // uint32 pid → time.Time (grace expiry)
+
+const matchStartGrace = 45 * time.Second
+
+func markMatchStartGrace(pid uint32) {
+	matchStartGraceUntil.Store(pid, time.Now().Add(matchStartGrace))
+}
+
+func isInMatchStartGrace(pid uint32) bool {
+	until, ok := matchStartGraceUntil.Load(pid)
+	if !ok {
+		return false
+	}
+	if time.Now().After(until.(time.Time)) {
+		matchStartGraceUntil.Delete(pid)
+		return false
+	}
+	return true
 }
 
 // natFailureBlockedUntil holds pids that just failed NAT traversal (typically a
@@ -735,6 +798,129 @@ func logPacketGaps(packet *nex.PacketV1) {
 // players.
 const staleIdleThreshold = 15 * time.Second
 
+// logLoadSnapshot periodically logs basic concurrency/load numbers so a
+// future disconnect report during a busier session can actually be checked
+// against real load instead of guessed at. Added 2026-09-15 after "more
+// players, more dcs" was raised as a theory: an at-rest check right then (3
+// players, wsc-secure at 0.1% CPU/20MB RSS, 0 RcvbufErrors) couldn't confirm
+// or rule it out, because there was no real concurrent load happening to
+// measure. This gives real numbers to look back on next time there is -
+// grep "LoadSnapshot" and see whether player/goroutine counts were actually
+// elevated around a reported disconnect's timestamp.
+// pingPlayerConnectivity periodically pings each currently-connected player's
+// real IP directly (shelling out to the system `ping`, the same tool used
+// manually to confirm this VPS's own network health is clean) to get
+// independent, real-time evidence of actual path loss to that specific
+// player - rather than only ever inferring it from the absence of a packet
+// on our end, which by definition can never be logged (a lost packet never
+// arrives to be recorded). Added 2026-09-16 after "the pings just abruptly
+// stop, no trace anywhere" was raised: PacketGap only logs a gap
+// retroactively, when the NEXT packet finally arrives, so a connection that
+// goes quiet and never resumes leaves nothing to log on its own. This gives
+// an independent, actively-collected signal instead. Correlate
+// "PlayerPing"/"PlayerTraceroute" lines against PacketGap/StaleDisconnect
+// for the same PID/timeframe next time an "abrupt, traceless" disconnect is
+// reported.
+func pingPlayerConnectivity() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	var lastTraceroute sync.Map // uint32 pid -> time.Time, cooldown so persistent loss doesn't spam traceroutes every cycle
+	for range ticker.C {
+		type target struct {
+			pid uint32
+			ip  string
+		}
+		var targets []target
+		connectedPIDs.Range(func(k, _ interface{}) bool {
+			pid := k.(uint32)
+			if v, ok := currentClient.Load(pid); ok {
+				if client, ok2 := v.(*nex.Client); ok2 {
+					if addr := client.Address(); addr != nil && addr.IP != nil {
+						targets = append(targets, target{pid: pid, ip: addr.IP.String()})
+					}
+				}
+			}
+			return true
+		})
+		for _, t := range targets {
+			go func(t target) {
+				out, _ := exec.Command("ping", "-c", "5", "-W", "2", t.ip).CombinedOutput()
+				lossPct, avgRTT := parsePingOutput(string(out))
+				fmt.Printf("PlayerPing: PID=%d ip=%s loss=%s avgRTT=%s\n", t.pid, t.ip, lossPct, avgRTT)
+
+				// Only chase actual loss with the much heavier traceroute (takes
+				// several seconds, one probe per hop), and only once every 5
+				// minutes per player even if loss persists across many cycles.
+				if lossPct == "0%" || lossPct == "?" {
+					return
+				}
+				if last, ok := lastTraceroute.Load(t.pid); ok && time.Since(last.(time.Time)) < 5*time.Minute {
+					return
+				}
+				lastTraceroute.Store(t.pid, time.Now())
+				runTraceroute(t.pid, t.ip, "loss="+lossPct)
+			}(t)
+		}
+	}
+}
+
+// runTraceroute shells out to the system `traceroute` (already confirmed
+// available and usable unprivileged on this box) and logs the full hop-by-hop
+// output tagged with the PID/IP/reason it was run for, so a slow or lossy hop
+// on the path to a specific player is visible directly instead of inferred.
+// Takes several seconds (one probe per hop, up to 15 hops) - always call this
+// in its own goroutine, never inline on a packet-handling path.
+func runTraceroute(pid uint32, ip string, reason string) {
+	out, _ := exec.Command("traceroute", "-m", "15", "-w", "1", "-q", "1", ip).CombinedOutput()
+	fmt.Printf("PlayerTraceroute: PID=%d ip=%s reason=%s\n%s", pid, ip, reason, string(out))
+}
+
+// parsePingOutput pulls the packet-loss percentage and average RTT out of
+// `ping`'s standard summary lines (e.g. "5 packets transmitted, 5 received,
+// 0% packet loss, time 4004ms" and "rtt min/avg/max/mdev = 3.5/3.6/3.7/0.04
+// ms"), returning "?" for either field if the expected line wasn't found
+// (e.g. 100% loss has no rtt line at all).
+func parsePingOutput(out string) (lossPct string, avgRTT string) {
+	lossPct, avgRTT = "?", "?"
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "% packet loss") {
+			if idx := strings.Index(line, "% packet loss"); idx > 0 {
+				start := idx
+				for start > 0 && (line[start-1] == '.' || (line[start-1] >= '0' && line[start-1] <= '9')) {
+					start--
+				}
+				lossPct = line[start:idx] + "%"
+			}
+		}
+		if strings.Contains(line, "min/avg/max") {
+			if eq := strings.LastIndex(line, "="); eq >= 0 {
+				fields := strings.Split(strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(line[eq+1:]), "ms")), "/")
+				if len(fields) >= 2 {
+					avgRTT = fields[1] + "ms"
+				}
+			}
+		}
+	}
+	return
+}
+
+func logLoadSnapshot() {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		playerCount := 0
+		connectedPIDs.Range(func(_, _ interface{}) bool {
+			playerCount++
+			return true
+		})
+		gatheringCount, _ := gatheringsCol.CountDocuments(context.Background(), bson.D{})
+		var mem runtime.MemStats
+		runtime.ReadMemStats(&mem)
+		fmt.Printf("LoadSnapshot: players=%d gatherings=%d goroutines=%d heapAllocMB=%.1f\n",
+			playerCount, gatheringCount, runtime.NumGoroutine(), float64(mem.HeapAlloc)/1024/1024)
+	}
+}
+
 // watchStaleConnections is the replacement for the vendor ping/kick mechanism, which
 // has an unsynchronized data race on pingKickTimer (client.go) that makes short
 // SetPingTimeout values unsafe — see feedback_wsc_ping_timeout memory. This checks
@@ -765,6 +951,9 @@ func watchStaleConnections() {
 			if isHolePunchExempt(pid) {
 				return true // mid-NAT-traversal - expected to be quiet toward the server
 			}
+			if isInMatchStartGrace(pid) {
+				return true // just started a real match - loading/transition pause, not dead
+			}
 			// Re-check immediately before acting: a packet may have arrived from
 			// this PID between the Range snapshot above and here (packet handling
 			// runs concurrently on its own goroutine(s) and updates lastPacketAt
@@ -779,6 +968,7 @@ func watchStaleConnections() {
 			fmt.Printf("StaleDisconnect: PID=%d idleFor=%s — cleaning up gatherings and session (PRUDP session itself untouched)\n", pid, idleFor.Round(time.Second))
 			currentClient.Delete(pid)
 			connectedPIDs.Delete(pid)
+			pidConnectedAt.Delete(pid)
 			lastPacketAt.Delete(pid)
 			dbLeaveAllGatherings(pid)
 			dbDeleteSession(pid)
@@ -790,8 +980,41 @@ func watchStaleConnections() {
 // --- Internal HTTP status endpoint (127.0.0.1:9015) for relay-admin dashboard ---
 
 type wscSessionInfo struct {
-	PID  int64 `json:"pid"`
-	NATm int64 `json:"natm"`
+	PID         int64  `json:"pid"`
+	NATm        int64  `json:"natm"`
+	Region      string `json:"region"`       // "US", "EU", "JP" or "" if the player's profile isn't known yet
+	ConnectedAt int64  `json:"connected_at"` // unix seconds when this PRUDP connection was established
+}
+
+// pidConnectedAt records when each currently-connected PID's connection was
+// established, for the dashboard's per-player connection time.
+var pidConnectedAt sync.Map
+
+// wscRegionForPID names a player's region from the DataType of their own
+// club-selection profile object - the same signal dsClubRegionPrefix uses
+// (1 = JP, 2 = US, 3 = EU - WSC has exactly three regions, and 1 is the
+// remaining profile type and the region value seen in score uploads).
+// Returns "" when the player has no profile object yet, rather than guessing.
+func wscRegionForPID(pid uint32) string {
+	region := ""
+	dsStore.Range(func(_, v interface{}) bool {
+		obj := v.(*dsObject)
+		if obj.OwnerPID != pid {
+			return true
+		}
+		switch obj.DataType {
+		case 1:
+			region = "JP"
+		case 2:
+			region = "US"
+		case 3:
+			region = "EU"
+		default:
+			return true
+		}
+		return false
+	})
+	return region
 }
 
 type wscMatchInfo struct {
@@ -837,7 +1060,10 @@ func startStatusServer() {
 
 		var sessions []wscSessionInfo
 		connectedPIDs.Range(func(k, _ interface{}) bool {
-			s := wscSessionInfo{PID: int64(k.(uint32))}
+			s := wscSessionInfo{PID: int64(k.(uint32)), Region: wscRegionForPID(k.(uint32))}
+			if t, ok := pidConnectedAt.Load(k); ok {
+				s.ConnectedAt = t.(time.Time).Unix()
+			}
 			if v, ok := pidNATm.Load(k.(uint32)); ok {
 				s.NATm = int64(v.(uint32))
 			}
@@ -937,6 +1163,8 @@ func main() {
 	go cleanupStaleGatherings()
 	go watchStaleConnections()
 	go watchRankingScoreRegions()
+	go logLoadSnapshot()
+	go pingPlayerConnectivity()
 
 	nexServer = nex.NewServer()
 	nexServer.SetPRUDPVersion(1)
@@ -981,8 +1209,19 @@ func main() {
 
 		packet.Sender().SetPID(userPID)
 		connectedPIDs.Store(userPID, struct{}{})
+		pidConnectedAt.Store(userPID, time.Now())
 		currentClient.Store(userPID, packet.Sender())
 		dbLeaveAllGatherings(userPID) // clear any stale gatherings from a previous session
+
+		// Baseline traceroute for every new connection, not just ones that later
+		// show ping loss (see pingPlayerConnectivity) - gives a path snapshot
+		// from the moment a player connects, so a later degradation can be
+		// compared against their own known-good route instead of only seeing
+		// the bad one. Async: traceroute takes several seconds, must never
+		// block the connect handshake itself.
+		if addr := packet.Sender().Address(); addr != nil && addr.IP != nil {
+			go runTraceroute(userPID, addr.IP.String(), "connect")
+		}
 
 		responseValueStream := nex.NewStreamOut(nexServer)
 		responseValueStream.WriteUInt32LE(responseCheck + 1)
@@ -1013,6 +1252,7 @@ func main() {
 		currentClient.Delete(pid)
 		fmt.Printf("Disconnect: PID=%d — cleaning up gatherings and session\n", pid)
 		connectedPIDs.Delete(pid)
+		pidConnectedAt.Delete(pid)
 		// pidNATm/pidNATf intentionally kept — NAT type is stable across reconnects
 		lastPacketAt.Delete(pid) // reset the gap-logging baseline for this PID's next session
 		dbLeaveAllGatherings(pid)
@@ -1158,6 +1398,40 @@ func main() {
 	utilProto := utility.NewUtilityProtocol(nexServer)
 	utilProto.AcquireNexUniqueID(acquireNexUniqueID)
 
+	// nex-go's Listen() never raises the UDP socket's receive buffer above
+	// whatever the OS default is (net.ListenUDP doesn't set SO_RCVBUF, and
+	// nex-go never calls SetReadBuffer) - confirmed 2026-09-15 that this
+	// VPS's default is only 212992 bytes (net.core.rmem_default), while
+	// /proc/net/snmp showed 17101 UDP packets already silently dropped
+	// machine-wide with RcvbufErrors (this box also runs Mastodon, a FiveM
+	// server, Postgres, MongoDB, etc. - real contention, not just us). Once
+	// that buffer fills (a burst of traffic while this process is briefly
+	// busy elsewhere), the kernel drops the excess before our code ever
+	// sees it - invisible to every log line in this file, and a very
+	// plausible source of the "sometimes it just doesn't work" instability
+	// reported the same day. Poll for the socket because Listen() creates
+	// it internally and blocks immediately after - there's no hook to set
+	// this before Listen() starts reading, so it must happen concurrently
+	// from another goroutine right after the socket exists.
+	go func() {
+		for i := 0; i < 200; i++ {
+			if sock := nexServer.Socket(); sock != nil {
+				const udpBufSize = 64 * 1024 * 1024 // 64MB - rmem_max/wmem_max raised to 512MB 2026-09-15, plenty of headroom
+				if err := sock.SetReadBuffer(udpBufSize); err != nil {
+					fmt.Println("wsc-secure: SetReadBuffer failed:", err)
+				} else {
+					fmt.Printf("wsc-secure: UDP read buffer set to %d bytes\n", udpBufSize)
+				}
+				if err := sock.SetWriteBuffer(udpBufSize); err != nil {
+					fmt.Println("wsc-secure: SetWriteBuffer failed:", err)
+				}
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		fmt.Println("wsc-secure: PRUDP socket never became ready - could not raise UDP buffer size")
+	}()
+
 	nexServer.Listen(":60015")
 }
 
@@ -1207,6 +1481,9 @@ func searchObject77(client *nex.Client, callID uint32, param *datastore.DataStor
 	}
 
 	fmt.Printf("Proto77 SearchObject: PID=%d dataType=0x%x tags=%v ownerIds=%v → %d result(s)\n", client.PID(), param.DataType, param.Tags, param.OwnerIds, len(metas))
+	if param.ResultRange.Offset == 0 {
+		go dbRecordClubSearch(client.PID(), param.Tags, len(metas))
+	}
 
 	result := datastore.NewDataStoreSearchResult()
 	result.TotalCount = uint32(len(metas))
@@ -1347,6 +1624,9 @@ func searchObject(err error, client *nex.Client, callID uint32, param *datastore
 	}
 
 	fmt.Printf("SearchObject: PID=%d dataType=0x%x tags=%v ownerIds=%v → %d result(s)\n", client.PID(), param.DataType, param.Tags, param.OwnerIds, len(metas))
+	if param.ResultRange.Offset == 0 {
+		go dbRecordClubSearch(client.PID(), param.Tags, len(metas))
+	}
 
 	result := datastore.NewDataStoreSearchResult()
 	result.TotalCount = uint32(len(metas))
@@ -1933,9 +2213,34 @@ func requestProbeInitiationExt(err error, client *nex.Client, callID uint32, tar
 	rmcMessage.SetParameters(probeStream.Bytes())
 
 	for _, target := range targetList {
-		targetURL := nex.NewStationURL(target)
-		rvcID, _ := strconv.Atoi(targetURL.RVCID())
-		targetClient := nexServer.FindClientFromConnectionID(uint32(rvcID))
+		// Look up the target's LIVE connection by PID (currentClient, kept fresh on
+		// every Connect/Disconnect) rather than by the RVCID embedded in the target
+		// URL string. That URL comes from dbGetPlayerURLs/GetSessionURLs, cached at
+		// some earlier point - if the target has reconnected since (new PRUDP
+		// session = new connectionID, see nex-go's FindClientFromConnectionID doc),
+		// the old RVCID matches no live client, this silently returns nil, and
+		// InitiateProbe is silently dropped: the target never learns it should
+		// probe back, so only the caller's side of the hole-punch ever happens -
+		// guaranteed traversal failure with zero log trace of why. Confirmed
+		// 2026-09-15 via a real match (gid 112076, PID 1435853600/1532880379):
+		// only one side ever called RequestProbeInitiationExt across 4 rejoin
+		// attempts, ending in EndParticipation every time - exactly this failure
+		// mode, on a gathering that had churned through several reconnects/host
+		// reassignments beforehand.
+		var targetClient *nex.Client
+		if pid, ok := extractStationPID(target); ok {
+			if v, ok2 := currentClient.Load(pid); ok2 {
+				targetClient = v.(*nex.Client)
+			}
+		}
+		if targetClient == nil {
+			targetURL := nex.NewStationURL(target)
+			rvcID, _ := strconv.Atoi(targetURL.RVCID())
+			targetClient = nexServer.FindClientFromConnectionID(uint32(rvcID))
+		}
+		if targetClient == nil {
+			fmt.Printf("RequestProbeInitiationExt: PID=%d — no live client found for target %s, InitiateProbe NOT delivered (traversal will fail one-sided)\n", client.PID(), target)
+		}
 		if targetClient != nil {
 			msgPkt, _ := nex.NewPacketV1(targetClient, nil)
 			msgPkt.SetVersion(1)
@@ -2077,6 +2382,27 @@ func handleCloseParticipation(packet *nex.PacketV1) {
 	fmt.Printf("CloseParticipation: PID=%d gid=%d\n", client.PID(), gid)
 	dbCloseGathering(gid)
 	go dbRecordMatch(gid)
+
+	// CloseParticipation is the real game-start signal (see its call site's own
+	// prior comment) - by definition the hole-punch phase this gathering's
+	// players were in is over, whether or not either side ever bothered to call
+	// ReportNATTraversalResult first. Confirmed 2026-09-15: a real match (gid
+	// 222847, PID 1435853600 host) reached CloseParticipation with NEITHER side
+	// ever reporting a traversal result, leaving both PIDs hole-punch-exempt
+	// for the full holePunchExemptionMax (5 min) even after the match had
+	// clearly gone nowhere - watchStaleConnections only caught the host's dead
+	// connection at idleFor=4m38s, right at that ceiling, instead of the normal
+	// 15s staleIdleThreshold. Clearing the exemption here catches a match
+	// that's actually dead on arrival in seconds instead of minutes - but
+	// going straight to the bare 15s threshold turned out too tight the very
+	// next match: a real console apparently takes its own short pause right
+	// around match start (loading/transition), which produced 3 false
+	// StaleDisconnects at idleFor=18s/20s/23s. markMatchStartGrace grants a
+	// short (45s) buffer for exactly that instead.
+	for _, pid := range dbGetGatheringPlayers(gid) {
+		clearHolePunching(pid)
+		markMatchStartGrace(pid)
+	}
 	sendResponse(client, matchmake_extension.ProtocolID, request.CallID(), matchmake_extension.MethodCloseParticipation, nil)
 }
 
@@ -2085,7 +2411,29 @@ func reportNATTraversalResult(err error, client *nex.Client, callID uint32, cid 
 		return
 	}
 	fmt.Printf("ReportNATTraversalResult: PID=%d cid=%d result=%v rtt=%d\n", client.PID(), cid, result, rtt)
-	clearHolePunching(client.PID())
+	// Clear the exemption for the reporter's WHOLE gathering, not just the
+	// reporter itself. Every real match this whole investigation has looked
+	// at only ever had ONE side call ReportNATTraversalResult - the other
+	// peer (very often the host) never reports at all, so clearHolePunching
+	// on just client.PID() left that other peer exempt (invisible to
+	// watchStaleConnections) until CloseParticipation eventually cleared it
+	// (see [[feedback_wsc_holepunch_exemption_stuck_match]]) or, if the
+	// player quit before the match ever started, until the full 5-minute
+	// holePunchExemptionMax ceiling expired on its own. Confirmed 2026-09-16:
+	// a host (PID 1435853600) who quit mid-probe, before either
+	// CloseParticipation or their own ReportNATTraversalResult, sat in the
+	// connected-players dashboard for 4m21s after quitting - only the
+	// joiner's report had come in, clearing the joiner's own exemption but
+	// not the host's. A NAT result from any one participant means the
+	// gathering's hole-punch phase has concluded one way or another, so it's
+	// reasonable to lift the exemption for everyone in it.
+	if gid := dbFindGatheringForPID(client.PID()); gid != 0 {
+		for _, pid := range dbGetGatheringPlayers(gid) {
+			clearHolePunching(pid)
+		}
+	} else {
+		clearHolePunching(client.PID())
+	}
 	sendResponse(client, nat_traversal.ProtocolID, callID, nat_traversal.MethodReportNATTraversalResult, []byte{})
 	if result {
 		// Don't close here — CloseParticipation is the actual game-start signal.

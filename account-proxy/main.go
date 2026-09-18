@@ -43,6 +43,7 @@ import (
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 	"github.com/pires/go-proxyproto"
+	"github.com/redis/go-redis/v9"
 	minio "github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	"go.mongodb.org/mongo-driver/bson"
@@ -133,6 +134,19 @@ func staggerHandshakePerIP(remoteAddr net.Addr) {
 		}
 	}
 	const minGap = 300 * time.Millisecond
+	// Caps how far a burst of rapid retries can push a single connection's wait.
+	// Without this, N connections from one IP arriving faster than minGap apart
+	// each wait longer than the last (0, 300ms, 600ms, 900ms, ...) - fine for a
+	// couple of genuinely-concurrent handshakes, but once a client starts
+	// retry-storming after an unrelated first failure, the growing artificial
+	// delay can itself exceed the client's own handshake timeout, turning one
+	// transient failure into a multi-minute cascade of new ones. Confirmed
+	// 2026-09-15: real WSC players' Wii Us hit "tls: unexpected message" in
+	// tight same-second bursts of 3-5 retries on this account listener (6666),
+	// which the console likely surfaces as "disconnected from the Internet".
+	// Capping at one minGap keeps the per-IP desync for the common case while
+	// preventing the cascade.
+	const maxWait = minGap
 	handshakeStaggerState.mu.Lock()
 	now := time.Now()
 	next := handshakeStaggerState.next[remote]
@@ -140,11 +154,124 @@ func staggerHandshakePerIP(remoteAddr net.Addr) {
 		next = now
 	}
 	wait := next.Sub(now)
+	if wait > maxWait {
+		wait = maxWait
+		next = now.Add(maxWait)
+	}
 	handshakeStaggerState.next[remote] = next.Add(minGap)
 	handshakeStaggerState.mu.Unlock()
 	if wait > 0 {
 		time.Sleep(wait)
 	}
+}
+
+// handshakeDiag/recordClientHello/tlsHandshakeErrorWriter give the generic
+// "http: TLS handshake error from <addr>: <err>" line Go's net/http logs
+// internally (server.go calls srv.logf, with no hook to attach extra context)
+// some actual TLS detail to go with it. See feedback_wsc_disconnected_from_internet
+// memory: real WSC/3DS clients hit bare "tls: unexpected message"/EOF errors
+// here with no way to tell what protocol version, ciphers, or SNI they'd sent,
+// so the root cause of the *first* failure in a retry burst stayed a mystery.
+// Populated from GetConfigForClient (called for every ClientHello, before the
+// rest of the handshake - success or failure), keyed by remote addr, and
+// consumed (or expired) by the log-line rewriter below so a follow-up failure
+// on the same addr can't be attributed to a stale entry.
+var handshakeDiag = struct {
+	mu     sync.Mutex
+	byAddr map[string]handshakeDiagEntry
+}{byAddr: make(map[string]handshakeDiagEntry)}
+
+type handshakeDiagEntry struct {
+	summary string
+	at      time.Time
+}
+
+func tlsVersionName(v uint16) string {
+	switch v {
+	case tls.VersionSSL30:
+		return "SSL3.0"
+	case tls.VersionTLS10:
+		return "TLS1.0"
+	case tls.VersionTLS11:
+		return "TLS1.1"
+	case tls.VersionTLS12:
+		return "TLS1.2"
+	case tls.VersionTLS13:
+		return "TLS1.3"
+	default:
+		return fmt.Sprintf("0x%04x", v)
+	}
+}
+
+// recordClientHello snapshots the handshake-relevant fields of a ClientHello
+// for later attachment to a same-address handshake-error log line. Call this
+// unconditionally from every GetConfigForClient on both TLS listeners (6666
+// and 7443) - cheap, and we don't know in advance which handshakes will fail.
+func recordClientHello(chi *tls.ClientHelloInfo) {
+	if chi.Conn == nil {
+		return
+	}
+	versions := make([]string, len(chi.SupportedVersions))
+	for i, v := range chi.SupportedVersions {
+		versions[i] = tlsVersionName(v)
+	}
+	ciphers := make([]string, len(chi.CipherSuites))
+	for i, c := range chi.CipherSuites {
+		ciphers[i] = tls.CipherSuiteName(c)
+	}
+	summary := fmt.Sprintf("sni=%q tlsVersions=%v ciphers=%v alpn=%v",
+		chi.ServerName, versions, ciphers, chi.SupportedProtos)
+
+	remote := chi.Conn.RemoteAddr().String()
+	handshakeDiag.mu.Lock()
+	handshakeDiag.byAddr[remote] = handshakeDiagEntry{summary: summary, at: time.Now()}
+	handshakeDiag.mu.Unlock()
+}
+
+// tlsHandshakeErrorRe matches net/http's internal "http: TLS handshake error
+// from 1.2.3.4:5678: <reason>" log line so tlsHandshakeErrorWriter can pull
+// the remote addr back out and look up its recorded ClientHello.
+var tlsHandshakeErrorRe = regexp.MustCompile(`TLS handshake error from ([0-9a-fA-F.:\[\]]+:\d+):`)
+
+// tlsHandshakeErrorWriter is installed as an http.Server's ErrorLog output so
+// every "TLS handshake error" line gets the matching recordClientHello
+// summary appended before being written through, and passes every other log
+// line (there are no others from net/http's ErrorLog in practice) through
+// unchanged.
+type tlsHandshakeErrorWriter struct{}
+
+func (tlsHandshakeErrorWriter) Write(p []byte) (int, error) {
+	line := string(p)
+	if m := tlsHandshakeErrorRe.FindStringSubmatch(line); m != nil {
+		addr := m[1]
+		handshakeDiag.mu.Lock()
+		entry, ok := handshakeDiag.byAddr[addr]
+		if ok {
+			delete(handshakeDiag.byAddr, addr)
+		}
+		handshakeDiag.mu.Unlock()
+		if ok {
+			line = strings.TrimRight(line, "\n") + " clientHello=[" + entry.summary + "]\n"
+		} else {
+			line = strings.TrimRight(line, "\n") + " clientHello=[no ClientHello recorded]\n"
+		}
+	}
+	return os.Stderr.Write([]byte(line))
+}
+
+func init() {
+	go func() {
+		for range time.Tick(30 * time.Second) {
+			cutoff := time.Now().Add(-30 * time.Second)
+			handshakeDiag.mu.Lock()
+			for addr, entry := range handshakeDiag.byAddr {
+				if entry.at.Before(cutoff) {
+					delete(handshakeDiag.byAddr, addr)
+				}
+			}
+			handshakeDiag.mu.Unlock()
+		}
+	}()
 }
 
 func main() {
@@ -217,29 +344,10 @@ func main() {
 	if _, err = db.Exec(`ALTER TABLE n3ds_system_messages ADD COLUMN IF NOT EXISTS region TEXT NOT NULL DEFAULT ''`); err != nil {
 		log.Fatalf("schema: %v", err)
 	}
-	if _, err = db.Exec(`CREATE TABLE IF NOT EXISTS user_access (
-		pid            BIGINT      NOT NULL,
-		game_server_id TEXT        NOT NULL,
-		note           TEXT,
-		created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-		PRIMARY KEY (pid, game_server_id)
-	)`); err != nil {
-		log.Fatalf("schema: %v", err)
-	}
 	if _, err = db.Exec(`CREATE TABLE IF NOT EXISTS banned_users (
 		pid            BIGINT      PRIMARY KEY,
 		reason         TEXT,
 		created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
-	)`); err != nil {
-		log.Fatalf("schema: %v", err)
-	}
-	if _, err = db.Exec(`CREATE TABLE IF NOT EXISTS review_queue (
-		pid            BIGINT      NOT NULL,
-		game_server_id TEXT        NOT NULL,
-		first_seen     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-		last_seen      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-		attempt_count  INTEGER     NOT NULL DEFAULT 1,
-		PRIMARY KEY (pid, game_server_id)
 	)`); err != nil {
 		log.Fatalf("schema: %v", err)
 	}
@@ -280,7 +388,8 @@ func main() {
 	db.Exec(`CREATE TABLE IF NOT EXISTS web_logins (id BIGSERIAL PRIMARY KEY, pid BIGINT NOT NULL, ip TEXT NOT NULL, logged_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), success BOOLEAN NOT NULL)`)
 	db.Exec(`ALTER TABLE redirects ADD COLUMN IF NOT EXISTS game_server_id TEXT`)
 	db.Exec(`ALTER TABLE redirects ADD COLUMN IF NOT EXISTS port INTEGER`)
-	db.Exec(`ALTER TABLE redirects ADD COLUMN IF NOT EXISTS access_mode TEXT NOT NULL DEFAULT 'whitelist'`)
+	db.Exec(`ALTER TABLE redirects ADD COLUMN IF NOT EXISTS access_mode TEXT NOT NULL DEFAULT 'open'`)
+	db.Exec(`ALTER TABLE redirects ALTER COLUMN access_mode SET DEFAULT 'open'`)
 	db.Exec(`ALTER TABLE nex_accounts ADD COLUMN IF NOT EXISTS friends_nex_password TEXT`)
 	db.Exec(`CREATE TABLE IF NOT EXISTS pretendo_friends (
 		owner_pid      BIGINT      NOT NULL,
@@ -389,6 +498,7 @@ func main() {
 		// the original tlsCfg for the handshake, per tls.Config's own
 		// documented GetConfigForClient behavior.
 		GetConfigForClient: func(chi *tls.ClientHelloInfo) (*tls.Config, error) {
+			recordClientHello(chi)
 			if chi.Conn != nil {
 				staggerHandshakePerIP(chi.Conn.RemoteAddr())
 			}
@@ -404,6 +514,7 @@ func main() {
 
 	srv := &http.Server{
 		TLSConfig: tlsCfg,
+		ErrorLog:  log.New(tlsHandshakeErrorWriter{}, "", log.LstdFlags),
 		ConnState: func(conn net.Conn, state http.ConnState) {
 			log.Printf("conn %s → %s", conn.RemoteAddr(), state)
 		},
@@ -467,55 +578,6 @@ func refreshBans() {
 func checkBanned(pid uint32) bool {
 	_, ok := bannedPIDs.Load(pid)
 	return ok
-}
-
-func checkUserAccess(pid uint32, gameServerID, accessMode string) bool {
-	switch accessMode {
-	case "open":
-		return true
-	case "whitelist":
-		var count int
-		db.QueryRow(`SELECT COUNT(*) FROM user_access WHERE pid = $1 AND UPPER(game_server_id) = UPPER($2)`, pid, gameServerID).Scan(&count)
-		return count > 0
-	case "blacklist":
-		var count int
-		db.QueryRow(`SELECT COUNT(*) FROM user_access WHERE pid = $1 AND UPPER(game_server_id) = UPPER($2)`, pid, gameServerID).Scan(&count)
-		return count == 0
-	default:
-		return false
-	}
-}
-
-func queueForReview(pid uint32, gameServerID string) {
-	_, err := db.Exec(`
-		INSERT INTO review_queue (pid, game_server_id)
-		VALUES ($1, UPPER($2))
-		ON CONFLICT (pid, game_server_id) DO UPDATE
-		SET last_seen = NOW(), attempt_count = review_queue.attempt_count + 1`,
-		pid, gameServerID)
-	if err != nil {
-		log.Printf("queueForReview: %v", err)
-	}
-}
-
-// queueNewUser queues pid for review on every managed (non-open) game server
-// it hasn't already been approved or queued for. Called on first profile seen.
-func queueNewUser(pid uint32) {
-	if checkBanned(pid) {
-		return
-	}
-	redirectCache.Range(func(k, v interface{}) bool {
-		rd := v.(activeRedirect)
-		if rd.AccessMode == "open" {
-			return true
-		}
-		gameID := k.(string)
-		// Only queue if not already approved.
-		if !checkUserAccess(pid, gameID, "whitelist") {
-			queueForReview(pid, gameID)
-		}
-		return true
-	})
 }
 
 func generateJuxtServiceToken(pid uint32) (string, error) {
@@ -654,6 +716,8 @@ func handle(w http.ResponseWriter, r *http.Request) {
 				handleFriendsNexToken(w, r, rd.ToHost, rd.Port, rd.AccessMode)
 			case "101D9D00":
 				handleMinecraftNexToken(w, r, rd.ToHost, rd.Port, rd.AccessMode)
+			case "00134600":
+				handleBadgeArcadeNexToken(w, r, rd.ToHost, rd.Port, rd.AccessMode)
 			default:
 				proxyAndCachePID(w, r)
 			}
@@ -687,7 +751,6 @@ func handle(w http.ResponseWriter, r *http.Request) {
 						p.PID, p.PNID)
 				}
 				log.Printf("profile: captured PID=%d PNID=%q for %s", p.PID, p.PNID, ip)
-				go queueNewUser(p.PID)
 			}
 		}
 		writeResponse(w, status, headers, body)
@@ -704,12 +767,6 @@ func handleNexToken(w http.ResponseWriter, r *http.Request, host string, port ui
 	if pid != 0 {
 		if checkBanned(pid) {
 			log.Printf("WiiUChat: PID=%d is banned, proxying to Pretendo", pid)
-			proxyAndCachePID(w, r)
-			return
-		}
-		if !checkUserAccess(pid, "1005A000", accessMode) {
-			log.Printf("WiiUChat: PID=%d access denied (mode=%s), queued for review", pid, accessMode)
-			queueForReview(pid, "1005A000")
 			proxyAndCachePID(w, r)
 			return
 		}
@@ -803,12 +860,6 @@ func handleMK8NexToken(w http.ResponseWriter, r *http.Request, host string, port
 			proxyAndCachePID(w, r)
 			return
 		}
-		if !checkUserAccess(pid, "1010EB00", accessMode) {
-			log.Printf("MK8: PID=%d access denied (mode=%s), queued for review", pid, accessMode)
-			queueForReview(pid, "1010EB00")
-			proxyAndCachePID(w, r)
-			return
-		}
 	}
 
 	b := make([]byte, 16)
@@ -869,12 +920,6 @@ func handleWSCNexToken(w http.ResponseWriter, r *http.Request, host string, port
 			proxyAndCachePID(w, r)
 			return
 		}
-		if !checkUserAccess(pid, "1012F100", accessMode) {
-			log.Printf("WSC: PID=%d access denied (mode=%s), queued for review", pid, accessMode)
-			queueForReview(pid, "1012F100")
-			proxyAndCachePID(w, r)
-			return
-		}
 	}
 
 	b := make([]byte, 16)
@@ -889,6 +934,96 @@ func handleWSCNexToken(w http.ResponseWriter, r *http.Request, host string, port
 		db.Exec(`INSERT INTO relay_requests (pid, game_server_id) VALUES ($1, $2)`, pid, "1012F100")
 	}
 	log.Printf("wsc_token for %s: PID=%d token=%s…", ip, pid, sessionToken[:8])
+
+	tkn := nexToken{
+		Host:        host,
+		NexPassword: sessionToken,
+		PID:         pid,
+		Port:        port,
+		Token:       sessionToken,
+	}
+	body, err := xml.MarshalIndent(tkn, "", "  ")
+	if err != nil {
+		http.Error(w, "encode error", 500)
+		return
+	}
+	body = append([]byte(xml.Header), body...)
+	w.Header().Set("Content-Type", "application/xml")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
+	w.WriteHeader(http.StatusOK)
+	w.Write(body)
+}
+
+func upsertBadgeArcadeAccount(pid uint32, password string) {
+	col := mongoDB.Collection("badge_arcade_nexaccounts")
+	_, err := col.UpdateOne(
+		context.Background(),
+		bson.D{{Key: "pid", Value: pid}},
+		bson.D{{Key: "$set", Value: bson.D{
+			{Key: "pid", Value: pid},
+			{Key: "password", Value: password},
+		}}},
+		options.Update().SetUpsert(true),
+	)
+	if err != nil {
+		log.Printf("mongo upsert badge arcade: %v", err)
+	}
+}
+
+// existingBadgeArcadeAccountPassword returns the already-stored password for
+// this PID, if any. Unlike Wii U titles' nex_token flow (called fresh on every
+// connection attempt), Badge Arcade's 3DS account cache can hold onto a
+// nex_token response across full app relaunches - confirmed 2026-09-16 when a
+// relaunch never re-hit this endpoint at all. Minting a brand-new random
+// password on every call (the pattern every other handleXXXNexToken uses)
+// silently invalidates whatever the console has cached the moment ANY other
+// nex_token call for this PID happens for an unrelated reason, with no way for
+// the console to know to refresh. Keeping the password stable per-PID once
+// issued avoids that class of staleness.
+func existingBadgeArcadeAccountPassword(pid uint32) (string, bool) {
+	col := mongoDB.Collection("badge_arcade_nexaccounts")
+	var result struct {
+		Password string `bson:"password"`
+	}
+	err := col.FindOne(context.Background(), bson.D{{Key: "pid", Value: pid}}).Decode(&result)
+	if err != nil {
+		return "", false
+	}
+	return result.Password, true
+}
+
+func handleBadgeArcadeNexToken(w http.ResponseWriter, r *http.Request, host string, port uint16, accessMode string) {
+	ip := realIP(r)
+	pid := fetchRealPID(r)
+
+	if pid != 0 {
+		if checkBanned(pid) {
+			log.Printf("BadgeArcade: PID=%d is banned, proxying to Pretendo", pid)
+			proxyAndCachePID(w, r)
+			return
+		}
+	}
+
+	var sessionToken string
+	if pid != 0 {
+		if existing, ok := existingBadgeArcadeAccountPassword(pid); ok {
+			sessionToken = existing
+		}
+	}
+	if sessionToken == "" {
+		b := make([]byte, 16)
+		if _, err := rand.Read(b); err != nil {
+			http.Error(w, "token error", 500)
+			return
+		}
+		sessionToken = fmt.Sprintf("%x", b)
+	}
+
+	if pid != 0 {
+		upsertBadgeArcadeAccount(pid, sessionToken)
+		db.Exec(`INSERT INTO relay_requests (pid, game_server_id) VALUES ($1, $2)`, pid, "00134600")
+	}
+	log.Printf("badge_arcade_token for %s: PID=%d token=%s…", ip, pid, sessionToken[:8])
 
 	tkn := nexToken{
 		Host:        host,
@@ -1032,12 +1167,6 @@ func handleABSWNexToken(w http.ResponseWriter, r *http.Request, host string, por
 	if pid != 0 {
 		if checkBanned(pid) {
 			log.Printf("ABSW: PID=%d is banned, proxying to Pretendo", pid)
-			proxyAndCachePID(w, r)
-			return
-		}
-		if !checkUserAccess(pid, "10145E00", accessMode) {
-			log.Printf("ABSW: PID=%d access denied (mode=%s), queued for review", pid, accessMode)
-			queueForReview(pid, "10145E00")
 			proxyAndCachePID(w, r)
 			return
 		}
@@ -1209,13 +1338,10 @@ func storePIDInDB(hash string, pid uint32) {
 		hash, pid)
 }
 
-var miiNameCache sync.Map // pid (uint32) → mii name (string)
-
 func storeMiiName(pid uint32, name string) {
 	if name == "" {
 		return
 	}
-	miiNameCache.Store(pid, name)
 	db.Exec(`INSERT INTO mii_names (pid, mii_name)
 	         VALUES ($1, $2)
 	         ON CONFLICT (pid) DO UPDATE SET mii_name = EXCLUDED.mii_name`,
@@ -4691,7 +4817,221 @@ var swapdoodleRingFiles = map[string]string{
 	"/nt2":            "nt2.boss",
 }
 
+// badgeArcadeBossAppId is Badge Arcade's BOSS content ID (distinct namespace from
+// its NASC/nex_token game_server_id "00134600") - confirmed present in the
+// community "3ds-boss-data" archive.org collection (see
+// reference_3ds_spotpass_archive memory) as J6la9Kj8iqTvAPOq.zip. Its startup BOSS
+// task (before the game even reaches its NEX login screen) 404s against real
+// npdl.cdn.pretendo.cc, surfacing as error 004-3003 - same shape as Swapdoodle's
+// SpotPass ring files, fixed the same way: serve genuine pre-shutdown Nintendo
+// content pulled from that archive instead of a 404.
+//
+// The archive has real per-country/language content (19k+ files across every
+// region Nintendo ever served) - originally only DE/de was pulled since that's
+// this console's region. 2026-09-17: added US/en, JP/ja, GB/en, FR/fr, ES/es,
+// IT/it via remotezip range-requests (the full archive item is 100+GB, never
+// download it wholesale) so other bridge users' consoles get real, correctly
+// localized content instead of German text. Selection is by best-effort IP
+// geolocation (see badgeArcadeRegionForIP) since BOSS CDN requests don't carry
+// the requesting console's actual configured region anywhere we can read -
+// this is a heuristic, not authoritative, and defaults to US/en (most broadly
+// understood) for anything unrecognized/lookup-failed.
+const badgeArcadeBossAppId = "J6la9Kj8iqTvAPOq"
+const badgeArcadeBossDataDir = "/home/nico/badgearcade-boss-data"
+
+// badgeArcadeBossFileSuffixes maps a request path suffix to the filename
+// fragment used across every region's file set (each region's files are
+// named "<PREFIX>_<fragment>", e.g. "DE_de_data_data_v131.dat.boss").
+var badgeArcadeBossFileSuffixes = map[string]string{
+	"/FGONLYT/playinfo_v131.dat": "FGONLYT_playinfo_v131.dat.boss",
+	"/FGONLYT/playinfo_v130.dat": "FGONLYT_playinfo_v130.dat.boss",
+	"/FGONLYT/filelist.txt":      "FGONLYT_filelist.txt",
+	"/data/data_v131.dat":        "data_data_v131.dat.boss",
+	"/data/data_v130.dat":        "data_data_v130.dat.boss",
+	"/data/allbadge_v131.dat":    "data_allbadge_v131.dat.boss",
+	"/data/allbadge_v130.dat":    "data_allbadge_v130.dat.boss",
+	"/data/filelist.txt":         "data_filelist.txt",
+}
+
+// badgeArcadeCountryPrefix maps an ISO country code to the region/language
+// prefix used in badgeArcadeBossDataDir's filenames, for countries we've
+// actually pulled real content for. Anything not listed falls back to US_en.
+var badgeArcadeCountryPrefix = map[string]string{
+	"DE": "DE_de", "AT": "DE_de", "CH": "DE_de",
+	"US": "US_en", "CA": "US_en",
+	"GB": "GB_en", "IE": "GB_en", "AU": "GB_en", "NZ": "GB_en",
+	"FR": "FR_fr", "BE": "FR_fr",
+	"ES": "ES_es", "MX": "ES_es", "AR": "ES_es",
+	"IT": "IT_it",
+	"JP": "JP_ja",
+}
+
+const badgeArcadeDefaultRegionPrefix = "US_en"
+
+// badgeArcadeRegionForIP does a best-effort IP geolocation lookup (cached per
+// IP in runtimeCache, 30-day TTL - see project_redis_runtime_cache memory)
+// to pick which region's real captured content to serve. This is a
+// heuristic, not the console's actual configured NASC region - BOSS CDN
+// requests don't carry that anywhere we've found. Falls back to
+// badgeArcadeDefaultRegionPrefix on any lookup failure or unmapped country.
+// 2026-09-17: moved from an in-process sync.Map to runtimeCache so restarts
+// (frequent during active development) don't throw away lookups and risk
+// hitting ip-api.com's free-tier rate limit (45 req/min) needlessly.
+func badgeArcadeRegionForIP(ip string) string {
+	ctx := context.Background()
+	cacheKey := "geoip:" + ip
+	if cached, ok := runtimeCacheGet(ctx, cacheKey); ok {
+		if prefix, ok := badgeArcadeCountryPrefix[cached]; ok {
+			return prefix
+		}
+		return badgeArcadeDefaultRegionPrefix
+	}
+
+	country := ""
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get("http://ip-api.com/json/" + ip + "?fields=countryCode")
+	if err == nil {
+		defer resp.Body.Close()
+		var result struct {
+			CountryCode string `json:"countryCode"`
+		}
+		if json.NewDecoder(resp.Body).Decode(&result) == nil {
+			country = result.CountryCode
+		}
+	}
+	if country == "" {
+		log.Printf("npdl CDN: geoip lookup failed for %s, defaulting to %s", ip, badgeArcadeDefaultRegionPrefix)
+		return badgeArcadeDefaultRegionPrefix
+	}
+	runtimeCacheSet(ctx, cacheKey, country, 30*24*time.Hour)
+
+	if prefix, ok := badgeArcadeCountryPrefix[country]; ok {
+		log.Printf("npdl CDN: geoip resolved %s -> country=%s -> content=%s", ip, country, prefix)
+		return prefix
+	}
+	log.Printf("npdl CDN: geoip resolved %s -> country=%s, no content for it, defaulting to %s", ip, country, badgeArcadeDefaultRegionPrefix)
+	return badgeArcadeDefaultRegionPrefix
+}
+
+// badgeArcadeEUDefaultRegionPrefix is used when the console's own User-Agent
+// confirms a European system region but IP geolocation doesn't resolve to
+// one of our specific European locales (e.g. a European console connecting
+// from outside Europe, or an unmapped EU country) - English is the most
+// broadly understood fallback within Europe specifically.
+const badgeArcadeEUDefaultRegionPrefix = "GB_en"
+
+// badgeArcadeUserAgentRegionRe matches the system-region letter (J/U/E, per
+// Nintendo's standard Japan/USA/Europe region-lock convention) embedded in
+// nn::boss's own User-Agent, e.g. ".../11.17.0-50U/62452/0" (3DS) or
+// ".../5.5.5E" (Wii U) - confirmed via real captured requests in
+// boss-capture/ (both "50U"/"50E" and "5.5.5E"/"5.5.6U" forms seen).
+var badgeArcadeUserAgentRegionRe = regexp.MustCompile(`[0-9][0-9.]*([JUE])(?:/|$)`)
+
+// badgeArcadeRegionForRequest picks the region using the console's own
+// system-region letter from its User-Agent when available, falling back to
+// badgeArcadeRegionForIP (IP geolocation) otherwise.
+// 2026-09-17: added because badgeArcadeRegionForIP alone is a wrong
+// heuristic whenever a console is used away from the region it was
+// purchased/configured for (e.g. a USA-region 3DS travelling in Japan) -
+// IP geolocation would incorrectly serve Japanese content to a console
+// that's actually configured for English. The system-region letter is the
+// console's own real, stable setting regardless of current network
+// location. Nintendo's system region is only a 3-way Japan/USA/Europe
+// split, though, so a European system still needs IP geolocation to narrow
+// down which specific European language to serve - just restricted to the
+// EU-mapped countries only, never allowed to resolve to US_en/JP_ja for a
+// console that's already confirmed non-Japanese/non-American.
+func badgeArcadeRegionForRequest(r *http.Request) string {
+	ua := r.Header.Get("User-Agent")
+	m := badgeArcadeUserAgentRegionRe.FindStringSubmatch(ua)
+	if m == nil {
+		return badgeArcadeRegionForIP(realIP(r))
+	}
+
+	switch m[1] {
+	case "U":
+		return "US_en"
+	case "J":
+		return "JP_ja"
+	case "E":
+		prefix := badgeArcadeRegionForIP(realIP(r))
+		switch prefix {
+		case "DE_de", "GB_en", "FR_fr", "ES_es", "IT_it":
+			return prefix
+		default:
+			// IP geolocation resolved to US_en/JP_ja/unmapped, which can't be
+			// right for a console whose own User-Agent says it's European -
+			// trust the console over the network-location heuristic here.
+			return badgeArcadeEUDefaultRegionPrefix
+		}
+	default:
+		return badgeArcadeRegionForIP(realIP(r))
+	}
+}
+
 func handleNpdlCDN(w http.ResponseWriter, r *http.Request) {
+	// 2026-09-17: back to matching on the file paths themselves regardless of
+	// bossAppId (undoing a same-night revert to strict badgeArcadeBossAppId
+	// matching). The strict version is more "honest" (a real 404 instead of
+	// content that might fail whatever per-bossAppId integrity check the
+	// console does), but a 404 here is a hard, total block - this startup
+	// BOSS task gates Badge Arcade even reaching its login screen at all (see
+	// badgeArcadeBossAppId's doc comment, confirmed 2026-09-16). A console
+	// that never gets past this point can't use the game *at all*, which is
+	// strictly worse than one that gets further and then fails - and the
+	// per-bossAppId encryption-mismatch theory was never actually confirmed,
+	// while a genuinely low SD card was independently confirmed for the one
+	// case (OvbmGLZ9senvgV3K) that prompted this. Only one real bossAppId
+	// (badgeArcadeBossAppId) is archived anywhere (re-verified via an
+	// exhaustive scan of all 237 archive.org items against the real
+	// playinfo_vNNN.dat/allbadge_vNNN.dat signature - other titles like Rodea
+	// the Sky Soldier share the generic FGONLYT folder name but nothing else),
+	// so any other bossAppId gets this same real content best-effort rather
+	// than nothing.
+	isBadgeArcadeBossPath := false
+	for suffix := range badgeArcadeBossFileSuffixes {
+		if strings.HasSuffix(r.URL.Path, suffix) {
+			isBadgeArcadeBossPath = true
+			break
+		}
+	}
+	if isBadgeArcadeBossPath {
+		regionPrefix := badgeArcadeRegionForRequest(r)
+		for suffix, fragment := range badgeArcadeBossFileSuffixes {
+			if !strings.HasSuffix(r.URL.Path, suffix) {
+				continue
+			}
+			filename := regionPrefix + "_" + fragment
+			data, err := os.ReadFile(badgeArcadeBossDataDir + "/" + filename)
+			if err != nil && regionPrefix != badgeArcadeDefaultRegionPrefix {
+				// fall back to the default region's content rather than 404ing
+				// if this specific region's file is somehow missing
+				filename = badgeArcadeDefaultRegionPrefix + "_" + fragment
+				data, err = os.ReadFile(badgeArcadeBossDataDir + "/" + filename)
+			}
+			if err != nil {
+				log.Printf("npdl CDN: Badge Arcade %s -> real content %s unavailable (%v)", r.URL.Path, filename, err)
+				break
+			}
+			// 2026-09-17: same CONN_HOST_MAX class of bug already root-caused
+			// for WSC (see project_wsc_taskrunnbdl_conn_host_max memory) -
+			// nn::boss has a per-host concurrent connection cap, and this
+			// handler never sent Connection: close, relying on Go's default
+			// keep-alive. data_v131.dat alone is 26.5MB; a lingering
+			// keep-alive connection through a transfer that size (a US
+			// player hit 004-6007 right after this file started serving)
+			// makes hitting that per-host cap much more likely if any other
+			// SpotPass request queues up behind it.
+			w.Header().Set("Connection", "close")
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.WriteHeader(http.StatusOK)
+			w.Write(data)
+			log.Printf("npdl CDN: Badge Arcade %s -> served real captured Nintendo content (%s, %d bytes)", r.URL.Path, filename, len(data))
+			return
+		}
+		log.Printf("npdl CDN: Badge Arcade %s -> no captured content for this path, proxying", r.URL.Path)
+	}
+
 	isRingEC1 := strings.Contains(r.URL.Path, "/RNG_EC1/") && strings.HasSuffix(r.URL.Path, ".dlp")
 	if strings.Contains(r.URL.Path, "/RNG_") && !isRingEC1 {
 		for suffix, filename := range swapdoodleRingFiles {
@@ -4703,6 +5043,7 @@ func handleNpdlCDN(w http.ResponseWriter, r *http.Request) {
 				log.Printf("npdl CDN: %s -> real ring file %s unavailable (%v), falling back to placeholder", r.URL.Path, filename, err)
 				break
 			}
+			w.Header().Set("Connection", "close") // see CONN_HOST_MAX comment above
 			w.Header().Set("Content-Type", "application/octet-stream")
 			w.WriteHeader(http.StatusOK)
 			w.Write(data)
@@ -4907,7 +5248,7 @@ func handleBossCapture(w http.ResponseWriter, r *http.Request) {
 	// console. Serve uncompressed (drop Content-Encoding) rather than
 	// re-encoding brotli - not worth the extra dependency for ~300 bytes.
 	if strings.HasPrefix(r.URL.Path, "/p01/policylist/") && resp.StatusCode == http.StatusOK {
-		fixed, changed, err := fixPolicylistUpdateTime(respBody, resp.Header.Get("Content-Encoding"))
+		fixed, changed, err := fixPolicylistUpdateTime(respBody, resp.Header.Get("Content-Encoding"), realHost+r.URL.Path)
 		if err != nil {
 			log.Printf("BOSS capture: policylist fixup failed, relaying as-is: %v", err)
 		} else if changed {
@@ -4932,14 +5273,111 @@ func handleBossCapture(w http.ResponseWriter, r *http.Request) {
 	w.Write(respBody)
 }
 
+// handle3DSBossPolicylist covers the 3DS-specific policylist/tasksheet hosts
+// (nppl.c.app.*/npts.c.app.* - note the "c." for CTR, a different real host
+// than Wii U's nppl.app.pretendo.cc/npts.app.pretendo.cc already handled by
+// handleBossCapture above). These were falling through to the plain generic
+// proxy (handleGenericOwnDomainProxy), so they never got the same <UpdateTime>
+// fixup already confirmed necessary for Wii U's BOSS PolicyList parsing (see
+// handleBossCapture's doc comment) - applying the same treatment here rather
+// than assuming the 3DS side doesn't need it too.
+func handle3DSBossPolicylist(w http.ResponseWriter, r *http.Request, ownSuffix string) {
+	realHost := strings.TrimSuffix(r.Host, ownSuffix) + ".pretendo.cc"
+	fullTarget := "https://" + realHost + r.URL.Path
+	if r.URL.RawQuery != "" {
+		fullTarget += "?" + r.URL.RawQuery
+	}
+	proxyReq, err := http.NewRequest(r.Method, fullTarget, r.Body)
+	if err != nil {
+		http.Error(w, "proxy error", http.StatusInternalServerError)
+		return
+	}
+	proxyReq.Header = r.Header.Clone()
+	proxyReq.Host = realHost
+
+	resp, err := wiiUHTTPClient.Do(proxyReq)
+	if err != nil {
+		log.Printf("3DS BOSS policylist: upstream error for %s: %v", fullTarget, err)
+		http.Error(w, "upstream error", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+
+	respHeader := resp.Header
+	if strings.HasPrefix(r.URL.Path, "/p01/policylist/") && resp.StatusCode == http.StatusOK {
+		fixed, changed, err := fixPolicylistUpdateTime(respBody, resp.Header.Get("Content-Encoding"), realHost+r.URL.Path)
+		if err != nil {
+			log.Printf("3DS BOSS policylist: fixup failed, relaying as-is: %v", err)
+		} else if changed {
+			log.Printf("3DS BOSS policylist: UpdateTime corrected for %s", r.URL.Path)
+			respBody = fixed
+			respHeader = resp.Header.Clone()
+			respHeader.Del("Content-Encoding")
+			respHeader.Set("Content-Length", fmt.Sprintf("%d", len(respBody)))
+		}
+	}
+
+	for k, vs := range respHeader {
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	w.Header().Set("Connection", "close") // see handleWSCSpotPassTasksheet's comment
+	w.WriteHeader(resp.StatusCode)
+	w.Write(respBody)
+	log.Printf("3DS BOSS policylist: %s %s -> %s status=%d bytes=%d", r.Method, r.URL.Path, fullTarget, resp.StatusCode, len(respBody))
+}
+
+// runtimeCache is a generic, shared cache for routine background/request-path
+// tasks across the whole infrastructure to cache their own internal
+// resources for a while, keyed and TTL'd per task - so a restart doesn't
+// throw away work a task did minutes ago. Backed by the Redis instance
+// already running locally (127.0.0.1:6379, no auth - not used by anything
+// else in this project yet, this is the first consumer). Deliberately not
+// S3: S3 has no native per-key TTL and meaningful per-request latency/cost
+// that would hurt anything checked frequently (e.g. once per BOSS poll),
+// where Redis is sub-millisecond and purpose-built for exactly this. Keys
+// should be namespaced by the caller (e.g. "policylist:<host><path>") since
+// other services/tasks may eventually share this same instance.
+//
+// Fails open: if Redis is unreachable, runtimeCacheGet reports a miss and
+// runtimeCacheSet silently no-ops, so a cache outage degrades to "as if
+// nothing were cached" rather than breaking the caller.
+var runtimeCacheClient = redis.NewClient(&redis.Options{
+	Addr: "127.0.0.1:6379",
+})
+
+func runtimeCacheGet(ctx context.Context, key string) (string, bool) {
+	val, err := runtimeCacheClient.Get(ctx, key).Result()
+	if err != nil {
+		return "", false
+	}
+	return val, true
+}
+
+func runtimeCacheSet(ctx context.Context, key string, value string, ttl time.Duration) {
+	if err := runtimeCacheClient.Set(ctx, key, value, ttl).Err(); err != nil {
+		log.Printf("runtimeCache: set failed for key %q: %v", key, err)
+	}
+}
+
 // policylistUpdateTimeRe matches PolicyList's <UpdateTime>YYYY-MM-DDTHH:MM:SS+0000</UpdateTime>.
 var policylistUpdateTimeRe = regexp.MustCompile(`<UpdateTime>[^<]+</UpdateTime>`)
 
-// fixPolicylistUpdateTime decompresses (if needed) a policylist response body,
-// replaces a malformed <UpdateTime> with the current, correctly-formatted
-// time, and returns the corrected plaintext body. changed is false (body nil)
-// if no UpdateTime tag was found, so the caller can leave the response alone.
-func fixPolicylistUpdateTime(body []byte, contentEncoding string) ([]byte, bool, error) {
+// fixPolicylistUpdateTime decompresses (if needed) a policylist response body
+// and replaces a malformed <UpdateTime> with a correctly-formatted one.
+// 2026-09-17: originally always stamped time.Now() on every single request,
+// which would make the console think the policy changed on every poll even
+// when Pretendo's real content was identical, forcing needless
+// re-processing/re-download. Now only advances the timestamp when the
+// content (with the UpdateTime field itself excluded from the comparison)
+// actually differs from the last response seen for this cacheKey (persisted
+// in runtimeCache, so this survives account-proxy restarts too) - otherwise
+// reuses the same UpdateTime already issued, so an unchanged policy reads as
+// unchanged. changed is false (body nil) if no UpdateTime tag was found, so
+// the caller can leave the response alone.
+func fixPolicylistUpdateTime(body []byte, contentEncoding string, cacheKey string) ([]byte, bool, error) {
 	plain := body
 	if contentEncoding == "br" {
 		decoded, err := io.ReadAll(brotli.NewReader(bytes.NewReader(body)))
@@ -4953,7 +5391,23 @@ func fixPolicylistUpdateTime(body []byte, contentEncoding string) ([]byte, bool,
 		return nil, false, nil
 	}
 
-	replacement := fmt.Sprintf("<UpdateTime>%s+0000</UpdateTime>", time.Now().UTC().Format("2006-01-02T15:04:05"))
+	normalized := policylistUpdateTimeRe.ReplaceAll(plain, []byte("<UpdateTime/>"))
+	hash := fmt.Sprintf("%x", sha256.Sum256(normalized))
+
+	ctx := context.Background()
+	redisKey := "policylist:" + cacheKey
+	var updateTime string
+	if prev, ok := runtimeCacheGet(ctx, redisKey); ok {
+		if parts := strings.SplitN(prev, "|", 2); len(parts) == 2 && parts[0] == hash {
+			updateTime = parts[1]
+		}
+	}
+	if updateTime == "" {
+		updateTime = time.Now().UTC().Format("2006-01-02T15:04:05")
+		runtimeCacheSet(ctx, redisKey, hash+"|"+updateTime, 7*24*time.Hour)
+	}
+
+	replacement := fmt.Sprintf("<UpdateTime>%s+0000</UpdateTime>", updateTime)
 	fixed := policylistUpdateTimeRe.ReplaceAll(plain, []byte(replacement))
 	return fixed, true, nil
 }
@@ -5335,12 +5789,31 @@ func startOLVProxy() {
 	// actually validates certs (see feedback_wildcard_cert_ordering), so it
 	// depends on sending correct SNI to get the right cert back - it has
 	// never been observed sending an empty one to this listener.
+	//
+	// Bug found 2026-09-15: despite the name, this is no longer 3DS-only.
+	// account-proxy's new per-handshake ClientHello logging (see
+	// feedback_wsc_disconnected_from_internet) caught a real Wii U (PID
+	// 1532880379, mid WSC session per wsc-secure.log) opening two TLS
+	// connections to portal.olv.nicochristmann.net and
+	// olv.nicochristmann.net two seconds apart - both failing with the
+	// exact same "tls: unexpected message" alert as the 3DS concurrency
+	// bug, and both fingerprinted as genuine Wii U (pure legacy RSA/CBC
+	// cipher list, no ECDHE/GCM). So Wii U's ssl module can hit the same
+	// concurrent-handshake limit as the 3DS's when two OLV-family hosts are
+	// requested in close succession (e.g. the Miiverse portal frame plus
+	// the base OLV host) - this was previously excluded on the assumption
+	// it was safe, which this capture disproves. Added both hostnames
+	// below; this is very likely the real cause behind the user-reported
+	// WSC "disconnected from the Internet" errors, separate from (and in
+	// addition to) the account-listener stagger-cascade bug fixed earlier
+	// the same day.
 	is3DSSensitiveHost := func(serverName string) bool {
 		if serverName == "" {
 			return true
 		}
 		switch serverName {
-		case "olv3ds.nicochristmann.net", "ctr.olv.nicochristmann.net", "npdl.cdn.pretendo.cc", "nasc.nicochristmann.net":
+		case "olv3ds.nicochristmann.net", "ctr.olv.nicochristmann.net", "npdl.cdn.pretendo.cc", "nasc.nicochristmann.net",
+			"olv.nicochristmann.net", "portal.olv.nicochristmann.net":
 			return true
 		}
 		return serverName == "hpp-"+swapdoodleGameServerID+"-l1.n.app.nicoch.net"
@@ -5392,6 +5865,7 @@ func startOLVProxy() {
 		MinVersion:     tls.VersionTLS12,
 		GetCertificate: getCert,
 		GetConfigForClient: func(chi *tls.ClientHelloInfo) (*tls.Config, error) {
+			recordClientHello(chi)
 			stagger3DSHandshake(chi)
 			// TLS 1.3 cipher IDs are 0x1301/1302/1303 — only modern clients send them.
 			// The Wii U sends only CBC suites, so if none of these appear, it's a Wii U.
@@ -5448,13 +5922,452 @@ func startOLVProxy() {
 			} else {
 				handleSwapdoodleHPP(w, r)
 			}
+		case "ninja.ctr.shop.nicoch.net":
+			handleNinjaShop(w, r)
+		case "ecs.c.shop.nicoch.net":
+			handleECS(w, r)
+		case "nus.c.shop.nicoch.net":
+			handleNUSShop(w, r)
+		case "ias.c.shop.nicoch.net":
+			handleIAS(w, r)
+		case "cas.c.shop.nicoch.net":
+			handleCAS(w, r)
+		case "npvk.app.nicoch.net", "npvk.app.nicochristmann.net":
+			handleNPVK(w, r)
+		case "nppl.c.app.nicoch.net", "npts.c.app.nicoch.net":
+			handle3DSBossPolicylist(w, r, ".nicoch.net")
+		case "nppl.c.app.nicochristmann.net", "npts.c.app.nicochristmann.net":
+			handle3DSBossPolicylist(w, r, ".nicochristmann.net")
 		default:
 			handleOLV(w, r)
 		}
 	}
-	srv := &http.Server{Handler: http.HandlerFunc(dispatch)}
+	srv := &http.Server{Handler: http.HandlerFunc(dispatch), ErrorLog: log.New(tlsHandshakeErrorWriter{}, "", log.LstdFlags)}
 	log.Printf("OLV proxy listening on 127.0.0.1:7443")
 	if err := srv.Serve(tlsLn); err != nil {
 		log.Fatalf("olv server: %v", err)
 	}
+}
+
+// --- Ninja/ECS/NUS eShop shop-server handlers ---
+//
+// nim's own hardcoded hostnames (ecs.c.shop.nintendowifi.net, ninja.ctr.shop.
+// nintendo.net, nus.c.shop.nintendowifi.net) were statically patched to
+// *.nicoch.net in the Nimbus fork (patches/nim/src/main.s there) - Pretendo
+// doesn't run a real eShop/nim backend, and Nintendo's own eShop shut down in
+// 2023, so there's nothing else to fall through to. Confirmed 2026-09-16 via
+// a real dumped nim code.bin (see project_badge_arcade memory) that the
+// bootstrap sequence is service_hosts -> country -> (session open) ->
+// balance, all plain JSON, before ever reaching the SOAP-based ECS purchase
+// call.
+//
+// Real-world reference for the Ninja JSON shapes and ECS SOAP envelope
+// structure: ReShop-3ds's MIT-licensed Ninja/ECS server repos
+// (github.com/ReShop-3ds/{Ninja,ECS}) - adapted here (real PIDs via
+// fetchRealPID, not a separate device-account DB), not copied verbatim.
+// Their ECS server only covers GetAccountStatus/AccountListETicketIds/
+// DeleteSavedCard (their own scope was restoring access to already-owned
+// tickets, not new purchases) - the actual purchase-completion SOAP method
+// name and fields are still unconfirmed anywhere we could find, so
+// handleECS's default case logs the full raw request and best-effort echoes
+// a generic success in the same envelope conventions, so the next real
+// "buy plays" attempt captures the ground truth to build a real handler
+// from instead of guessing further.
+//
+// Goal is just "buy plays" succeeding with a generous free balance - not a
+// full eShop reimplementation.
+
+type soapField struct {
+	XMLName xml.Name
+	Value   string `xml:",chardata"`
+}
+
+type soapMethod struct {
+	XMLName xml.Name
+	Fields  []soapField `xml:",any"`
+}
+
+type soapEnvelope struct {
+	Body struct {
+		Method soapMethod `xml:",any"`
+	} `xml:"Body"`
+}
+
+func soapFieldValue(fields []soapField, name string) string {
+	for _, f := range fields {
+		if f.XMLName.Local == name {
+			return f.Value
+		}
+	}
+	return ""
+}
+
+// TEMPORARY - captureShopRequest writes the exact raw request (headers +
+// body bytes) to disk, same pattern as handleBossCapture/handleHPPCapture
+// elsewhere in this file. Added 2026-09-16 after a real NUS request parsed
+// as root element "Envelope" with empty fields even though log.Printf's
+// %s of the same body variable showed plain bare GetSystemTitleHash XML -
+// a byte-for-byte local reproduction of that exact printed text parsed
+// correctly, so something about the real wire bytes differs from what got
+// printed (possibly connection reuse/pipelining between the ECS and NUS
+// calls). This bypasses any ambiguity in how log.Printf rendered it.
+func captureShopRequest(label string, r *http.Request, body []byte) {
+	os.MkdirAll(bossCaptureDir, 0755)
+	ts := time.Now().Format("20060102-150405.000")
+	base := fmt.Sprintf("%s/shop_%s_%s", bossCaptureDir, label, ts)
+	reqLog := fmt.Sprintf("%s %s\nHost: %s\nHeaders: %v\n", r.Method, r.URL.RequestURI(), r.Host, r.Header)
+	os.WriteFile(base+".request.txt", []byte(reqLog), 0644)
+	os.WriteFile(base+".request.bin", body, 0644)
+}
+
+func handleNinjaShop(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Path
+	ip := realIP(r)
+	// TEMPORARY - logging every call (not just unhandled ones) to see the
+	// real bootstrap sequence and confirm exactly how far it gets. Remove
+	// once the purchase flow is confirmed working end to end.
+	log.Printf("ninja shop: %s %s from %s", r.Method, r.URL.RequestURI(), ip)
+	w.Header().Set("Content-Type", "application/json")
+
+	switch {
+	case path == "/ninja/ws/service_hosts":
+		// nim doesn't actually look up ecs/ninja/nus here - those are
+		// hardcoded strings in its own binary, already patched separately -
+		// so this only needs to be well-formed, not point anywhere specific.
+		w.Write([]byte(`{"services":{"service":[{"name":"EOU","origin_fqdn":"eou.c.shop.nicoch.net","cdn_fqdn":"eou.ctr.eshop.nicoch.net"},{"name":"CCIF","origin_fqdn":"ccif.ctr.shop.nicoch.net"}]}}`))
+
+	case strings.HasPrefix(path, "/ninja/ws/country/"):
+		country := strings.TrimPrefix(path, "/ninja/ws/country/")
+		if i := strings.IndexByte(country, '?'); i >= 0 {
+			country = country[:i]
+		}
+		if country == "" {
+			country = "US"
+		}
+		fmt.Fprintf(w, `{"country_detail":{"region_code":"%s","max_cash":{"amount":"999,00 eCoin","currency":"ECOIN","raw_value":"999"},"loyalty_system_available":false,"legal_payment_message_required":false,"legal_business_message_required":false,"tax_excluded_country":false,"tax_free_country":false,"prepaid_card_available":true,"credit_card_available":false,"credit_card_store_available":false,"jcb_security_code_available":false,"nfc_available":false,"coupon_available":false,"my_coupon_available":true,"price_format":{"positive_prefix":"","positive_suffix":" eCoin","negative_prefix":"- ","negative_suffix":" eCoin","formats":{"format":[{"value":"# ### ### ###,##","digit":"#"}],"pattern_id":"5"}},"default_timezone":"-05:00","eshop_available":true,"name":"Unknown","iso_code":"%s","default_language_code":"en","language_selectable":false}}`, country, country)
+
+	case path == "/ninja/ws/my/balance/current" || path == "/ninja/ws/my/balance/current_raw":
+		// Generous free balance - the whole point is "buy plays" succeeding
+		// without real payment.
+		w.Write([]byte(`{"balance": {"amount": "9999,00 eCoin","currency": "ECOIN","raw_value": "9999"}}`))
+
+	case path == "/ninja/ws/my/session/!open":
+		pid := fetchRealPID(r)
+		fmt.Fprintf(w, `{"session_config":{"pid":%d,"account_id":"%d","country":"US","saved_lang":"en","shop_account_initialized":true,"device_link_updated":false,"owned_titles_modified":0,"shared_titles_last_modified":0,"age":21,"server_time":%d,"devices":{"device":[{"name":"CTR","initial_device_account_id":"%d","npns_ready":true,"id":4}]},"parental_controls":{"parental_control":[{"device":"CTR","type":"game_rating_age","value":0},{"device":"CTR","type":"game_rating_lock","value":0},{"device":"CTR","type":"shopping","value":0}]},"auto_billing_contracted":false,"id":"%d"}}`,
+			pid, pid, time.Now().UnixMilli(), pid, pid)
+
+	case path == "/ninja/ws/my/session/!close":
+		w.Write([]byte(`{}`))
+
+	default:
+		log.Printf("ninja shop: unhandled path %s from %s", path, ip)
+		w.Header().Set("Content-Type", "text/xml")
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`<eshop><error><code>3001</code><message>Service temporarily unavailable</message></error></eshop>`))
+	}
+}
+
+func handleECS(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "read error", http.StatusInternalServerError)
+		return
+	}
+	captureShopRequest("ecs", r, body)
+
+	var env soapEnvelope
+	if err := xml.Unmarshal(body, &env); err != nil {
+		log.Printf("ECS: failed to parse SOAP body: %v (body=%s)", err, string(body))
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	method := env.Body.Method
+	deviceID := soapFieldValue(method.Fields, "DeviceId")
+	messageID := soapFieldValue(method.Fields, "MessageId")
+	now := time.Now().Unix()
+
+	// AccountId/Country/Region/Language are the CONSOLE's own already-
+	// established legacy-eCommerce identity (a real Nintendo account number
+	// like 681942836 the device already has cached locally, completely
+	// unrelated to Pretendo's own PID space) - echo back exactly what the
+	// client sent rather than substituting our own PID (fetchRealPID
+	// returned 0 here since there's no IP-cache entry for this flow at
+	// all). Sending back a mismatched/zero AccountId for an account the
+	// client already considers established caused a real ARM11 crash in
+	// nim itself, confirmed 2026-09-16 via a real device crash dump - not
+	// a soft error like everything else this handler deals with.
+	accountID := soapFieldValue(method.Fields, "AccountId")
+	country := soapFieldValue(method.Fields, "Country")
+	region := soapFieldValue(method.Fields, "Region")
+
+	// TEMPORARY - logging every call (not just unrecognized ones) to see the
+	// real flow. Remove once the purchase flow is confirmed working end to
+	// end.
+	log.Printf("ECS: %s DeviceId=%s MessageId=%s AccountId=%s", method.XMLName.Local, deviceID, messageID, accountID)
+
+	// 2026-09-17: traced via Ghidra decompilation of nim's code.bin
+	// (FUN_00117958, called from FUN_00113c84, both containing literal
+	// occurrences of the exact 0xC920D086/Canceled result observed on every
+	// real "buy plays" attempt) that nim's generic HTTP response handling
+	// compares the Content-Type header against the literal string
+	// "text/plain" and returns that error if it's anything else - matches
+	// documented real broadon.com SOAP behavior (their own legacy services
+	// use text/plain, not a proper SOAP/XML content-type). Applied to all
+	// four broadon-namespaced handlers (ECS/NUS/IAS/CAS) here, not just
+	// GetSystemUpdate, since it's the same nim-side generic check.
+	w.Header().Set("Content-Type", "text/plain")
+
+	switch method.XMLName.Local {
+	case "GetAccountStatus":
+		// Full field set matching ReShop-3ds/ECS's real, working reference
+		// exactly (their own credits say the JSON/XML shapes came from
+		// real captured official Nintendo eShop server responses) - my
+		// first attempt only included 2 of 8 ServiceURLs and omitted
+		// AccountAttributes/TIV/CountryAttribits entirely, which crashed
+		// nim identically regardless of AccountId value (confirmed
+		// 2026-09-16 via two real device crash dumps at the same address)
+		// - nim's client code almost certainly reads some of these
+		// unconditionally (e.g. indexing ServiceURLs by position). TIV
+		// values are copied verbatim from that real reference rather than
+		// invented, since we have no way to know what a "real-looking" one
+		// needs to contain and these are confirmed to not crash it.
+		//
+		// 2026-09-17: PretendoNetwork/SOAP's own official CTR ecs.js has a
+		// dev comment confirming IVSSyncFlag=true makes nim send a follow-up
+		// IAS request with action ReportIVSSync (their comment: "sends no
+		// data"). We only just added real routing for ias.c.shop.nicoch.net
+		// tonight (previously fell through to handleOLV) and this was still
+		// false, meaning nim never had a reason to even attempt that call.
+		// Flipping it on the chance the purchase flow depends on that IAS
+		// round-trip completing.
+		fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><soapenv:Body><GetAccountStatusResponse xmlns="urn:ecs.wsapi.broadon.com"><Version>2.0</Version><DeviceId>%s</DeviceId><MessageId>%s</MessageId><TimeStamp>%d</TimeStamp><ErrorCode>0</ErrorCode><ServiceStandbyMode>false</ServiceStandbyMode><AccountId>%s</AccountId><AccountStatus>R</AccountStatus><Balance><Amount>9999</Amount><Currency>EUR</Currency></Balance><EulaVersion>0</EulaVersion><Country>%s</Country><Region>%s</Region><AccountAttributes><Name>LOYALTY_LOGIN_NAME</Name><Value></Value></AccountAttributes><TIV>1149809128885587.0</TIV><TIV>1169575131682554.0</TIV><TIV>1314918129672913.0</TIV><TIV>1326222027437328.0</TIV><TIV>1338129668636531.0</TIV><TIV>1186379246602384.0</TIV><TIV>1358509901483789.0</TIV><TIV>1250518513292961.0</TIV><TIV>1233556221450613.0</TIV><TIV>1255164559487202.0</TIV><TIV>1308861876776051.0</TIV><TIV>1286072485522462.0</TIV><TIV>1387092800086442.0</TIV><TIV>1282035307179909.0</TIV><TIV>1203991784779312.0</TIV><TIV>1308681197893237.0</TIV><TIV>1184380370551609.0</TIV><TIV>1196788529703881.0</TIV><TIV>1180251793068540.0</TIV><TIV>1358557812147086.0</TIV><TIV>1266002331520620.0</TIV><TIV>1145695266680248.0</TIV><TIV>1179557585538440.0</TIV><TIV>1339926727609970.0</TIV><TIV>1147624340491422.0</TIV><TIV>1132244943650770.0</TIV><TIV>1193095819017622.0</TIV><TIV>1360780990104007.0</TIV><TIV>1301381848583681.0</TIV><TIV>1398319857900498.0</TIV><TIV>1241500844974252.1</TIV><TIV>1319126278449643.0</TIV><TIV>1401321891205073.0</TIV><TIV>1320413304361997.1</TIV><TIV>1228105690723466.0</TIV><TIV>1173296748471852.0</TIV><TIV>1289107132933952.1</TIV><TIV>1138320722983789.1</TIV><TIV>1160467418015390.2</TIV><TIV>1318649123677401.1</TIV><ServiceURLs><Name>ContentPrefixURL</Name><URI>https://nus.c.shop.nicoch.net/ccs/download</URI></ServiceURLs><ServiceURLs><Name>UncachedContentPrefixURL</Name><URI>https://nus.c.shop.nicoch.net/ccs/download</URI></ServiceURLs><ServiceURLs><Name>SystemContentPrefixURL</Name><URI>https://nus.c.shop.nicoch.net/ccs/download</URI></ServiceURLs><ServiceURLs><Name>SystemUncachedContentPrefixURL</Name><URI>https://nus.c.shop.nicoch.net/ccs/download</URI></ServiceURLs><ServiceURLs><Name>EcsURL</Name><URI>https://ecs.c.shop.nicoch.net/ecs/services/ECommerceSOAP</URI></ServiceURLs><ServiceURLs><Name>IasURL</Name><URI>https://ias.c.shop.nicoch.net/ias/services/IdentityAuthenticationSOAP</URI></ServiceURLs><ServiceURLs><Name>CasURL</Name><URI>https://cas.c.shop.nicoch.net/cas/services/CatalogingSOAP</URI></ServiceURLs><ServiceURLs><Name>NusURL</Name><URI>https://nus.c.shop.nicoch.net/nus/services/NetUpdateSOAP</URI></ServiceURLs><IVSSyncFlag>true</IVSSyncFlag><CountryAttribits>15</CountryAttribits></GetAccountStatusResponse></soapenv:Body></soapenv:Envelope>`,
+			deviceID, messageID, now, accountID, country, region)
+
+	case "AccountListETicketIds":
+		fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><soapenv:Body><AccountListETicketIdsResponse xmlns="urn:ecs.wsapi.broadon.com"><Version>2.0</Version><DeviceId>%s</DeviceId><MessageId>%s</MessageId><TimeStamp>%d</TimeStamp><ErrorCode>0</ErrorCode><ServiceStandbyMode>false</ServiceStandbyMode></AccountListETicketIdsResponse></soapenv:Body></soapenv:Envelope>`,
+			deviceID, messageID, now)
+
+	case "DeleteSavedCard":
+		// 2026-09-17: PretendoNetwork/SOAP's own real WUP IAS implementation
+		// (wup/routes/ias.js, GetChallenge) uses xmlns="urn:ecs.wsapi.broadon.com"
+		// even for an IAS response, not a separate ias.wsapi.broadon.com -
+		// Nintendo's broadon SOAP services apparently all share one
+		// namespace regardless of which specific service/action. Matching
+		// that here instead of the guessed ias-specific namespace.
+		fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><soapenv:Body><DeleteSavedCardResponse xmlns="urn:ecs.wsapi.broadon.com"><Version>2.0</Version><DeviceId>%s</DeviceId><MessageId>%s</MessageId><TimeStamp>%d</TimeStamp><ErrorCode>0</ErrorCode><ServiceStandbyMode>false</ServiceStandbyMode><AccountId>%s</AccountId></DeleteSavedCardResponse></soapenv:Body></soapenv:Envelope>`,
+			deviceID, messageID, now, accountID)
+
+	default:
+		// Unknown method - almost certainly the actual purchase-completion
+		// call, whose real name/fields aren't publicly documented anywhere
+		// we could find. Log the full raw request so the next real attempt
+		// gives us the ground truth to build a real handler from, and
+		// best-effort echo a generic success in the same envelope
+		// conventions every other real response here uses.
+		log.Printf("ECS: unrecognized SOAP method %q, full body: %s", method.XMLName.Local, string(body))
+		fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><soapenv:Body><%sResponse xmlns="urn:ecs.wsapi.broadon.com"><Version>2.0</Version><DeviceId>%s</DeviceId><MessageId>%s</MessageId><TimeStamp>%d</TimeStamp><ErrorCode>0</ErrorCode><ServiceStandbyMode>false</ServiceStandbyMode></%sResponse></soapenv:Body></soapenv:Envelope>`,
+			method.XMLName.Local, deviceID, messageID, now, method.XMLName.Local)
+	}
+}
+
+// handleNUSShop. First attempt (a guessed generic-success response with no
+// real TitleHash field) produced a NEW, harder failure (005-4034) than the
+// clean DNS-lookup failure nim already tolerated fine before nus.c.shop.*
+// was ever redirected at all - so it was reverted, which surfaced 005-4802
+// instead (the same code seen before any of this eShop work existed).
+// Confirmed 2026-09-16 that GetSystemTitleHash is a MANDATORY gate nim
+// checks before ever reaching ninja/ECS at all (no ninja/ECS traffic was
+// ever seen while this returned a clean failure) - not a side-check we can
+// just ignore.
+//
+// Real, MIT-licensed reference (github.com/ReShop-3ds/NUS) confirms the
+// exact response shape, including a working dummy TitleHash value
+// (D2F8020CA37AC652691BF17CDD610182) their own working implementation
+// uses - adapted here.
+func handleNUSShop(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "read error", http.StatusInternalServerError)
+		return
+	}
+	captureShopRequest("nus", r, body)
+
+	// Same full SOAP-ENV:Envelope/Body wrapping as ECS - confirmed via raw
+	// byte capture 2026-09-16 (a prior guess that NUS was bare XML was
+	// wrong, based on an unrelated earlier capture that turned out to be a
+	// different caller/library version, not the one nim actually uses
+	// during a real purchase attempt).
+	var env soapEnvelope
+	if err := xml.Unmarshal(body, &env); err != nil {
+		log.Printf("NUS: failed to parse SOAP body: %v (body=%s)", err, string(body))
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	method := env.Body.Method
+
+	deviceID := soapFieldValue(method.Fields, "DeviceId")
+	messageID := soapFieldValue(method.Fields, "MessageId")
+	log.Printf("NUS: %s DeviceId=%s MessageId=%s", method.XMLName.Local, deviceID, messageID)
+
+	w.Header().Set("Content-Type", "text/plain")
+
+	switch method.XMLName.Local {
+	case "GetSystemTitleHash":
+		fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><soapenv:Body><GetSystemTitleHashResponse xmlns="urn:nus.wsapi.broadon.com"><Version>1.0</Version><DeviceId>%s</DeviceId><MessageId>%s</MessageId><TimeStamp>%d</TimeStamp><ErrorCode>0</ErrorCode><TitleHash>D2F8020CA37AC652691BF17CDD610182</TitleHash></GetSystemTitleHashResponse></soapenv:Body></soapenv:Envelope>`,
+			deviceID, messageID, time.Now().Unix())
+
+	case "GetSystemUpdate":
+		// 2026-09-16: the safecerthax-shaped response (ContentPrefixURL/
+		// UncachedContentPrefixURL, zero TitleVersion entries) still hit
+		// 009-6509, identically to the very first bare attempt, and with
+		// no crash, no retry, and no follow-up ECS/Ninja call at all - nim
+		// rejects this response outright, synchronously, right here. Since
+		// adding the envelope-level fields changed nothing, the empty
+		// TitleVersion list is the next suspect: nim asked about ~150
+		// installed titles by TitleId+Version, and a real server would
+		// presumably report a status for each one it was asked about, not
+		// silently omit all of them. Echoing every requested TitleId back
+		// with its own already-installed Version (i.e. "no update
+		// available, you already have the latest") instead of omitting
+		// the list entirely.
+		type titleVersionXML struct {
+			TitleId string `xml:"TitleId"`
+			Version string `xml:"Version"`
+		}
+		var envelope struct {
+			Body struct {
+				Method struct {
+					TitleVersions []titleVersionXML `xml:"TitleVersion"`
+				} `xml:",any"`
+			} `xml:"Body"`
+		}
+		if err := xml.Unmarshal(body, &envelope); err != nil {
+			log.Printf("NUS: GetSystemUpdate title-list parse failed: %v", err)
+		}
+		titleVersions := envelope.Body.Method.TitleVersions
+
+		// 2026-09-17 test: adding FsSize/TicketSize/TMDSize to each entry -
+		// present in both the real safecerthax-server reference template
+		// and a separate NetUpdateSOAP schema reference, but dropped when
+		// this switched from safecerthax's single-entry template to
+		// echoing back every requested title. Using the same fixed dummy
+		// values safecerthax's own real-hardware-tested template uses,
+		// since we have no real per-title size data of our own.
+		var titleVersionsXML strings.Builder
+		for _, tv := range titleVersions {
+			fmt.Fprintf(&titleVersionsXML, `<TitleVersion><TitleId>%s</TitleId><Version>%s</Version><FsSize>262144</FsSize><TicketSize>848</TicketSize><TMDSize>4660</TMDSize></TitleVersion>`, tv.TitleId, tv.Version)
+		}
+		log.Printf("NUS: GetSystemUpdate echoing %d TitleVersion entries back with FsSize/TicketSize/TMDSize", len(titleVersions))
+
+		// 2026-09-17: confirmed via a real A/B test that an empty
+		// TitleVersion list makes nim reject the response outright
+		// (009-6509, its own structural rejection) - echoing every
+		// requested title back (this full list) is what gets nim to
+		// actually accept the response and proceed past its own
+		// update-check stage (verified via mitmproxy: with this in place,
+		// the failure moves to 005-4034 at mint's stage instead, i.e.
+		// further down the real flow). Do not remove this list again.
+		//
+		// 2026-09-17: nim's own GetSystemUpdate response parser (traced via
+		// Ghidra decompilation of code.bin) explicitly looks up a
+		// <TitleHash> element and takes an error path if it's missing or
+		// not exactly 32 chars long - this response never included one.
+		// Reusing the same dummy value GetSystemTitleHash already returns
+		// successfully, since nim calls that endpoint immediately before
+		// every GetSystemUpdate and this is very likely the same value it
+		// expects echoed back here.
+		fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><soapenv:Body><GetSystemUpdateResponse xmlns="urn:nus.wsapi.broadon.com"><Version>1.0</Version><DeviceId>%s</DeviceId><MessageId>%s</MessageId><TimeStamp>%d</TimeStamp><ErrorCode>0</ErrorCode><TitleHash>D2F8020CA37AC652691BF17CDD610182</TitleHash><ContentPrefixURL>https://nus.c.shop.nicoch.net/ccs/download</ContentPrefixURL><UncachedContentPrefixURL>https://nus.c.shop.nicoch.net/ccs/download</UncachedContentPrefixURL>%s<UploadAuditData>1</UploadAuditData></GetSystemUpdateResponse></soapenv:Body></soapenv:Envelope>`,
+			deviceID, messageID, time.Now().Unix(), titleVersionsXML.String())
+
+	default:
+		// Unrecognized NUS method - log the full raw request for review
+		// rather than guessing at a response shape blind, same policy as
+		// ECS's default case.
+		log.Printf("NUS: unrecognized method %q, full body: %s", method.XMLName.Local, string(body))
+		fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><soapenv:Body><%sResponse xmlns="urn:nus.wsapi.broadon.com"><Version>1.0</Version><DeviceId>%s</DeviceId><MessageId>%s</MessageId><TimeStamp>%d</TimeStamp><ErrorCode>0</ErrorCode></%sResponse></soapenv:Body></soapenv:Envelope>`,
+			method.XMLName.Local, deviceID, messageID, time.Now().Unix(), method.XMLName.Local)
+	}
+}
+
+// 2026-09-17: ias.c.shop.nicoch.net and cas.c.shop.nicoch.net (advertised in
+// GetAccountStatus's IasURL/CasURL fields) had no route at all - they fell
+// through to handleOLV (a completely unrelated Miiverse/OLV handler), which
+// can't produce a valid SOAP response. nim's generic HTTP response parser
+// (traced via Ghidra decompilation of code.bin, FUN_00113c84) returns a
+// hardcoded 0xC920D086 (module=NIM, summary=Canceled) for any non-200/
+// unparseable response, which is the exact "Canceled" result observed on
+// every real "buy plays" attempt tonight. No public reference exists for
+// IAS/CAS response shapes (unlike ECS/NUS), so this is a best-effort
+// generic-success echo, same policy as ECS/NUS's own default cases.
+func handleIAS(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "read error", http.StatusInternalServerError)
+		return
+	}
+	captureShopRequest("ias", r, body)
+
+	var env soapEnvelope
+	if err := xml.Unmarshal(body, &env); err != nil {
+		log.Printf("IAS: failed to parse SOAP body: %v (body=%s)", err, string(body))
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	method := env.Body.Method
+	deviceID := soapFieldValue(method.Fields, "DeviceId")
+	messageID := soapFieldValue(method.Fields, "MessageId")
+	log.Printf("IAS: %s DeviceId=%s MessageId=%s, full body: %s", method.XMLName.Local, deviceID, messageID, string(body))
+
+	w.Header().Set("Content-Type", "text/plain")
+	// Namespace matches PretendoNetwork/SOAP's real WUP IAS handler (see
+	// comment on the DeleteSavedCard response above) rather than a guessed
+	// ias.wsapi.broadon.com - low confidence (that file shows signs of being
+	// a copy-paste of their ecs.js), but plausible and doesn't hurt.
+	fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><soapenv:Body><%sResponse xmlns="urn:ecs.wsapi.broadon.com"><Version>1.0</Version><DeviceId>%s</DeviceId><MessageId>%s</MessageId><TimeStamp>%d</TimeStamp><ErrorCode>0</ErrorCode></%sResponse></soapenv:Body></soapenv:Envelope>`,
+		method.XMLName.Local, deviceID, messageID, time.Now().Unix(), method.XMLName.Local)
+}
+
+// 2026-09-17: npvk.app.pretendo.cc/reports - the exact same URL hardcoded in
+// Badge Arcade's own binary (CENTER, as "https://npvk.app.nintendo.net/reports",
+// found via Ghidra string search right next to X-BOSS-TaskId/nim:aoc content) -
+// times out via the generic proxy (wiiUHTTPClient's 10s timeout, same class of
+// issue as the already-documented onl-npns.app.pretendo.cc hang). Right after a
+// successful GetSystemUpdate during a real "buy plays" attempt, this is called
+// and gets nothing back before nim's own internal timeout - very plausibly
+// shorter than our 10s proxy timeout - gives up first and treats it as a
+// failure, which would explain the "Canceled" result regardless of anything
+// else being otherwise correct. No reference exists for this endpoint's real
+// response shape (it's not a broadon SOAP service at all, likely Pretendo's
+// own or a generic telemetry/violation-report sink), so respond fast with an
+// empty success rather than waiting on Pretendo's real, apparently-unreliable
+// server for what's very likely a fire-and-forget report anyway.
+func handleNPVK(w http.ResponseWriter, r *http.Request) {
+	io.Copy(io.Discard, r.Body)
+	log.Printf("NPVK: %s %s from %s -> fast local empty-success (was timing out via generic proxy)", r.Method, r.URL.Path, realIP(r))
+	w.WriteHeader(http.StatusOK)
+}
+
+func handleCAS(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "read error", http.StatusInternalServerError)
+		return
+	}
+	captureShopRequest("cas", r, body)
+
+	var env soapEnvelope
+	if err := xml.Unmarshal(body, &env); err != nil {
+		log.Printf("CAS: failed to parse SOAP body: %v (body=%s)", err, string(body))
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	method := env.Body.Method
+	deviceID := soapFieldValue(method.Fields, "DeviceId")
+	messageID := soapFieldValue(method.Fields, "MessageId")
+	log.Printf("CAS: %s DeviceId=%s MessageId=%s, full body: %s", method.XMLName.Local, deviceID, messageID, string(body))
+
+	w.Header().Set("Content-Type", "text/plain")
+	fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><soapenv:Body><%sResponse xmlns="urn:ecs.wsapi.broadon.com"><Version>1.0</Version><DeviceId>%s</DeviceId><MessageId>%s</MessageId><TimeStamp>%d</TimeStamp><ErrorCode>0</ErrorCode></%sResponse></soapenv:Body></soapenv:Envelope>`,
+		method.XMLName.Local, deviceID, messageID, time.Now().Unix(), method.XMLName.Local)
 }

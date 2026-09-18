@@ -10,6 +10,7 @@ When a Wii U connects to Revivetendo, it gets routed through our servers which h
 - **Miiverse (Juxtaposition)** — posting, communities, and screenshots
 - **Mario Kart 8** — online matchmaking and races
 - **Angry Birds Star Wars** — online features
+- **Nintendo Badge Arcade** — badge crane games and free play data (3DS)
 
 ## Services
 
@@ -20,6 +21,8 @@ When a Wii U connects to Revivetendo, it gets routed through our servers which h
 | `grpc-stubs` | Shared gRPC client stubs for talking to Pretendo's account server |
 | `relay-admin` | Web dashboard for monitoring connected users and online status |
 | `discord-bot` | Discord bot with PNID linking, WiiU Chat call notifications, and Mii rendering |
+| `badge-arcade-authentication` | Nintendo Badge Arcade NEX authentication server (fork of [PretendoNetwork/nintendo-badge-arcade-authentication](https://github.com/Happynico7504/nintendo-badge-arcade-authentication)) |
+| `badge-arcade-secure` | Nintendo Badge Arcade NEX secure server — DataStore/S3 badge data (fork of [PretendoNetwork/nintendo-badge-arcade-secure](https://github.com/Happynico7504/nintendo-badge-arcade-secure)) |
 
 ## Submodules
 

@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
 """Revivetendo Bot — community Discord bot for the Revivetendo Pretendo Bridge."""
 
+import array
 import asyncio
 import base64
 import io
 import os
 import random
 import secrets
+import tempfile
+import threading
+import time as _time
+import wave
 from datetime import datetime, time, timedelta, timezone
 
 import discord
 from discord import app_commands
-from discord.ext import commands, tasks
+from discord.ext import commands, tasks, voice_recv
+import davey
+from piper import PiperVoice
 import psycopg2
 import aiohttp
 from aiohttp import web, ClientSession
@@ -80,6 +87,10 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 _guild = discord.Object(id=GUILD_ID)
+
+# Local TTS (Piper, fully offline - no cloud API). Loaded once at startup since
+# loading the model takes ~1.5s; synthesis itself is ~0.3s/sentence once warm.
+piper_voice = PiperVoice.load(os.path.join(os.path.dirname(__file__), "piper-voices", "en_US-lessac-medium.onnx"))
 
 def _now():
     return datetime.now(timezone.utc)
@@ -437,6 +448,518 @@ async def mii_of_the_day():
     embed.set_footer(text=f"PNID: {pnid}")
     await channel.send(embed=embed, file=discord.File(io.BytesIO(img_data), filename="mii.png"))
     print(f"[bot] mii_of_the_day: posted {pnid}", flush=True)
+
+
+def _mii_embed(pnid: str, mii_name: str) -> discord.Embed:
+    embed = discord.Embed(title=mii_name, color=0x7c3aed)
+    embed.set_image(url="attachment://mii.png")
+    embed.set_footer(text=f"PNID: {pnid}")
+    return embed
+
+
+@bot.tree.command(guild=_guild, name="mii_slideshow", description="Show a new random Mii every 5 seconds for a while")
+@app_commands.describe(minutes="How many minutes to run for (default 1, max 5)")
+async def mii_slideshow(interaction: discord.Interaction, minutes: app_commands.Range[float, 0.5, 5.0] = 1.0):
+    await interaction.response.defer()
+
+    picked = _pick_random_mii()
+    if not picked:
+        await interaction.followup.send("❌ No Mii data found yet.", ephemeral=True)
+        return
+    pnid, mii_name, mii_bytes = picked
+
+    async with ClientSession() as session:
+        img_data, render_err = await _render_mii_png(mii_bytes, session)
+    if render_err:
+        await interaction.followup.send(f"❌ {render_err}", ephemeral=True)
+        return
+
+    message = await interaction.followup.send(
+        embed=_mii_embed(pnid, mii_name),
+        file=discord.File(io.BytesIO(img_data), filename="mii.png"),
+        wait=True,
+    )
+
+    end_at = _time.monotonic() + minutes * 60
+    async with ClientSession() as session:
+        while _time.monotonic() < end_at:
+            await asyncio.sleep(5)
+            picked = _pick_random_mii()
+            if not picked:
+                continue
+            pnid, mii_name, mii_bytes = picked
+            img_data, render_err = await _render_mii_png(mii_bytes, session)
+            if render_err:
+                continue
+            try:
+                await message.edit(embed=_mii_embed(pnid, mii_name), attachments=[discord.File(io.BytesIO(img_data), filename="mii.png")])
+            except discord.HTTPException as e:
+                print(f"[bot] mii_slideshow: edit failed, stopping early: {e}", flush=True)
+                break
+
+
+@bot.tree.command(guild=_guild, name="startmiitv", description="Launch the Mii TV slideshow Activity in your voice channel")
+async def startmiitv(interaction: discord.Interaction):
+    member = interaction.user
+    if not isinstance(member, discord.Member) or member.voice is None or member.voice.channel is None:
+        await interaction.response.send_message("❌ You need to be in a voice channel first.", ephemeral=True)
+        return
+
+    client_id = os.environ.get("DISCORD_ACTIVITY_CLIENT_ID")
+    if not client_id:
+        await interaction.response.send_message("❌ Mii TV isn't set up yet (missing DISCORD_ACTIVITY_CLIENT_ID).", ephemeral=True)
+        return
+
+    try:
+        invite = await member.voice.channel.create_invite(
+            target_type=discord.InviteTarget.embedded_application,
+            target_application_id=int(client_id),
+            max_age=300,
+        )
+    except (discord.HTTPException, ValueError) as e:
+        await interaction.response.send_message(f"❌ Couldn't start Mii TV: {e}", ephemeral=True)
+        return
+
+    await interaction.response.send_message(f"📺 **Mii TV** is starting in **{member.voice.channel.name}** — click to join: {invite.url}")
+
+
+def _synthesize_tts_wav(text: str) -> str:
+    fd, path = tempfile.mkstemp(suffix=".wav", prefix="tts-")
+    os.close(fd)
+    with wave.open(path, "wb") as wf:
+        piper_voice.synthesize_wav(text, wf)
+    return path
+
+
+@bot.tree.command(guild=_guild, name="revivetendo_tts", description="Speak text out loud in your voice channel (local TTS)")
+@app_commands.describe(text="What to say (max 500 characters)")
+async def revivetendo_tts(interaction: discord.Interaction, text: app_commands.Range[str, 1, 500]):
+    vc = interaction.guild.voice_client if interaction.guild else None
+    if vc is None:
+        await interaction.response.send_message("❌ I'm not in a voice channel — use `/joinvc` first.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        wav_path = await asyncio.to_thread(_synthesize_tts_wav, text)
+    except Exception as e:
+        print(f"[bot] revivetendo_tts: synthesis failed: {e}", flush=True)
+        await interaction.followup.send("❌ TTS synthesis failed.", ephemeral=True)
+        return
+
+    try:
+        mixer = _get_or_create_mixer(vc)
+        source = discord.FFmpegPCMAudio(wav_path)
+        playback_done = asyncio.Event()
+        mixer.add_source(_NotifyingSource(source, lambda: bot.loop.call_soon_threadsafe(playback_done.set)))
+        await playback_done.wait()
+    finally:
+        os.remove(wav_path)
+
+    await interaction.followup.send("🗣️ Said it.", ephemeral=True)
+
+
+# ──────────────────────────────────────────────
+# Audio mixer — shared by /joinvc's clip playback and /revivetendo_tts so they
+# can't stomp on each other. discord.py's VoiceClient only ever allows ONE
+# AudioSource to be handed to vc.play() at a time (a second call while
+# something's already playing raises ClientException, or worse - if that
+# error was allowed to kill a coroutine mid-flow, it could leave the other
+# feature's asyncio.Event/cleanup dangling). Instead, each guild gets exactly
+# one _GuildMixer, passed to vc.play() once when the bot connects; everything
+# else (joinvc clips, TTS lines) is added to it as a sub-source and mixed by
+# summing PCM frames, so multiple things can genuinely play at once.
+# ──────────────────────────────────────────────
+
+class _GuildMixer(discord.AudioSource):
+    FRAME_SIZE = discord.opus.Encoder.FRAME_SIZE  # bytes per 20ms of 48kHz stereo s16le PCM
+    SILENCE_TIMEOUT = 3.0  # seconds of nothing to mix before we actually stop sending packets
+
+    def __init__(self, vc: discord.VoiceClient):
+        self._vc = vc
+        self._lock = threading.Lock()
+        self._sources: list[discord.AudioSource] = []
+        self._idle_since: float | None = None
+
+    def add_source(self, source: discord.AudioSource):
+        with self._lock:
+            self._sources.append(source)
+            self._idle_since = None
+        if self._vc.is_paused():
+            self._vc.resume()
+
+    def read(self) -> bytes:
+        with self._lock:
+            sources = list(self._sources)
+
+        mixed = array.array("h", bytes(self.FRAME_SIZE))
+        finished = []
+        any_data = False
+        for src in sources:
+            try:
+                chunk = src.read()
+            except Exception as e:
+                print(f"[bot] mixer: sub-source read failed, dropping it: {e}", flush=True)
+                chunk = b""
+            if not chunk:
+                finished.append(src)
+                continue
+            any_data = True
+            if len(chunk) < self.FRAME_SIZE:
+                chunk += b"\x00" * (self.FRAME_SIZE - len(chunk))
+            samples = array.array("h")
+            samples.frombytes(chunk[: self.FRAME_SIZE])
+            for i, s in enumerate(samples):
+                mixed[i] = max(-32768, min(32767, mixed[i] + s))
+
+        if finished:
+            with self._lock:
+                for f in finished:
+                    if f in self._sources:
+                        self._sources.remove(f)
+            for f in finished:
+                try:
+                    f.cleanup()
+                except Exception:
+                    pass
+
+        if any_data:
+            with self._lock:
+                self._idle_since = None
+            return mixed.tobytes()
+
+        # Nothing to mix this frame. After SILENCE_TIMEOUT seconds of that,
+        # actually pause the underlying player instead of forever streaming
+        # silence - vc.pause() sends the standard 5-frame comfort-noise burst
+        # itself, then genuinely stops sending packets until add_source()
+        # resumes it. (Returning b"" here instead would tell discord.py the
+        # *mixer itself* is exhausted and end the voice stream permanently.)
+        now = _time.monotonic()
+        with self._lock:
+            if self._idle_since is None:
+                self._idle_since = now
+            idle_for = now - self._idle_since
+        if idle_for >= self.SILENCE_TIMEOUT and not self._vc.is_paused():
+            self._vc.pause()
+        return b"\x00" * self.FRAME_SIZE
+
+    def is_opus(self) -> bool:
+        return False
+
+    def cleanup(self):
+        with self._lock:
+            sources, self._sources = self._sources, []
+        for s in sources:
+            try:
+                s.cleanup()
+            except Exception:
+                pass
+
+
+class _NotifyingSource(discord.AudioSource):
+    """Wraps a sub-source so the mixer can host it while still letting the
+    caller know when it's done playing (mixer.add_source has no built-in
+    equivalent of vc.play()'s `after` callback)."""
+
+    def __init__(self, source: discord.AudioSource, on_done):
+        self._source = source
+        self._on_done = on_done
+        self._notified = False
+
+    def read(self) -> bytes:
+        chunk = self._source.read()
+        if not chunk and not self._notified:
+            self._notified = True
+            self._on_done()
+        return chunk
+
+    def is_opus(self) -> bool:
+        return self._source.is_opus()
+
+    def cleanup(self):
+        self._source.cleanup()
+
+
+def _get_or_create_mixer(vc: discord.VoiceClient) -> _GuildMixer:
+    mixer = getattr(vc, "mixer", None)
+    if mixer is None:
+        mixer = _GuildMixer(vc)
+        vc.mixer = mixer
+        vc.play(mixer)
+    return mixer
+
+
+# ──────────────────────────────────────────────
+# Voice clip playback — /joinvc
+# ──────────────────────────────────────────────
+
+_active_voice_sessions: dict[int, asyncio.Event] = {}  # guild ID -> leave-requested event, for guilds /joinvc is currently active in
+
+
+class _VoiceRecordSession:
+    """Captures up to 15s of PCM from the first non-bot member to speak in the VC,
+    stopping early after a short silence gap. on_audio() runs on voice_recv's
+    background packet-router thread (not the event loop), so state is guarded by a
+    lock and completion is signalled back onto the bot's loop via call_soon_threadsafe.
+
+    Real Discord clients now always negotiate DAVE end-to-end voice encryption, so the
+    bytes voice_recv hands us (VoiceData.opus, with decode=False) are still
+    DAVE-encrypted, not plain Opus — voice_recv predates DAVE and knows nothing about
+    it. We unwrap that ourselves via the `davey` session discord.py already maintains
+    for sending (vc._connection.dave_session), which exposes the matching decrypt()
+    primitive, then Opus-decode the result ourselves. Bots/other non-E2EE participants
+    use DAVE's "passthrough" mode instead (plain Opus already) — dave_session.can_passthrough
+    tells us which path a given sender is on."""
+
+    SAMPLE_RATE = 48000
+    CHANNELS = 2
+    SAMPLE_WIDTH = 2
+    MAX_SECONDS = 15.0
+    SILENCE_GAP_SECONDS = 1.0
+    MIN_SECONDS_BEFORE_SILENCE_STOP = 0.5
+
+    def __init__(self, loop: asyncio.AbstractEventLoop, vc: "voice_recv.VoiceRecvClient"):
+        self._loop = loop
+        self._lock = threading.Lock()
+        self._buffer = bytearray()
+        self._target_id: int | None = None
+        self._target_name: str | None = None
+        self._last_packet_at: float | None = None
+        self._done = asyncio.Event()
+        self.result: tuple[bytes, str] | None = None
+        self._dave = vc._connection.dave_session
+        self._decoder = discord.opus.Decoder()
+        # Diagnostics only — see run()'s periodic summary print.
+        self.total_packets = 0
+        self.none_user_packets = 0
+        self.bot_packets = 0
+        self.dave_errors = 0
+        self.other_user_ids: set = set()
+
+    def _max_bytes(self) -> int:
+        return int(self.MAX_SECONDS * self.SAMPLE_RATE * self.CHANNELS * self.SAMPLE_WIDTH)
+
+    def _min_bytes(self) -> int:
+        return int(self.MIN_SECONDS_BEFORE_SILENCE_STOP * self.SAMPLE_RATE * self.CHANNELS * self.SAMPLE_WIDTH)
+
+    def on_audio(self, user, data):
+        """Sink callback for voice_recv.BasicSink — ignores unresolved SSRCs and bots,
+        locks onto the first other speaker, and ignores anyone else until done."""
+        self.total_packets += 1
+        if user is None:
+            self.none_user_packets += 1
+            return
+        if getattr(user, "bot", False):
+            self.bot_packets += 1
+            return
+        self.other_user_ids.add(user.id)
+        with self._lock:
+            if self._done.is_set():
+                return
+            if self._target_id is None:
+                self._target_id = user.id
+                self._target_name = getattr(user, "display_name", None) or str(user)
+            elif user.id != self._target_id:
+                return
+
+        try:
+            if self._dave is not None and not self._dave.can_passthrough(user.id):
+                opus_bytes = self._dave.decrypt(user.id, davey.MediaType.audio, data.opus)
+            else:
+                opus_bytes = data.opus
+            pcm = self._decoder.decode(opus_bytes, fec=False)
+        except Exception:
+            # Expected occasionally (e.g. a stray frame during a DAVE key rotation) —
+            # just drop this frame and keep going.
+            self.dave_errors += 1
+            return
+
+        should_finish = False
+        with self._lock:
+            if self._done.is_set():
+                return
+            self._buffer.extend(pcm)
+            self._last_packet_at = _time.monotonic()
+            if len(self._buffer) >= self._max_bytes():
+                should_finish = True
+        if should_finish:
+            self._loop.call_soon_threadsafe(self._finish)
+
+    def _finish(self):
+        if self._done.is_set():
+            return
+        with self._lock:
+            if self._buffer:
+                self.result = (bytes(self._buffer), self._target_name or "someone")
+            buffered = len(self._buffer)
+        print(
+            f"[joinvc] captured {buffered} bytes from {self._target_name!r} "
+            f"(packets: total={self.total_packets} bot={self.bot_packets} dropped={self.dave_errors})",
+            flush=True,
+        )
+        self._done.set()
+
+    async def run(self) -> "tuple[bytes, str] | None":
+        """Waits indefinitely for someone to speak and finish speaking. The caller
+        (joinvc's loop) is responsible for cancelling this if it needs to stop for
+        another reason (empty channel, /leavevc)."""
+        while not self._done.is_set():
+            try:
+                await asyncio.wait_for(self._done.wait(), timeout=0.3)
+            except asyncio.TimeoutError:
+                pass
+            with self._lock:
+                has_target = self._target_id is not None and self._last_packet_at is not None
+                silent_for = (_time.monotonic() - self._last_packet_at) if has_target else 0.0
+                enough_captured = len(self._buffer) >= self._min_bytes()
+
+            if has_target and silent_for >= self.SILENCE_GAP_SECONDS and enough_captured:
+                self._finish()
+                break
+        return self.result
+
+
+def _write_pcm_to_wav(pcm: bytes) -> str:
+    fd, path = tempfile.mkstemp(suffix=".wav", prefix="joinvc-")
+    os.close(fd)
+    with wave.open(path, "wb") as wf:
+        wf.setnchannels(_VoiceRecordSession.CHANNELS)
+        wf.setsampwidth(_VoiceRecordSession.SAMPLE_WIDTH)
+        wf.setframerate(_VoiceRecordSession.SAMPLE_RATE)
+        wf.writeframes(pcm)
+    return path
+
+
+EMPTY_CHANNEL_TIMEOUT_SECONDS = 45.0
+
+
+async def _disconnect_when_empty(vc: "voice_recv.VoiceRecvClient", timeout: float):
+    """Returns once the bot's voice channel has had zero non-bot members for `timeout`
+    seconds straight. Runs for as long as the caller races it against."""
+    empty_since = None
+    while vc.is_connected():
+        await asyncio.sleep(2)
+        if not any(not m.bot for m in vc.channel.members):
+            empty_since = empty_since or _time.monotonic()
+            if _time.monotonic() - empty_since >= timeout:
+                return
+        else:
+            empty_since = None
+
+
+async def _record_and_playback_once(vc: "voice_recv.VoiceRecvClient", interaction: discord.Interaction):
+    """One listen-record-playback cycle. Waits indefinitely for a speaker; joinvc's
+    loop cancels this (between cycles it's safe to cancel) to stop the whole session."""
+    session = _VoiceRecordSession(bot.loop, vc)
+    vc.listen(voice_recv.BasicSink(session.on_audio, decode=False))
+    result = await session.run()
+    vc.stop_listening()
+
+    if result is None:
+        return
+
+    pcm, _ = result
+
+    wav_path = await asyncio.to_thread(_write_pcm_to_wav, pcm)
+    try:
+        mixer = _get_or_create_mixer(vc)
+        source = discord.FFmpegPCMAudio(wav_path, options="-filter:a asetrate=48000*1.5,aresample=48000")
+        playback_done = asyncio.Event()
+        mixer.add_source(_NotifyingSource(source, lambda: bot.loop.call_soon_threadsafe(playback_done.set)))
+        await playback_done.wait()
+    finally:
+        os.remove(wav_path)
+
+
+@bot.tree.command(guild=_guild, name="joinvc", description="Join your VC and keep playing back sped-up clips of whoever talks (use /leavevc to stop)")
+async def joinvc(interaction: discord.Interaction):
+    member = interaction.user
+    if not isinstance(member, discord.Member) or member.voice is None or member.voice.channel is None:
+        await interaction.response.send_message("❌ You need to be in a voice channel first.", ephemeral=True)
+        return
+
+    guild_id = interaction.guild_id
+    if guild_id in _active_voice_sessions:
+        await interaction.response.send_message("🎙️ Already active in a voice channel in this server — use `/leavevc` first.", ephemeral=True)
+        return
+
+    channel = member.voice.channel
+    leave_event = asyncio.Event()
+    _active_voice_sessions[guild_id] = leave_event
+    try:
+        await interaction.response.send_message(
+            f"🎙️ Joining **{channel.name}** — say something and I'll play it back sped up! "
+            f"I'll keep listening until the channel's empty for {int(EMPTY_CHANNEL_TIMEOUT_SECONDS)}s or someone runs `/leavevc`."
+        )
+
+        try:
+            vc = await channel.connect(cls=voice_recv.VoiceRecvClient)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Couldn't join the voice channel: {e}")
+            return
+
+        _get_or_create_mixer(vc)
+
+        dave_version = getattr(vc._connection, "dave_protocol_version", None)
+        print(
+            f"[joinvc] connected to {channel.name!r} (guild={guild_id}) mode={vc.mode!r} "
+            f"dave_protocol_version={dave_version} members={[ (m.name, m.bot) for m in channel.members ]}",
+            flush=True,
+        )
+
+        try:
+            empty_task = asyncio.ensure_future(_disconnect_when_empty(vc, EMPTY_CHANNEL_TIMEOUT_SECONDS))
+            leave_task = asyncio.ensure_future(leave_event.wait())
+            stop_reason = "leave"
+            while True:
+                record_task = asyncio.ensure_future(_record_and_playback_once(vc, interaction))
+                done, _pending = await asyncio.wait({record_task, empty_task, leave_task}, return_when=asyncio.FIRST_COMPLETED)
+
+                if record_task in done:
+                    exc = record_task.exception()
+                    if exc:
+                        raise exc
+                    continue  # played a clip - go listen for the next speaker
+
+                record_task.cancel()
+                try:
+                    await record_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                stop_reason = "empty" if empty_task in done else "leave"
+                break
+
+            for t in (empty_task, leave_task):
+                if not t.done():
+                    t.cancel()
+
+            if stop_reason == "empty":
+                await interaction.followup.send(f"👋 Nobody's been in the channel for {int(EMPTY_CHANNEL_TIMEOUT_SECONDS)}s — leaving.")
+            else:
+                await interaction.followup.send("👋 Leaving now.")
+        finally:
+            await vc.disconnect()
+    finally:
+        _active_voice_sessions.pop(guild_id, None)
+
+
+@bot.tree.command(guild=_guild, name="leavevc", description="Make the bot leave the voice channel it's currently in")
+async def leavevc(interaction: discord.Interaction):
+    guild_id = interaction.guild_id
+    leave_event = _active_voice_sessions.get(guild_id)
+    if leave_event is not None:
+        leave_event.set()
+        await interaction.response.send_message("👋 Leaving now.")
+        return
+
+    vc = interaction.guild.voice_client if interaction.guild else None
+    if vc is not None:
+        await vc.disconnect(force=True)
+        await interaction.response.send_message("👋 Leaving now.")
+        return
+
+    await interaction.response.send_message("❌ I'm not in a voice channel right now.", ephemeral=True)
 
 
 @bot.tree.command(guild=_guild, name="whois", description="Look up the linked PNID for a Discord user")

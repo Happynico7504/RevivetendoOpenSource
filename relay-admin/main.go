@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
@@ -13,20 +14,43 @@ import (
 	"io"
 	"log"
 	"math"
+	mrand "math/rand/v2"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/redis/go-redis/v9"
 )
+
+// runtimeCache - same pattern as account-proxy's (see project_redis_runtime_cache
+// memory): a small shared Redis-backed cache for routine tasks to persist
+// resources across restarts, keyed/TTL'd per caller. Fails open on a Redis
+// outage (reports a miss / silently no-ops) rather than breaking the caller.
+var runtimeCacheClient = redis.NewClient(&redis.Options{
+	Addr: "127.0.0.1:6379",
+})
+
+func runtimeCacheGet(ctx context.Context, key string) (string, bool) {
+	val, err := runtimeCacheClient.Get(ctx, key).Result()
+	if err != nil {
+		return "", false
+	}
+	return val, true
+}
+
+func runtimeCacheSet(ctx context.Context, key string, value string, ttl time.Duration) {
+	if err := runtimeCacheClient.Set(ctx, key, value, ttl).Err(); err != nil {
+		log.Printf("runtimeCache: set failed for key %q: %v", key, err)
+	}
+}
 
 var gameServerTitles = map[string]string{
 	"00003200": "Friends / Presence",
@@ -41,10 +65,28 @@ var gameServerTitles = map[string]string{
 	"10104E00": "Animal Crossing: amiibo Festival",
 	"1019EC00": "Yo-Kai Watch Blasters",
 	"10189B00": "Pokémon Rumble World",
+	"00134600": "Nintendo Badge Arcade",
+}
+
+// formatHMS renders a duration as hh:mm:ss (hours are not capped at 24).
+func formatHMS(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	s := int64(d.Seconds())
+	return fmt.Sprintf("%02d:%02d:%02d", s/3600, (s%3600)/60, s%60)
 }
 
 var tmplFuncs = template.FuncMap{
 	"add1": func(i int) int { return i + 1 },
+	// connectedFor renders how long a connection established at the given unix
+	// time has been up, as hh:mm:ss ("—" when unknown).
+	"connectedFor": func(since int64) string {
+		if since <= 0 {
+			return "—"
+		}
+		return formatHMS(time.Since(time.Unix(since, 0)))
+	},
 	"gameTitle": func(id string) string {
 		if id == "" {
 			return "—"
@@ -179,14 +221,6 @@ CREATE TABLE IF NOT EXISTS relay_requests (
 	requested_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS user_access (
-	pid            BIGINT      NOT NULL,
-	game_server_id TEXT        NOT NULL,
-	note           TEXT,
-	created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-	PRIMARY KEY (pid, game_server_id)
-);
-
 CREATE TABLE IF NOT EXISTS banned_users (
 	pid            BIGINT      PRIMARY KEY,
 	reason         TEXT,
@@ -229,15 +263,6 @@ CREATE TABLE IF NOT EXISTS n3ds_system_messages (
 );
 ALTER TABLE n3ds_system_messages ADD COLUMN IF NOT EXISTS region TEXT NOT NULL DEFAULT '';
 
-CREATE TABLE IF NOT EXISTS review_queue (
-	pid            BIGINT      NOT NULL,
-	game_server_id TEXT        NOT NULL,
-	first_seen     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-	last_seen      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-	attempt_count  INTEGER     NOT NULL DEFAULT 1,
-	PRIMARY KEY (pid, game_server_id)
-);
-
 CREATE TABLE IF NOT EXISTS admin_certs (
 	id         SERIAL      PRIMARY KEY,
 	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -254,18 +279,22 @@ CREATE TABLE IF NOT EXISTS pnid_cache (
 
 const seedRedirects = `
 INSERT INTO redirects (type, from_host, to_host, game_server_id, port, access_mode)
-SELECT 'dns', 'account.pretendo.cc', '45.157.178.35', '1005A000', 60004, 'whitelist'
+SELECT 'dns', 'account.pretendo.cc', '45.157.178.35', '1005A000', 60004, 'open'
 WHERE NOT EXISTS (SELECT 1 FROM redirects WHERE game_server_id = '1005A000');
 
 UPDATE redirects SET port = 60004 WHERE game_server_id = '1005A000' AND port IS NULL;
 
 INSERT INTO redirects (type, from_host, to_host, game_server_id, port, access_mode)
-SELECT 'dns', 'account.pretendo.cc', '45.157.178.35', '1010EB00', 60002, 'whitelist'
+SELECT 'dns', 'account.pretendo.cc', '45.157.178.35', '1010EB00', 60002, 'open'
 WHERE NOT EXISTS (SELECT 1 FROM redirects WHERE game_server_id = '1010EB00');
 
 INSERT INTO redirects (type, from_host, to_host, game_server_id, port, access_mode)
 SELECT 'dns', 'account.pretendo.cc', '45.157.178.35', '101D9D00', 60016, 'open'
 WHERE NOT EXISTS (SELECT 1 FROM redirects WHERE game_server_id = '101D9D00');
+
+INSERT INTO redirects (type, from_host, to_host, game_server_id, port, access_mode)
+SELECT 'dns', 'account.pretendo.cc', '45.157.178.35', '00134600', 60018, 'open'
+WHERE NOT EXISTS (SELECT 1 FROM redirects WHERE game_server_id = '00134600');
 `
 
 type Redirect struct {
@@ -278,14 +307,6 @@ type Redirect struct {
 	Port         int       `json:"port,omitempty"`
 	AccessMode   string    `json:"access_mode"`
 	Enabled      bool      `json:"enabled"`
-	CreatedAt    time.Time `json:"created_at"`
-}
-
-type UserAccess struct {
-	PID          int64     `json:"pid"`
-	PNID         string    `json:"pnid,omitempty"`
-	GameServerID string    `json:"game_server_id"`
-	Note         string    `json:"note,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 }
 
@@ -302,15 +323,6 @@ type AccessLevelEntry struct {
 	AccessLevel int       `json:"access_level"`
 	Note        string    `json:"note,omitempty"`
 	UpdatedAt   time.Time `json:"updated_at"`
-}
-
-type ReviewEntry struct {
-	PID          int64     `json:"pid"`
-	PNID         string    `json:"pnid,omitempty"`
-	GameServerID string    `json:"game_server_id"`
-	FirstSeen    time.Time `json:"first_seen"`
-	LastSeen     time.Time `json:"last_seen"`
-	Attempts     int       `json:"attempts"`
 }
 
 type RecentRequest struct {
@@ -392,9 +404,11 @@ func main() {
 	}
 	db.Exec(`ALTER TABLE redirects ADD COLUMN IF NOT EXISTS game_server_id TEXT`)
 	db.Exec(`ALTER TABLE redirects ADD COLUMN IF NOT EXISTS port INTEGER`)
-	db.Exec(`ALTER TABLE redirects ADD COLUMN IF NOT EXISTS access_mode TEXT NOT NULL DEFAULT 'whitelist'`)
-	// Default existing open game-server redirects to whitelist so unknown users fall through to Pretendo.
-	db.Exec(`UPDATE redirects SET access_mode = 'whitelist' WHERE access_mode = 'open' AND game_server_id IS NOT NULL`)
+	db.Exec(`ALTER TABLE redirects ADD COLUMN IF NOT EXISTS access_mode TEXT NOT NULL DEFAULT 'open'`)
+	// Network is public now, not invite-only - new redirects (including ones added
+	// through the admin panel, which don't specify access_mode explicitly) should
+	// default to instant access rather than requiring a manual whitelist entry.
+	db.Exec(`ALTER TABLE redirects ALTER COLUMN access_mode SET DEFAULT 'open'`)
 
 	// swapdoodle's own DB/S3 - separate from wiiuchat, see adminSwapdoodle*.
 	// Loaded via absolute path since this process's cwd is the repo root, not
@@ -447,14 +461,15 @@ func main() {
 	http.HandleFunc("/my/discord", myDiscordHandler)
 	http.HandleFunc("/my/account", myAccountHandler)
 	http.HandleFunc("/my/", myHandler)
+	http.HandleFunc("/activity/random-mii", activityRandomMiiHandler)
+	http.HandleFunc("/activity/bgm.mp3", activityBGMHandler)
+	http.HandleFunc("/activity/logo.png", activityLogoHandler)
+	http.HandleFunc("/activity/", activityHandler)
 	http.HandleFunc("/admin/", requireClientCert(adminUI))
 	http.HandleFunc("/admin/add", requireClientCert(adminAdd))
 	http.HandleFunc("/admin/delete", requireClientCert(adminDelete))
 	http.HandleFunc("/admin/toggle", requireClientCert(adminToggle))
 
-	http.HandleFunc("/admin/users/", requireClientCert(adminUsers))
-	http.HandleFunc("/admin/users/add", requireClientCert(adminUserAdd))
-	http.HandleFunc("/admin/users/delete", requireClientCert(adminUserDelete))
 	http.HandleFunc("/admin/bans/", requireClientCert(adminBans))
 	http.HandleFunc("/admin/bans/add", requireClientCert(adminBanAdd))
 	http.HandleFunc("/admin/bans/remove", requireClientCert(adminBanRemove))
@@ -473,9 +488,6 @@ func main() {
 	http.HandleFunc("/admin/spotpass-3ds-sysmsg/add", requireClientCert(adminSpotpass3DSSysMsgAdd))
 	http.HandleFunc("/admin/spotpass-3ds-sysmsg/toggle", requireClientCert(adminSpotpass3DSSysMsgToggle))
 	http.HandleFunc("/admin/spotpass-3ds-sysmsg/remove", requireClientCert(adminSpotpass3DSSysMsgRemove))
-	http.HandleFunc("/admin/review/", requireClientCert(adminReview))
-	http.HandleFunc("/admin/review/approve", requireClientCert(adminReviewApprove))
-	http.HandleFunc("/admin/review/dismiss", requireClientCert(adminReviewDismiss))
 	http.HandleFunc("/admin/certs/rotate", requireClientCert(adminCertsRotate))
 	http.HandleFunc("/admin/client-cert.p12", requireClientCert(adminClientCert))
 
@@ -488,9 +500,6 @@ func main() {
 	http.HandleFunc("/admin/api/v1/redirects/add", requireClientCert(apiV1RedirectsAdd))
 	http.HandleFunc("/admin/api/v1/redirects/delete", requireClientCert(apiV1RedirectsDelete))
 	http.HandleFunc("/admin/api/v1/redirects/toggle", requireClientCert(apiV1RedirectsToggle))
-	http.HandleFunc("/admin/api/v1/users", requireClientCert(apiV1Users))
-	http.HandleFunc("/admin/api/v1/users/add", requireClientCert(apiV1UsersAdd))
-	http.HandleFunc("/admin/api/v1/users/delete", requireClientCert(apiV1UsersDelete))
 	http.HandleFunc("/admin/api/v1/bans", requireClientCert(apiV1Bans))
 	http.HandleFunc("/admin/api/v1/bans/add", requireClientCert(apiV1BansAdd))
 	http.HandleFunc("/admin/api/v1/bans/remove", requireClientCert(apiV1BansRemove))
@@ -506,9 +515,6 @@ func main() {
 	http.HandleFunc("/admin/api/v1/spotpass-3ds-sysmsg/add", requireClientCert(apiV1Spotpass3DSSysMsgAdd))
 	http.HandleFunc("/admin/api/v1/spotpass-3ds-sysmsg/toggle", requireClientCert(apiV1Spotpass3DSSysMsgToggle))
 	http.HandleFunc("/admin/api/v1/spotpass-3ds-sysmsg/remove", requireClientCert(apiV1Spotpass3DSSysMsgRemove))
-	http.HandleFunc("/admin/api/v1/review", requireClientCert(apiV1Review))
-	http.HandleFunc("/admin/api/v1/review/approve", requireClientCert(apiV1ReviewApprove))
-	http.HandleFunc("/admin/api/v1/review/dismiss", requireClientCert(apiV1ReviewDismiss))
 
 	http.HandleFunc("/wsc-public/", adminWSC)
 	http.HandleFunc("/wsc-public/nat/", wscNATInfo)
@@ -601,28 +607,6 @@ func allRedirects() []Redirect {
 	return list
 }
 
-func usersForGame(gameServerID string) []UserAccess {
-	rows, err := db.Query(`
-		SELECT u.pid, COALESCE(p.pnid, ''), u.game_server_id, COALESCE(u.note, ''), u.created_at
-		FROM user_access u
-		LEFT JOIN pnid_cache p ON p.pid = u.pid
-		WHERE UPPER(u.game_server_id) = UPPER($1) ORDER BY u.created_at DESC`, gameServerID)
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-	var list []UserAccess
-	for rows.Next() {
-		var u UserAccess
-		rows.Scan(&u.PID, &u.PNID, &u.GameServerID, &u.Note, &u.CreatedAt)
-		list = append(list, u)
-	}
-	if list == nil {
-		list = []UserAccess{}
-	}
-	return list
-}
-
 func allBans() []BannedUser {
 	rows, err := db.Query(`
 		SELECT b.pid, COALESCE(p.pnid, ''), COALESCE(b.reason, ''), b.created_at
@@ -697,34 +681,6 @@ func onlineUsers() []OnlineUser {
 	return list
 }
 
-func pendingReviews() []ReviewEntry {
-	rows, err := db.Query(`
-		SELECT r.pid, COALESCE(p.pnid, ''), r.game_server_id, r.first_seen, r.last_seen, r.attempt_count
-		FROM review_queue r
-		LEFT JOIN pnid_cache p ON p.pid = r.pid
-		ORDER BY r.last_seen DESC`)
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-	var list []ReviewEntry
-	for rows.Next() {
-		var e ReviewEntry
-		rows.Scan(&e.PID, &e.PNID, &e.GameServerID, &e.FirstSeen, &e.LastSeen, &e.Attempts)
-		list = append(list, e)
-	}
-	if list == nil {
-		list = []ReviewEntry{}
-	}
-	return list
-}
-
-func reviewCount() int {
-	var n int
-	db.QueryRow(`SELECT COUNT(*) FROM review_queue`).Scan(&n)
-	return n
-}
-
 // --- WSC dashboard ---
 
 const wscStatusURL = "http://127.0.0.1:9015/status"
@@ -738,11 +694,13 @@ var wscSportNames = map[int64]string{
 }
 
 type WSCPlayerRow struct {
-	PID  int64
-	PNID string
-	NATm int64
-	IP   string
-	Port string
+	PID         int64
+	PNID        string
+	NATm        int64
+	IP          string
+	Port        string
+	Region      string // "US"/"EU"/"JP", "" if unknown
+	ConnectedAt int64  // unix seconds the connection was established, 0 if unknown
 }
 
 type WSCGatheringRow struct {
@@ -818,10 +776,12 @@ func fetchWSCStatus() WSCDashData {
 
 	var raw struct {
 		Sessions []struct {
-			PID  int64  `json:"pid"`
-			NATm int64  `json:"natm"`
-			IP   string `json:"ip"`
-			Port string `json:"port"`
+			PID         int64  `json:"pid"`
+			NATm        int64  `json:"natm"`
+			IP          string `json:"ip"`
+			Port        string `json:"port"`
+			Region      string `json:"region"`
+			ConnectedAt int64  `json:"connected_at"`
 		} `json:"sessions"`
 		Gatherings []struct {
 			GID         int64   `json:"gid"`
@@ -877,11 +837,13 @@ func fetchWSCStatus() WSCDashData {
 
 	for _, s := range raw.Sessions {
 		data.Players = append(data.Players, WSCPlayerRow{
-			PID:  s.PID,
-			PNID: pnids[s.PID],
-			NATm: s.NATm,
-			IP:   s.IP,
-			Port: s.Port,
+			PID:         s.PID,
+			PNID:        pnids[s.PID],
+			NATm:        s.NATm,
+			IP:          s.IP,
+			Port:        s.Port,
+			Region:      s.Region,
+			ConnectedAt: s.ConnectedAt,
 		})
 	}
 
@@ -978,11 +940,13 @@ tr:last-child td{border-bottom:none}
 <h2>Connected Players{{if .Players}} <span style="background:#dcfce7;color:#166534;border-radius:999px;padding:.1rem .5rem;font-size:.75rem;font-weight:700;vertical-align:middle">{{len .Players}}</span>{{end}}</h2>
 {{if .Players}}
 <table>
-<tr><th>PNID</th><th>PID</th><th>NAT</th></tr>
+<tr><th>PNID</th><th>PID</th><th>Region</th><th>Connected</th><th>NAT</th></tr>
 {{range .Players}}
 <tr>
   <td>{{if .PNID}}<strong>@{{.PNID}}</strong>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
   <td class="mono">{{.PID}}</td>
+  <td>{{if .Region}}<span class="badge" style="background:#e0e7ff;color:#3730a3">{{.Region}}</span>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
+  <td class="mono"><span class="conn-time"{{if .ConnectedAt}} data-since="{{.ConnectedAt}}"{{end}}>{{connectedFor .ConnectedAt}}</span></td>
   <td>{{if eq .NATm 1}}<span class="badge on">Open</span>{{else if eq .NATm 2}}<span class="badge" style="background:#fef9c3;color:#854d0e">Moderate</span>{{else if eq .NATm 3}}<span class="badge off">Strict</span>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
 </tr>
 {{end}}
@@ -1054,6 +1018,16 @@ function tick() {
   document.getElementById('refresh-label').textContent = 'refreshes in ' + countdown + 's';
 }
 setInterval(tick, 1000);
+// Keep the per-player connection timers running between the 15s reloads.
+function pad2(n) { return (n < 10 ? '0' : '') + n; }
+function tickConn() {
+  var now = Math.floor(Date.now() / 1000);
+  document.querySelectorAll('.conn-time[data-since]').forEach(function(el) {
+    var s = Math.max(0, now - parseInt(el.getAttribute('data-since'), 10));
+    el.textContent = pad2(Math.floor(s / 3600)) + ':' + pad2(Math.floor((s % 3600) / 60)) + ':' + pad2(s % 60);
+  });
+}
+setInterval(tickConn, 1000);
 </script>
 ` + localTimeScript + `
 </body>
@@ -1200,9 +1174,12 @@ func apiWSCPlayers(w http.ResponseWriter, r *http.Request) {
 	miiNames := lookupMiiNames(pids)
 
 	type PlayerJSON struct {
-		PID     int64  `json:"pid"`
-		PNID    string `json:"pnid"`
-		MiiName string `json:"mii_name,omitempty"`
+		PID          int64  `json:"pid"`
+		PNID         string `json:"pnid"`
+		MiiName      string `json:"mii_name,omitempty"`
+		Region       string `json:"region,omitempty"`
+		ConnectedAt  int64  `json:"connected_at,omitempty"`  // unix seconds
+		ConnectedFor string `json:"connected_for,omitempty"` // hh:mm:ss
 	}
 	type GatheringJSON struct {
 		GID         int64        `json:"gid"`
@@ -1228,11 +1205,17 @@ func apiWSCPlayers(w http.ResponseWriter, r *http.Request) {
 
 	resp := ResponseJSON{ServerUp: data.ServerUp}
 	for _, p := range data.Players {
-		resp.Players = append(resp.Players, PlayerJSON{
-			PID:     p.PID,
-			PNID:    p.PNID,
-			MiiName: miiNames[p.PID],
-		})
+		pj := PlayerJSON{
+			PID:         p.PID,
+			PNID:        p.PNID,
+			MiiName:     miiNames[p.PID],
+			Region:      p.Region,
+			ConnectedAt: p.ConnectedAt,
+		}
+		if p.ConnectedAt > 0 {
+			pj.ConnectedFor = formatHMS(time.Since(time.Unix(p.ConnectedAt, 0)))
+		}
+		resp.Players = append(resp.Players, pj)
 	}
 	for _, g := range data.Gatherings {
 		gj := GatheringJSON{
@@ -1726,20 +1709,6 @@ h2{font-size:1rem;margin-bottom:.75rem;margin-top:2rem}
   <div class="card"><div class="num">{{.Stats.ActiveRedirects}}</div><div class="label">Active servers</div></div>
 </div>
 
-<h2>Approved players</h2>
-<table>
-<tr><th>PNID</th><th>Name</th><th>Game</th><th>Since</th></tr>
-{{range .Users}}
-<tr>
-  <td>{{if .PNID}}<strong>{{.PNID}}</strong>{{else}}<span style="font-family:monospace;color:#999;font-size:.85rem">{{.PID}}</span>{{end}}</td>
-  <td>{{if .Note}}{{.Note}}{{else}}<span style="color:#aaa">—</span>{{end}}</td>
-  <td><span class="tag">{{gameTitleFull .GameServerID}}</span></td>
-  <td style="font-size:.85rem;color:#666">{{.CreatedAt.Format "2006-01-02"}}</td>
-</tr>
-{{else}}<tr><td colspan="4" style="color:#aaa">No approved players yet</td></tr>
-{{end}}
-</table>
-
 <h2>Banned players</h2>
 <table>
 <tr><th>PNID</th><th>Reason</th><th>Banned</th></tr>
@@ -1750,20 +1719,6 @@ h2{font-size:1rem;margin-bottom:.75rem;margin-top:2rem}
   <td style="font-size:.85rem;color:#666">{{.CreatedAt.Format "2006-01-02"}}</td>
 </tr>
 {{else}}<tr><td colspan="3" style="color:#aaa">No banned players</td></tr>
-{{end}}
-</table>
-
-<h2>Pending access requests</h2>
-<table>
-<tr><th>PNID</th><th>Game</th><th>Attempts</th><th>Last seen</th></tr>
-{{range .Pending}}
-<tr>
-  <td>{{if .PNID}}<strong>{{.PNID}}</strong>{{else}}<span style="font-family:monospace;color:#999;font-size:.85rem">{{.PID}}</span>{{end}}</td>
-  <td><span class="tag">{{gameTitleFull .GameServerID}}</span></td>
-  <td style="color:#666">{{.Attempts}}</td>
-  <td style="font-size:.85rem;color:#666">{{localTime .LastSeen "datetime"}}</td>
-</tr>
-{{else}}<tr><td colspan="4" style="color:#aaa">No pending requests</td></tr>
 {{end}}
 </table>
 
@@ -1783,37 +1738,13 @@ h2{font-size:1rem;margin-bottom:.75rem;margin-top:2rem}
 </body>
 </html>`))
 
-func publicUsers() []UserAccess {
-	rows, err := db.Query(`
-		SELECT u.pid, COALESCE(p.pnid, ''), u.game_server_id, COALESCE(u.note, ''), u.created_at
-		FROM user_access u
-		LEFT JOIN pnid_cache p ON p.pid = u.pid
-		ORDER BY u.game_server_id, u.created_at`)
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-	var list []UserAccess
-	for rows.Next() {
-		var u UserAccess
-		rows.Scan(&u.PID, &u.PNID, &u.GameServerID, &u.Note, &u.CreatedAt)
-		list = append(list, u)
-	}
-	if list == nil {
-		list = []UserAccess{}
-	}
-	return list
-}
-
 func statsUI(w http.ResponseWriter, r *http.Request) {
 	data := struct {
-		Stats   Stats
-		Users   []UserAccess
-		Bans    []BannedUser
-		Pending []ReviewEntry
-		Recent  []RecentRequest
-		Host    string
-	}{collectStats(), publicUsers(), allBans(), pendingReviews(), recentRequests(20), siteHost}
+		Stats  Stats
+		Bans   []BannedUser
+		Recent []RecentRequest
+		Host   string
+	}{collectStats(), allBans(), recentRequests(20), siteHost}
 	w.Header().Set("Content-Type", "text/html")
 	statsTmpl.Execute(w, data)
 }
@@ -1932,7 +1863,6 @@ input[type=text],select{border:1px solid #d1d5db;border-radius:4px;padding:.4rem
 <p style="margin-bottom:1.5rem">
   <a href="/inkay/stats/" target="_blank">← Public stats</a> &nbsp;|&nbsp;
   <a class="dl" href="/inkay/admin/client-cert.p12" download="inkay-admin.p12">⬇ Download client cert</a> &nbsp;|&nbsp;
-  <a href="/inkay/admin/review/">🕐 Review queue{{if .ReviewCount}} <span style="background:#ef4444;color:#fff;border-radius:999px;padding:.1rem .45rem;font-size:.75rem;font-weight:700">{{.ReviewCount}}</span>{{end}}</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/bans/">🚫 Banned users</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/access/">🔑 Access levels</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/spotpass-wiiu/">📢 Wii U SpotPass</a> &nbsp;|&nbsp;
@@ -1984,9 +1914,6 @@ input[type=text],select{border:1px solid #d1d5db;border-radius:4px;padding:.4rem
       <input type="hidden" name="id" value="{{.ID}}">
       <button class="btn-tog" type="submit">{{if .Enabled}}Disable{{else}}Enable{{end}}</button>
     </form>
-    {{if .GameServerID}}
-    <a class="btn-link" href="/inkay/admin/users/?game={{.GameServerID}}">Users</a>
-    {{end}}
     <form method="post" action="/inkay/admin/delete" style="display:inline" onsubmit="return confirm('Delete redirect {{.ID}}?')">
       <input type="hidden" name="id" value="{{.ID}}">
       <button class="btn-del" type="submit">Delete</button>
@@ -2049,14 +1976,12 @@ func adminUI(w http.ResponseWriter, r *http.Request) {
 		Redirects         []Redirect
 		OnlineUsers       []OnlineUser
 		Msg               string
-		ReviewCount       int
 		CertAge           string
 		DaysUntilRotation int
 	}{
 		Redirects:         allRedirects(),
 		OnlineUsers:       onlineUsers(),
 		Msg:               msg,
-		ReviewCount:       reviewCount(),
 		CertAge:           certAgeLabel(cert),
 		DaysUntilRotation: daysUntilRotation(cert),
 	}
@@ -2141,149 +2066,6 @@ func adminToggle(w http.ResponseWriter, r *http.Request) {
 	}
 	db.Exec(`UPDATE redirects SET enabled = NOT enabled WHERE id = $1`, id)
 	http.Redirect(w, r, "/inkay/admin/", http.StatusSeeOther)
-}
-
-// --- User access management ---
-
-var usersTmpl = template.Must(template.New("users").Funcs(tmplFuncs).Parse(`<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>User Access — {{.Game}}</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-body{font-family:system-ui,sans-serif;max-width:700px;margin:2rem auto;padding:0 1rem;color:#222}
-h1{font-size:1.4rem}
-a{color:#2563eb}
-table{width:100%;border-collapse:collapse;font-size:.9rem;margin-bottom:2rem}
-th{text-align:left;border-bottom:2px solid #e4e4e7;padding:.5rem .75rem;color:#666;font-weight:600}
-td{padding:.5rem .75rem;border-bottom:1px solid #f0f0f0;vertical-align:middle}
-tr:last-child td{border-bottom:none}
-button,input{font:inherit}
-button{cursor:pointer;border:none;border-radius:4px;padding:.3rem .7rem;font-size:.85rem}
-.btn-del{background:#fee2e2;color:#991b1b}
-fieldset{border:1px solid #e4e4e7;border-radius:8px;padding:1rem 1.25rem;margin-bottom:2rem}
-legend{font-weight:600;padding:0 .4rem}
-.row{display:flex;gap:.75rem;flex-wrap:wrap;align-items:flex-end}
-.field{display:flex;flex-direction:column;gap:.3rem;flex:1;min-width:160px}
-label{font-size:.8rem;color:#666;font-weight:600}
-input[type=text]{border:1px solid #d1d5db;border-radius:4px;padding:.4rem .6rem;width:100%;box-sizing:border-box}
-.submit{background:#2563eb;color:#fff;padding:.4rem 1rem;cursor:pointer;border:none;border-radius:4px}
-.msg{background:#dcfce7;border:1px solid #bbf7d0;color:#166534;padding:.5rem 1rem;border-radius:6px;margin-bottom:1rem;font-size:.9rem}
-.mode-note{background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:.75rem 1rem;margin-bottom:1.5rem;font-size:.9rem}
-</style>
-</head>
-<body>
-<p><a href="/inkay/admin/">← Back to admin</a></p>
-<h1>User Access — {{gameTitle .Game}} <span style="font-size:.9rem;color:#666;font-weight:400">({{.Game}})</span></h1>
-{{if .Msg}}<div class="msg">{{.Msg}}</div>{{end}}
-
-<div class="mode-note">
-  Only users listed below can connect. Others fall through to Pretendo.
-</div>
-
-<table>
-<tr><th>PNID</th><th>Label</th><th>Added</th><th></th></tr>
-{{range .Users}}
-<tr>
-  <td>{{if .PNID}}<strong>{{.PNID}}</strong><br><span style="font-family:monospace;color:#999;font-size:.75rem">{{.PID}}</span>{{else}}<span style="font-family:monospace;font-size:.85rem">{{.PID}}</span>{{end}}</td>
-  <td>{{if .Note}}{{.Note}}{{else}}<span style="color:#aaa">—</span>{{end}}</td>
-  <td style="font-size:.8rem;color:#666">{{localTime .CreatedAt "datetime"}}</td>
-  <td>
-    <form method="post" action="/inkay/admin/users/delete" onsubmit="return confirm('Remove PID {{.PID}}?')">
-      <input type="hidden" name="pid" value="{{.PID}}">
-      <input type="hidden" name="game" value="{{.GameServerID}}">
-      <button class="btn-del" type="submit">Remove</button>
-    </form>
-  </td>
-</tr>
-{{else}}<tr><td colspan="4" style="color:#aaa">No users in list</td></tr>
-{{end}}
-</table>
-
-<fieldset>
-<legend>Add user</legend>
-<form method="post" action="/inkay/admin/users/add">
-  <input type="hidden" name="game" value="{{.Game}}">
-  <div class="row">
-    <div class="field" style="max-width:200px">
-      <label>PID</label>
-      <input type="text" name="pid" placeholder="1435853600" required>
-    </div>
-    <div class="field">
-      <label>Label (optional)</label>
-      <input type="text" name="note" placeholder="Nico">
-    </div>
-    <div class="field" style="max-width:100px">
-      <label>&nbsp;</label>
-      <button class="submit" type="submit">Add</button>
-    </div>
-  </div>
-</form>
-</fieldset>
-` + localTimeScript + `
-</body>
-</html>`))
-
-func adminUsers(w http.ResponseWriter, r *http.Request) {
-	game := r.URL.Query().Get("game")
-	if game == "" {
-		http.Redirect(w, r, "/inkay/admin/", http.StatusSeeOther)
-		return
-	}
-	msg := r.URL.Query().Get("msg")
-
-	data := struct {
-		Game  string
-		Users []UserAccess
-		Msg   string
-	}{game, usersForGame(game), msg}
-	w.Header().Set("Content-Type", "text/html")
-	usersTmpl.Execute(w, data)
-}
-
-func adminUserAdd(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Redirect(w, r, "/inkay/admin/", http.StatusSeeOther)
-		return
-	}
-	game := r.FormValue("game")
-	pidStr := r.FormValue("pid")
-	note := r.FormValue("note")
-
-	pid, err := strconv.ParseInt(pidStr, 10, 64)
-	if err != nil || pid <= 0 || game == "" {
-		http.Redirect(w, r, "/inkay/admin/users/?game="+game+"&msg=Invalid+PID", http.StatusSeeOther)
-		return
-	}
-	var noteVal interface{}
-	if note != "" {
-		noteVal = note
-	}
-	_, err = db.Exec(`INSERT INTO user_access (pid, game_server_id, note) VALUES ($1, UPPER($2), $3) ON CONFLICT (pid, game_server_id) DO UPDATE SET note = EXCLUDED.note`,
-		pid, game, noteVal)
-	if err != nil {
-		log.Printf("user_access insert: %v", err)
-		http.Redirect(w, r, "/inkay/admin/users/?game="+game+"&msg=DB+error", http.StatusSeeOther)
-		return
-	}
-	http.Redirect(w, r, "/inkay/admin/users/?game="+game+"&msg=User+added", http.StatusSeeOther)
-}
-
-func adminUserDelete(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Redirect(w, r, "/inkay/admin/", http.StatusSeeOther)
-		return
-	}
-	game := r.FormValue("game")
-	pidStr := r.FormValue("pid")
-	pid, err := strconv.ParseInt(pidStr, 10, 64)
-	if err != nil || game == "" {
-		http.Redirect(w, r, "/inkay/admin/users/?game="+game+"&msg=Invalid+PID", http.StatusSeeOther)
-		return
-	}
-	db.Exec(`DELETE FROM user_access WHERE pid = $1 AND UPPER(game_server_id) = UPPER($2)`, pid, game)
-	http.Redirect(w, r, "/inkay/admin/users/?game="+game+"&msg=User+removed", http.StatusSeeOther)
 }
 
 // --- Ban management ---
@@ -3269,7 +3051,6 @@ func adminBanAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	pidStr := r.FormValue("pid")
 	reason := r.FormValue("reason")
-	fromReview := r.FormValue("from_review") // non-empty when triggered from review queue
 
 	pid, err := strconv.ParseInt(pidStr, 10, 64)
 	if err != nil || pid <= 0 {
@@ -3285,11 +3066,6 @@ func adminBanAdd(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Printf("ban insert: %v", err)
 		http.Redirect(w, r, "/inkay/admin/bans/?msg=DB+error", http.StatusSeeOther)
-		return
-	}
-	if fromReview != "" {
-		db.Exec(`DELETE FROM review_queue WHERE pid = $1 AND UPPER(game_server_id) = UPPER($2)`, pid, fromReview)
-		http.Redirect(w, r, "/inkay/admin/review/?msg=Banned+PID+"+pidStr, http.StatusSeeOther)
 		return
 	}
 	http.Redirect(w, r, "/inkay/admin/bans/?msg=User+banned", http.StatusSeeOther)
@@ -3308,135 +3084,6 @@ func adminBanRemove(w http.ResponseWriter, r *http.Request) {
 	}
 	db.Exec(`DELETE FROM banned_users WHERE pid = $1`, pid)
 	http.Redirect(w, r, "/inkay/admin/bans/?msg=User+unbanned", http.StatusSeeOther)
-}
-
-// --- Review queue ---
-
-var reviewTmpl = template.Must(template.New("review").Funcs(tmplFuncs).Parse(`<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>Review Queue</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-body{font-family:system-ui,sans-serif;max-width:760px;margin:2rem auto;padding:0 1rem;color:#222}
-h1{font-size:1.4rem}
-a{color:#2563eb}
-table{width:100%;border-collapse:collapse;font-size:.9rem;margin-bottom:2rem}
-th{text-align:left;border-bottom:2px solid #e4e4e7;padding:.5rem .75rem;color:#666;font-weight:600}
-td{padding:.5rem .75rem;border-bottom:1px solid #f0f0f0;vertical-align:middle}
-tr:last-child td{border-bottom:none}
-button,input{font:inherit}
-button{cursor:pointer;border:none;border-radius:4px;padding:.3rem .7rem;font-size:.85rem}
-.btn-approve{background:#dcfce7;color:#166534}
-.btn-ban{background:#fee2e2;color:#991b1b}
-.btn-dismiss{background:#f4f4f5;color:#555}
-.note{background:#fefce8;border:1px solid #fde68a;border-radius:6px;padding:.75rem 1rem;margin-bottom:1.5rem;font-size:.9rem}
-.msg{background:#dcfce7;border:1px solid #bbf7d0;color:#166534;padding:.5rem 1rem;border-radius:6px;margin-bottom:1rem;font-size:.9rem}
-.approve-row{display:flex;gap:.4rem;align-items:center}
-input[type=text]{border:1px solid #d1d5db;border-radius:4px;padding:.3rem .5rem;font-size:.85rem;width:120px}
-</style>
-</head>
-<body>
-<p><a href="/inkay/admin/">← Back to admin</a></p>
-<h1>Review Queue</h1>
-{{if .Msg}}<div class="msg">{{.Msg}}</div>{{end}}
-<div class="note">These PIDs connected to a whitelisted game server but are not yet approved. Approve to add to the whitelist, ban to add to the global ban list, or dismiss to silently discard.</div>
-<table>
-<tr><th>PNID</th><th>Game server</th><th>Attempts</th><th>First seen</th><th>Last seen</th><th></th></tr>
-{{range .Entries}}
-<tr>
-  <td>{{if .PNID}}<strong>{{.PNID}}</strong><br><span style="font-family:monospace;color:#999;font-size:.75rem">{{.PID}}</span>{{else}}<span style="font-family:monospace;font-size:.85rem">{{.PID}}</span>{{end}}</td>
-  <td><span title="{{.GameServerID}}" style="font-size:.85rem">{{gameTitle .GameServerID}}</span></td>
-  <td style="color:#666">{{.Attempts}}</td>
-  <td style="font-size:.8rem;color:#666">{{localTime .FirstSeen "datetime"}}</td>
-  <td style="font-size:.8rem;color:#666">{{localTime .LastSeen "datetime"}}</td>
-  <td>
-    <div class="approve-row">
-      <form method="post" action="/inkay/admin/review/approve" style="display:flex;gap:.3rem;align-items:center">
-        <input type="hidden" name="pid" value="{{.PID}}">
-        <input type="hidden" name="game" value="{{.GameServerID}}">
-        <input type="text" name="note" placeholder="Label (opt)">
-        <button class="btn-approve" type="submit">Approve</button>
-      </form>
-      <form method="post" action="/inkay/admin/bans/add" onsubmit="return confirm('Ban PID {{.PID}}?')">
-        <input type="hidden" name="pid" value="{{.PID}}">
-        <input type="hidden" name="reason" value="denied via review queue">
-        <input type="hidden" name="from_review" value="{{.GameServerID}}">
-        <button class="btn-ban" type="submit">Ban</button>
-      </form>
-      <form method="post" action="/inkay/admin/review/dismiss">
-        <input type="hidden" name="pid" value="{{.PID}}">
-        <input type="hidden" name="game" value="{{.GameServerID}}">
-        <button class="btn-dismiss" type="submit">Dismiss</button>
-      </form>
-    </div>
-  </td>
-</tr>
-{{else}}<tr><td colspan="6" style="color:#aaa">Queue is empty</td></tr>
-{{end}}
-</table>
-` + localTimeScript + `
-</body>
-</html>`))
-
-func adminReview(w http.ResponseWriter, r *http.Request) {
-	msg := r.URL.Query().Get("msg")
-	data := struct {
-		Entries []ReviewEntry
-		Msg     string
-	}{pendingReviews(), msg}
-	w.Header().Set("Content-Type", "text/html")
-	reviewTmpl.Execute(w, data)
-}
-
-func adminReviewApprove(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Redirect(w, r, "/inkay/admin/review/", http.StatusSeeOther)
-		return
-	}
-	pidStr := r.FormValue("pid")
-	game := r.FormValue("game")
-	note := r.FormValue("note")
-
-	pid, err := strconv.ParseInt(pidStr, 10, 64)
-	if err != nil || pid <= 0 || game == "" {
-		http.Redirect(w, r, "/inkay/admin/review/?msg=Invalid+input", http.StatusSeeOther)
-		return
-	}
-	var noteVal interface{}
-	if note != "" {
-		noteVal = note
-	}
-	tx, err := db.Begin()
-	if err != nil {
-		http.Redirect(w, r, "/inkay/admin/review/?msg=DB+error", http.StatusSeeOther)
-		return
-	}
-	tx.Exec(`INSERT INTO user_access (pid, game_server_id, note) VALUES ($1, UPPER($2), $3) ON CONFLICT (pid, game_server_id) DO UPDATE SET note = EXCLUDED.note`, pid, game, noteVal)
-	tx.Exec(`DELETE FROM review_queue WHERE pid = $1 AND UPPER(game_server_id) = UPPER($2)`, pid, game)
-	if err := tx.Commit(); err != nil {
-		tx.Rollback()
-		http.Redirect(w, r, "/inkay/admin/review/?msg=DB+error", http.StatusSeeOther)
-		return
-	}
-	http.Redirect(w, r, "/inkay/admin/review/?msg=Approved+PID+"+pidStr, http.StatusSeeOther)
-}
-
-func adminReviewDismiss(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Redirect(w, r, "/inkay/admin/review/", http.StatusSeeOther)
-		return
-	}
-	pidStr := r.FormValue("pid")
-	game := r.FormValue("game")
-	pid, err := strconv.ParseInt(pidStr, 10, 64)
-	if err != nil || game == "" {
-		http.Redirect(w, r, "/inkay/admin/review/?msg=Invalid+input", http.StatusSeeOther)
-		return
-	}
-	db.Exec(`DELETE FROM review_queue WHERE pid = $1 AND UPPER(game_server_id) = UPPER($2)`, pid, game)
-	http.Redirect(w, r, "/inkay/admin/review/?msg=Dismissed", http.StatusSeeOther)
 }
 
 func adminClientCert(w http.ResponseWriter, r *http.Request) {
@@ -3473,7 +3120,7 @@ func adminCertsRotate(w http.ResponseWriter, r *http.Request) {
 //
 // Mirrors every existing HTML admin action as a JSON equivalent under
 // /admin/api/v1/..., reusing the exact same underlying DB logic
-// (allRedirects, usersForGame, etc.) so the two paths can't drift. All of
+// (allRedirects, allBans, etc.) so the two paths can't drift. All of
 // these are wrapped in requireClientCert by their registration in main(),
 // same as the HTML routes. GETs return {"ok":true,"data":...}; POSTs accept
 // a JSON body (not form-urlencoded) and return {"ok":true} (plus "data" for
@@ -3568,12 +3215,10 @@ dd{margin:.15rem 0 0;font-size:.85rem;color:#555}
 <table class="toc">
 <tr><td><a href="#meta">Meta</a></td><td>ping, game-titles, cert-status</td></tr>
 <tr><td><a href="#redirects">Redirects</a></td><td>list, add, delete, toggle</td></tr>
-<tr><td><a href="#users">Per-game user whitelist</a></td><td>list, add, delete</td></tr>
 <tr><td><a href="#bans">Bans</a></td><td>list, add, remove</td></tr>
 <tr><td><a href="#access">Access levels</a></td><td>list, set, remove</td></tr>
 <tr><td><a href="#sysmsg">SpotPass system messages</a></td><td>Wii U + 3DS, each: list, add, toggle, remove</td></tr>
 <tr><td><a href="#swapdoodle">Swapdoodle notes</a></td><td>list, per-note detail, per-page thumbnail</td></tr>
-<tr><td><a href="#review">Review queue</a></td><td>list, approve, dismiss</td></tr>
 </table>
 
 <h2 id="meta">Meta</h2>
@@ -3583,7 +3228,7 @@ dd{margin:.15rem 0 0;font-size:.85rem;color:#555}
 <dl><dt>Response</dt><dd><code>{"ok": true}</code></dd></dl>
 
 <h3><span class="method get">GET</span> /admin/api/v1/game-titles</h3>
-<p>Display names for every game server ID actually in use on this deployment (referenced by a redirect, a whitelist entry, or a review-queue sighting) - not the full list this codebase could ever support.</p>
+<p>Display names for every game server ID actually in use on this deployment (referenced by a redirect or a recent request) - not the full list this codebase could ever support.</p>
 <dl><dt>Response <code>data</code></dt><dd><code>{"1005A000": "Wii Sports Club", ...}</code> - object keyed by uppercase game_server_id; an ID this codebase has no friendly name for maps to itself.</dd></dl>
 
 <h3><span class="method get">GET</span> /admin/api/v1/cert-status</h3>
@@ -3606,19 +3251,6 @@ dd{margin:.15rem 0 0;font-size:.85rem;color:#555}
 
 <h3><span class="method post">POST</span> /admin/api/v1/redirects/toggle</h3>
 <dl><dt>Body</dt><dd><code>{"id": 1}</code> - flips <code>enabled</code>.</dd><dt>Response</dt><dd><code>{"ok": true}</code></dd></dl>
-
-<h2 id="users">Per-game user whitelist</h2>
-
-<h3><span class="method get">GET</span> /admin/api/v1/users?game=...</h3>
-<dl><dt>Query</dt><dd><code>game</code> (required) - game_server_id, case-insensitive.</dd>
-<dt>Response <code>data</code></dt><dd>array of <code>{pid, pnid?, game_server_id, note?, created_at}</code></dd></dl>
-
-<h3><span class="method post">POST</span> /admin/api/v1/users/add</h3>
-<dl><dt>Body</dt><dd><code>{"game": "...", "pid": 1234567890, "note"?: "..."}</code> - upserts (re-adding an existing pid+game just updates the note).</dd>
-<dt>Response <code>data</code></dt><dd>the fresh list for that game (same shape as GET).</dd></dl>
-
-<h3><span class="method post">POST</span> /admin/api/v1/users/delete</h3>
-<dl><dt>Body</dt><dd><code>{"game": "...", "pid": 1234567890}</code></dd><dt>Response</dt><dd><code>{"ok": true}</code></dd></dl>
 
 <h2 id="bans">Bans</h2>
 
@@ -3675,18 +3307,6 @@ dd{margin:.15rem 0 0;font-size:.85rem;color:#555}
 <p style="font-size:.85rem;color:#999;margin-top:-.5rem">Not under <code>/api/v1/</code> - same auth, but responds <code>image/jpeg</code> directly, not the JSON envelope.</p>
 <dl><dt>Response</dt><dd>the real JPEG thumbnail embedded in that page of the note. <code>page</code> is 0-indexed, up to <code>page_count - 1</code> from the detail endpoint above.</dd></dl>
 
-<h2 id="review">Review queue</h2>
-<p>PIDs that connected to a whitelisted game server but aren't yet approved.</p>
-
-<h3><span class="method get">GET</span> /admin/api/v1/review</h3>
-<dl><dt>Response <code>data</code></dt><dd>array of <code>{pid, pnid?, game_server_id, first_seen, last_seen, attempts}</code></dd></dl>
-
-<h3><span class="method post">POST</span> /admin/api/v1/review/approve</h3>
-<dl><dt>Body</dt><dd><code>{"pid": 1234567890, "game": "...", "note"?: "..."}</code> - adds to the per-game whitelist (equivalent to users/add) and removes the review-queue entry, atomically.</dd>
-<dt>Response <code>data</code></dt><dd>the fresh review queue.</dd></dl>
-
-<h3><span class="method post">POST</span> /admin/api/v1/review/dismiss</h3>
-<dl><dt>Body</dt><dd><code>{"pid": 1234567890, "game": "..."}</code> - removes the entry without whitelisting.</dd><dt>Response</dt><dd><code>{"ok": true}</code></dd></dl>
 
 </body>
 </html>`))
@@ -3697,20 +3317,14 @@ func adminAPIDocs(w http.ResponseWriter, r *http.Request) {
 }
 
 // usedGameServerIDs returns every distinct game_server_id actually
-// referenced anywhere admin-relevant (a configured redirect, a per-game
-// whitelist entry, or a review-queue sighting) - the only three tables that
-// carry this column. Keeps the game-picker dropdown scoped to games that
-// exist on THIS deployment instead of every title this codebase has ever
-// supported.
+// configured as a redirect on THIS deployment, instead of every title this
+// codebase has ever supported - keeps the game-picker dropdown scoped
+// accordingly.
 func usedGameServerIDs() []string {
 	rows, err := db.Query(`
-		SELECT DISTINCT id FROM (
-			SELECT UPPER(game_server_id) AS id FROM redirects WHERE game_server_id IS NOT NULL AND game_server_id != ''
-			UNION
-			SELECT UPPER(game_server_id) AS id FROM user_access
-			UNION
-			SELECT UPPER(game_server_id) AS id FROM review_queue
-		) t ORDER BY id`)
+		SELECT DISTINCT UPPER(game_server_id) AS id FROM redirects
+		WHERE game_server_id IS NOT NULL AND game_server_id != ''
+		ORDER BY id`)
 	if err != nil {
 		return nil
 	}
@@ -3831,60 +3445,6 @@ func apiV1RedirectsToggle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	db.Exec(`UPDATE redirects SET enabled = NOT enabled WHERE id = $1`, body.ID)
-	writeJSONOKNoData(w)
-}
-
-// --- Per-game user whitelist ---
-
-func apiV1Users(w http.ResponseWriter, r *http.Request) {
-	game := r.URL.Query().Get("game")
-	if game == "" {
-		writeJSONError(w, http.StatusBadRequest, "missing 'game' query parameter")
-		return
-	}
-	writeJSONOK(w, usersForGame(game))
-}
-
-func apiV1UsersAdd(w http.ResponseWriter, r *http.Request) {
-	if !requirePOST(w, r) {
-		return
-	}
-	var body struct {
-		Game string `json:"game"`
-		PID  int64  `json:"pid"`
-		Note string `json:"note"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.PID <= 0 || body.Game == "" {
-		writeJSONError(w, http.StatusBadRequest, "game and a positive pid are required")
-		return
-	}
-	var noteVal interface{}
-	if body.Note != "" {
-		noteVal = body.Note
-	}
-	_, err := db.Exec(`INSERT INTO user_access (pid, game_server_id, note) VALUES ($1, UPPER($2), $3) ON CONFLICT (pid, game_server_id) DO UPDATE SET note = EXCLUDED.note`,
-		body.PID, body.Game, noteVal)
-	if err != nil {
-		log.Printf("api users add: %v", err)
-		writeJSONError(w, http.StatusInternalServerError, "database error")
-		return
-	}
-	writeJSONOK(w, usersForGame(body.Game))
-}
-
-func apiV1UsersDelete(w http.ResponseWriter, r *http.Request) {
-	if !requirePOST(w, r) {
-		return
-	}
-	var body struct {
-		Game string `json:"game"`
-		PID  int64  `json:"pid"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Game == "" {
-		writeJSONError(w, http.StatusBadRequest, "game and pid are required")
-		return
-	}
-	db.Exec(`DELETE FROM user_access WHERE pid = $1 AND UPPER(game_server_id) = UPPER($2)`, body.PID, body.Game)
 	writeJSONOKNoData(w)
 }
 
@@ -4116,70 +3676,20 @@ func apiV1Spotpass3DSNotes(w http.ResponseWriter, r *http.Request) {
 	writeJSONOK(w, allSwapdoodleNotes())
 }
 
-// --- Review queue ---
-
-func apiV1Review(w http.ResponseWriter, r *http.Request) {
-	writeJSONOK(w, pendingReviews())
-}
-
-func apiV1ReviewApprove(w http.ResponseWriter, r *http.Request) {
-	if !requirePOST(w, r) {
-		return
-	}
-	var body struct {
-		PID  int64  `json:"pid"`
-		Game string `json:"game"`
-		Note string `json:"note"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.PID <= 0 || body.Game == "" {
-		writeJSONError(w, http.StatusBadRequest, "pid and game are required")
-		return
-	}
-	var noteVal interface{}
-	if body.Note != "" {
-		noteVal = body.Note
-	}
-	tx, err := db.Begin()
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "database error")
-		return
-	}
-	tx.Exec(`INSERT INTO user_access (pid, game_server_id, note) VALUES ($1, UPPER($2), $3) ON CONFLICT (pid, game_server_id) DO UPDATE SET note = EXCLUDED.note`, body.PID, body.Game, noteVal)
-	tx.Exec(`DELETE FROM review_queue WHERE pid = $1 AND UPPER(game_server_id) = UPPER($2)`, body.PID, body.Game)
-	if err := tx.Commit(); err != nil {
-		tx.Rollback()
-		writeJSONError(w, http.StatusInternalServerError, "database error")
-		return
-	}
-	writeJSONOK(w, pendingReviews())
-}
-
-func apiV1ReviewDismiss(w http.ResponseWriter, r *http.Request) {
-	if !requirePOST(w, r) {
-		return
-	}
-	var body struct {
-		PID  int64  `json:"pid"`
-		Game string `json:"game"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Game == "" {
-		writeJSONError(w, http.StatusBadRequest, "pid and game are required")
-		return
-	}
-	db.Exec(`DELETE FROM review_queue WHERE pid = $1 AND UPPER(game_server_id) = UPPER($2)`, body.PID, body.Game)
-	writeJSONOKNoData(w)
-}
-
 // --- My Status (per-user page, web password auth) ---
 
-var mySessionStore sync.Map // token string → pid int64
-var mySyncTime sync.Map     // pid int64 → time.Time of last Pretendo sync
+// mySessionTTL matches how sessions effectively behaved before this was
+// moved to runtimeCache (2026-09-17): the in-process sync.Map never expired
+// entries on its own, only losing them on a process restart - which in
+// practice logged every dashboard user out on every deploy. 30 days is a
+// generous "stay logged in" duration that now actually survives restarts.
+const mySessionTTL = 30 * 24 * time.Hour
 
 func myNewSession(pid int64) string {
 	b := make([]byte, 16)
 	rand.Read(b)
 	token := hex.EncodeToString(b)
-	mySessionStore.Store(token, pid)
+	runtimeCacheSet(context.Background(), "mysession:"+token, strconv.FormatInt(pid, 10), mySessionTTL)
 	return token
 }
 
@@ -4188,11 +3698,15 @@ func mySessionPID(r *http.Request) (int64, bool) {
 	if err != nil {
 		return 0, false
 	}
-	v, ok := mySessionStore.Load(c.Value)
+	v, ok := runtimeCacheGet(context.Background(), "mysession:"+c.Value)
 	if !ok {
 		return 0, false
 	}
-	return v.(int64), true
+	pid, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return pid, true
 }
 
 type myFriendEntry struct {
@@ -4218,6 +3732,7 @@ type myStatusData struct {
 	TitleID       int64
 	GameServerHex string
 	Friends       []myFriendEntry
+	DiscordLinked bool
 }
 
 // --- Discord Link page ---
@@ -4390,6 +3905,8 @@ tr:last-child td{border-bottom:none}
 form.logout-form{display:inline;margin:0}
 button.logout-btn{background:none;border:none;color:#dc2626;font-size:.875rem;cursor:pointer;padding:0;text-decoration:underline}
 .refresh{font-size:.75rem;color:#aaa;margin-left:auto}
+.btn-verify{background:#6366f1;color:#fff;border:none;border-radius:6px;padding:.35rem .8rem;font-size:.8rem;font:inherit;cursor:pointer}
+.btn-verify:hover{background:#4f46e5}
 </style>
 </head>
 <body>
@@ -4458,10 +3975,14 @@ func myHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Kick off a fresh Pretendo sync in the background, rate-limited to once per minute.
 	// External friends' online status will be up to date on the next 30-second auto-refresh.
+	// 2026-09-17: moved to runtimeCache - the key's own TTL IS the rate limit
+	// (its mere existence means "synced within the last minute"), so there's
+	// no need to store/compare a timestamp manually. Also now survives
+	// restarts instead of every restart resetting everyone's rate limit.
 	const syncInterval = 60 * time.Second
-	now := time.Now()
-	if last, ok := mySyncTime.Load(pid); !ok || now.Sub(last.(time.Time)) >= syncInterval {
-		mySyncTime.Store(pid, now)
+	syncCtx := context.Background()
+	if _, ok := runtimeCacheGet(syncCtx, "mysync:"+strconv.FormatInt(pid, 10)); !ok {
+		runtimeCacheSet(syncCtx, "mysync:"+strconv.FormatInt(pid, 10), "1", syncInterval)
 		go func() {
 			resp, err := http.Post("http://127.0.0.1:9191/internal/sync/"+strconv.FormatInt(pid, 10), "", nil)
 			if err == nil {
@@ -4512,6 +4033,9 @@ func myHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	var discordID string
+	db.QueryRow(`SELECT COALESCE(wd.discord_id, '') FROM wii_devices wd WHERE wd.username = $1`, pnid).Scan(&discordID)
+
 	w.Header().Set("Content-Type", "text/html")
 	myStatusTmpl.Execute(w, myStatusData{
 		PID:           pid,
@@ -4521,6 +4045,7 @@ func myHandler(w http.ResponseWriter, r *http.Request) {
 		TitleID:       titleID,
 		GameServerHex: gameServerHex,
 		Friends:       friends,
+		DiscordLinked: discordID != "",
 	})
 }
 
@@ -4577,7 +4102,7 @@ func myLogoutHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if c, err := r.Cookie("my_session"); err == nil {
-		mySessionStore.Delete(c.Value)
+		runtimeCacheClient.Del(context.Background(), "mysession:"+c.Value)
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name:   "my_session",
@@ -4694,4 +4219,215 @@ func myAccountHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("myAccountHandler: web password changed for %q (PID %d)", pnid, pid)
 	myAccountTmpl.Execute(w, myAccountData{Success: "Password updated."})
+}
+
+// ──────────────────────────────────────────────
+// Discord Activity — Mii slideshow shown inside a voice channel.
+// No OAuth/user-identity needed (discordSdk.ready() only), so there's no
+// auth gate here; this is just a public read-only image slideshow.
+// ──────────────────────────────────────────────
+
+func pickRandomMiiForActivity() (pnid, miiName string, miiData []byte, ok bool) {
+	rows, err := db.Query(`
+		SELECT DISTINCT ON (pnid) pnid, mii_name, mii_data FROM (
+			SELECT nnid AS pnid, mii_name, mii_data FROM user_settings
+				WHERE mii_data IS NOT NULL AND nnid <> ''
+			UNION ALL
+			SELECT friend_nnid AS pnid, mii_name, mii_data FROM pretendo_friends
+				WHERE mii_data IS NOT NULL AND friend_nnid <> ''
+			UNION ALL
+			SELECT pnid, mii_name, mii_data FROM mii_cache
+				WHERE mii_data IS NOT NULL AND pnid <> ''
+		) AS all_miis
+		ORDER BY pnid
+	`)
+	if err != nil {
+		log.Printf("pickRandomMiiForActivity: query error: %v", err)
+		return "", "", nil, false
+	}
+	defer rows.Close()
+
+	type candidate struct {
+		pnid, miiName string
+		miiData       []byte
+	}
+	var candidates []candidate
+	for rows.Next() {
+		var c candidate
+		var name sql.NullString
+		if err := rows.Scan(&c.pnid, &name, &c.miiData); err != nil {
+			continue
+		}
+		c.miiName = name.String
+		if c.miiName == "" {
+			c.miiName = c.pnid
+		}
+		candidates = append(candidates, c)
+	}
+	if len(candidates) == 0 {
+		return "", "", nil, false
+	}
+	pick := candidates[mrand.IntN(len(candidates))]
+	return pick.pnid, pick.miiName, pick.miiData, true
+}
+
+func renderMiiPNGForActivity(miiData []byte) ([]byte, error) {
+	dataB64 := base64.RawURLEncoding.EncodeToString(miiData)
+	renderURL := "https://mii-unsecure.ariankordi.net/miis/image.png?data=" + dataB64 + "&width=512&type=face&api_id=1"
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Get(renderURL)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("mii render API returned HTTP %d", resp.StatusCode)
+	}
+	return io.ReadAll(resp.Body)
+}
+
+func activityRandomMiiHandler(w http.ResponseWriter, r *http.Request) {
+	pnid, miiName, miiData, ok := pickRandomMiiForActivity()
+	if !ok {
+		http.Error(w, `{"error":"no Mii data found"}`, http.StatusNotFound)
+		return
+	}
+	imgData, err := renderMiiPNGForActivity(miiData)
+	if err != nil {
+		log.Printf("activityRandomMiiHandler: render failed for %q: %v", pnid, err)
+		http.Error(w, `{"error":"render failed"}`, http.StatusBadGateway)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	json.NewEncoder(w).Encode(map[string]string{
+		"pnid":     pnid,
+		"mii_name": miiName,
+		"image":    "data:image/png;base64," + base64.StdEncoding.EncodeToString(imgData),
+	})
+}
+
+// Not committed to the repo - see .gitignore ("Mii TV Activity background music").
+const activityBGMPath = "/nico-pretendo-bridge/miitvbgm.mp3"
+const activityLogoPath = "/nico-pretendo-bridge/miitv_logo.png"
+
+var activityTmpl = template.Must(template.New("activity").Parse(`<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Mii TV</title>
+<style>
+  html,body{margin:0;height:100%;background:#cdeeff;color:#1b2a3a;font-family:system-ui,sans-serif;overflow:hidden}
+  #logo{position:absolute;top:2vh;left:50%;transform:translateX(-50%);max-width:60vmin;max-height:22vmin}
+  #wrap{position:absolute;top:56%;left:50%;text-align:center;
+    transition:left 300ms ease, transform 300ms ease;transform:translate(-50%,-50%) scale(1)}
+  #wrap.pos-right{left:110%;transform:translate(-50%,-50%) scale(0.5)}
+  #wrap.pos-left{left:-10%;transform:translate(-50%,-50%) scale(0.5)}
+  #wrap.no-anim{transition:none}
+  #mii{max-width:80vmin;max-height:60vmin;image-rendering:pixelated}
+  #name{margin-top:1rem;font-size:1.4rem;font-weight:600}
+  #pnid{opacity:.6;font-size:.9rem}
+  #volume-ctl{position:fixed;bottom:1rem;right:1rem;display:flex;align-items:center;gap:.5rem;
+    opacity:.5;transition:opacity 150ms}
+  #volume-ctl:hover{opacity:1}
+  #volume{width:120px;accent-color:#1e3a8a}
+</style></head>
+<body>
+<img id="logo" src="logo.png" alt="Mii TV">
+<div id="wrap">
+  <img id="mii" src="" alt="">
+  <div id="name">Loading…</div>
+  <div id="pnid"></div>
+</div>
+<div id="volume-ctl">
+  <span>🔊</span>
+  <input type="range" id="volume" min="0" max="1" step="0.01" value="0.25">
+</div>
+<audio id="bgm" src="bgm.mp3" loop preload="auto"></audio>
+<script type="module">
+  import { DiscordSDK } from "https://cdn.jsdelivr.net/npm/@discord/embedded-app-sdk/+esm";
+
+  const ENTER_MS = 300, EXIT_MS = 300, CYCLE_MS = 5000;
+  const wrap = document.getElementById("wrap");
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  function setPos(cls, animate) {
+    if (!animate) wrap.classList.add("no-anim");
+    wrap.classList.remove("pos-right", "pos-left");
+    if (cls) wrap.classList.add(cls);
+    if (!animate) {
+      void wrap.offsetWidth; // force reflow so the jump applies before re-enabling transitions
+      wrap.classList.remove("no-anim");
+    }
+  }
+
+  async function next() {
+    try {
+      const res = await fetch("random-mii");
+      const data = await res.json();
+      document.getElementById("mii").src = data.image;
+      document.getElementById("name").textContent = data.mii_name;
+      document.getElementById("pnid").textContent = "PNID: " + data.pnid;
+    } catch (e) {
+      console.error("slideshow fetch failed", e);
+    }
+  }
+
+  async function cycle() {
+    setPos("pos-right", false); // start off-screen, no animation
+    while (true) {
+      await next(); // swap content while off-screen (invisible)
+      setPos(null, true); // slide in + grow to 100%
+      await sleep(ENTER_MS);
+      await sleep(CYCLE_MS - ENTER_MS - EXIT_MS); // hold at full size
+      setPos("pos-left", true); // shrink to 50% + slide out
+      await sleep(EXIT_MS);
+      setPos("pos-right", false); // jump back to the right, ready for the next entrance
+    }
+  }
+
+  function startBGM() {
+    const bgm = document.getElementById("bgm");
+    const volumeSlider = document.getElementById("volume");
+    bgm.volume = parseFloat(volumeSlider.value);
+    volumeSlider.addEventListener("input", () => {
+      bgm.volume = parseFloat(volumeSlider.value);
+    });
+    bgm.play().catch(() => {
+      // Autoplay-with-sound blocked until a user interacts with the page -
+      // retry on the first click/key/tap anywhere in the Activity.
+      const retry = () => { bgm.play().catch(() => {}); };
+      ["click", "keydown", "pointerdown"].forEach(ev =>
+        document.addEventListener(ev, retry, { once: true }));
+    });
+  }
+
+  (async () => {
+    try {
+      const clientId = {{.ClientID}};
+      if (clientId) {
+        const sdk = new DiscordSDK(clientId);
+        await sdk.ready();
+      }
+    } catch (e) {
+      console.error("Discord SDK init failed (running outside Discord?)", e);
+    }
+    cycle();
+    startBGM();
+  })();
+</script>
+</body></html>`))
+
+func activityHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html")
+	activityTmpl.Execute(w, struct{ ClientID template.JS }{
+		ClientID: template.JS(fmt.Sprintf("%q", os.Getenv("DISCORD_ACTIVITY_CLIENT_ID"))),
+	})
+}
+
+func activityBGMHandler(w http.ResponseWriter, r *http.Request) {
+	http.ServeFile(w, r, activityBGMPath)
+}
+
+func activityLogoHandler(w http.ResponseWriter, r *http.Request) {
+	http.ServeFile(w, r, activityLogoPath)
 }

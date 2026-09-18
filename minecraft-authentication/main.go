@@ -121,8 +121,7 @@ func handleLogin(err error, client *nex.Client, callID uint32, username string) 
 	pid, _ := findOrCreateAccount(username)
 	fmt.Printf("[MC-Auth] Login username=%q pid=%d\n", username, pid)
 
-	// Dummy ticket in Login response; real ticket issued by RequestTicket
-	dummyTicket := make([]byte, 32)
+	ticket := generateTicket(pid, secureServerPID)
 
 	connData := nex.NewRVConnectionData()
 	connData.SetStationURL(secureStationURL())
@@ -133,7 +132,7 @@ func handleLogin(err error, client *nex.Client, callID uint32, username string) 
 	stream := nex.NewStreamOut(nexServer)
 	stream.WriteResult(nex.NewResultSuccess(nex.Errors.Core.Unknown))
 	stream.WriteUInt32LE(pid)
-	stream.WriteBuffer(dummyTicket)
+	stream.WriteBuffer(ticket)
 	stream.WriteStructure(connData)
 	stream.WriteString("Minecraft WiiU")
 

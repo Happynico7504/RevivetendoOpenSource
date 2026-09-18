@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"regexp"
+	"strconv"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -18,6 +20,7 @@ var matchHistoryCol *mongo.Collection
 var rankingScoresCol *mongo.Collection
 var rankingCommonDataCol *mongo.Collection
 var juxtCommunitiesCol *mongo.Collection
+var clubSearchesCol *mongo.Collection
 
 func connectDB() {
 	uri := os.Getenv("MONGO_URI")
@@ -37,6 +40,7 @@ func connectDB() {
 	matchHistoryCol = db.Collection("match_history")
 	rankingScoresCol = db.Collection("ranking_scores")
 	rankingCommonDataCol = db.Collection("ranking_common_data")
+	clubSearchesCol = db.Collection("club_searches")
 	// Same MongoDB instance, different logical database - Juxt (the Miiverse
 	// revival) owns the real club/community names, keyed by the same club code
 	// this server already uses in its own eu_NNN/us_NNN DataStore tags. See
@@ -212,8 +216,30 @@ func dbFindGathering(gameMode uint32, requesterNatm uint32) uint32 {
 		}
 		gid := uint32(result["gid"].(int64))
 		host := uint32(result["host"].(int64))
+		hostLooksDead := false
 		if _, ok := connectedPIDs.Load(host); !ok {
-			// Host has disconnected — purge the stale gathering and keep looking
+			hostLooksDead = true
+		} else if last, ok := lastPacketAt.Load(host); !ok || time.Since(last.(time.Time)) > 2*staleIdleThreshold {
+			// connectedPIDs alone is too weak a liveness signal: it's only
+			// cleared by an explicit Disconnect/StaleDisconnect, and a host can
+			// go completely silent for minutes before either reconnecting on
+			// its own (which happens on the HOST's own timing, not ours) or
+			// being caught by watchStaleConnections's own ticker. Confirmed
+			// 2026-09-15: a host (PID 1626116659) was offered to a new joiner
+			// via this function after 7m50s of total silence, moments before
+			// reconnecting fresh - the joiner's RequestProbeInitiationExt was
+			// delivered to that now-dead session (no error, since
+			// currentClient/connectedPIDs both still listed it) and vanished,
+			// guaranteeing the match failed. A genuinely-waiting host (not yet
+			// in a match) pings every ~5-9s per staleIdleThreshold's own
+			// baseline, so 2x that margin catches real staleness without
+			// flagging normal jitter.
+			hostLooksDead = true
+		}
+		if hostLooksDead {
+			// Host has disconnected, or is stale enough to be effectively dead
+			// even though nothing has formally cleaned it up yet — either way,
+			// purge the gathering and keep looking rather than offer it.
 			res, err := gatheringsCol.DeleteOne(ctx, bson.D{{Key: "gid", Value: gid}})
 			if err != nil || res.DeletedCount == 0 {
 				return 0
@@ -363,6 +389,31 @@ func dbCloseGathering(gid uint32) {
 		bson.D{{Key: "$set", Value: bson.D{{Key: "open", Value: false}}}})
 }
 
+// dbGetGatheringPlayers returns every PID currently listed in a gathering's
+// "players" array (host included), for CloseParticipation to clear the
+// hole-punch exemption on the whole match at once - see its call site's
+// doc comment.
+func dbGetGatheringPlayers(gid uint32) []uint32 {
+	var g bson.M
+	if err := gatheringsCol.FindOne(context.Background(), bson.D{{Key: "gid", Value: int64(gid)}}).Decode(&g); err != nil {
+		return nil
+	}
+	raw, ok := g["players"].(bson.A)
+	if !ok {
+		return nil
+	}
+	pids := make([]uint32, 0, len(raw))
+	for _, p := range raw {
+		switch v := p.(type) {
+		case int32:
+			pids = append(pids, uint32(v))
+		case int64:
+			pids = append(pids, uint32(v))
+		}
+	}
+	return pids
+}
+
 func dbRecordMatch(gid uint32) {
 	ctx := context.Background()
 	var g bson.M
@@ -395,4 +446,49 @@ func dbGetRecentMatches() []bson.M {
 	var docs []bson.M
 	cur.All(ctx, &docs)
 	return docs
+}
+
+// clubSearchTagRe matches the per-club DataStore search tags WSC issues on
+// startup, e.g. "us_016_ave" / "eu_033_vs_record".
+var clubSearchTagRe = regexp.MustCompile(`^(us|eu|jp)_(\d{3})_(ave|vs_record)$`)
+
+// dbRecordClubSearch keeps one document per region+club code (_id "us_016")
+// counting how often that club's ranking was searched, how many of those found
+// nothing, and which players asked. This is how missing clubs get discovered
+// over time: any doc with empty_searches > 0 is a club players are using that
+// we can't serve data for yet, and "name" is filled once Juxt has a community
+// whose app_data matches (see resolveClubName) so unresolved ones stand out.
+func dbRecordClubSearch(pid uint32, tags []string, resultCount int) {
+	if clubSearchesCol == nil {
+		return
+	}
+	for _, tag := range tags {
+		m := clubSearchTagRe.FindStringSubmatch(tag)
+		if m == nil {
+			continue
+		}
+		region, codeStr := m[1], m[2]
+		code, _ := strconv.Atoi(codeStr)
+		inc := bson.D{{Key: "searches", Value: 1}}
+		if resultCount == 0 {
+			inc = append(inc, bson.E{Key: "empty_searches", Value: 1})
+			fmt.Printf("ClubSearch: MISSING DATA region=%s club=%03d pid=%d tag=%s\n", region, code, pid, tag)
+		}
+		set := bson.D{
+			{Key: "region", Value: region},
+			{Key: "club_code", Value: code},
+			{Key: "last_seen", Value: time.Now().Unix()},
+			{Key: "last_result_count", Value: resultCount},
+		}
+		if name, ok := resolveClubName(region, uint32(code)); ok {
+			set = append(set, bson.E{Key: "name", Value: name})
+		}
+		update := bson.D{
+			{Key: "$inc", Value: inc},
+			{Key: "$addToSet", Value: bson.D{{Key: "players", Value: pid}}},
+			{Key: "$set", Value: set},
+			{Key: "$setOnInsert", Value: bson.D{{Key: "first_seen", Value: time.Now().Unix()}}},
+		}
+		clubSearchesCol.UpdateOne(context.Background(), bson.D{{Key: "_id", Value: region + "_" + codeStr}}, update, options.Update().SetUpsert(true))
+	}
 }

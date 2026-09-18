@@ -33,6 +33,13 @@ boss-capture/
 olv-capture-3ds/
 hpp-capture/
 
+# Mii TV Activity background music - not ours to redistribute in the repo
+miitvbgm.mp3
+
+# downloaded Piper TTS voice models (large binaries, re-fetched via
+# `python3 -m piper.download_voices`, not meant to live in git)
+discord-bot/piper-voices/
+
 # vendored/external - swapdoodle is its own separate git repo (SwapdoodleRevival/swapdoodle),
 # vendor-patches holds a locally patched copy of a dependency it needs (see
 # vendor-patches/nex-protocols-common-go-v2 - two handler registrations there don't
