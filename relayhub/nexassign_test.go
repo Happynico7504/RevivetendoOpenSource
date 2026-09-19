@@ -513,3 +513,31 @@ func TestRefusedCredPullsExplainThemselvesWithoutLeakingThePassword(t *testing.T
 		t.Fatalf("a granted pull logged: %v", lines[before:])
 	}
 }
+
+func TestWiiUChatIsOfferedOnlyOnceTheMainSharesItsKerberosPassword(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, "wiiu-chat-secure"), 0o755)
+	// Wii U Chat's .env uses its own key names, not SECURE_SERVER_LOCATION / SECURE_SERVER_PORT.
+	os.WriteFile(filepath.Join(root, "wiiu-chat-secure", ".env"),
+		[]byte("PN_WUC_SECURE_SERVER_HOST=45.157.178.35\nPN_WUC_SECURE_SERVER_PORT=60005\nPN_WUC_AUTHENTICATION_SERVER_PORT=60004\n"), 0o600)
+
+	// Before the main exports the shared password (an older bridge start) there is nothing to
+	// offer: the process made up its own, which a relay could not use.
+	if _, ok := LoadNexGames(root, func(string) string { return "" })["wiiu-chat"]; ok {
+		t.Fatal("wiiu-chat offered without a shared Kerberos password")
+	}
+	games := LoadNexGames(root, func(k string) string {
+		if k == "PN_WUC_KERBEROS_PASSWORD" {
+			return "shared-secret"
+		}
+		return ""
+	})
+	g, ok := games["wiiu-chat"]
+	if !ok {
+		t.Fatal("wiiu-chat not offered although its password and secure address are known")
+	}
+	if g.SecureHost != "45.157.178.35" || g.SecurePort != "60005" || g.KerberosPassword != "shared-secret" ||
+		g.Port != 60004 || g.AccessKey != "e7a47214" || g.NEXMajor != 3 || g.NEXMinor != 3 || g.NEXPatch != 2 || g.GameServerID != "1005A000" {
+		t.Fatalf("wiiu-chat configuration: %+v", g)
+	}
+}

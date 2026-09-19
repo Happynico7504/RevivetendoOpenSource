@@ -127,6 +127,8 @@ func TestDefaultsMatchTheMainsAuthServers(t *testing.T) {
 		"wsc-edge":     {60114, "4d324052", "Pretendo WSC", "1012F100", 3, 4, 0},
 		"mk8":          {60002, "25dbf96a", "Pretendo MK7", "1010EB00", 3, 5, 4},
 		"badge-arcade": {60018, "82d5962d", "Badge Arcade Auth", "00134600", 3, 7, 16},
+		// Copied from wiiu-chat-secure (nex/authentication.go: version 3.3.2, access key e7a47214).
+		"wiiu-chat": {60004, "e7a47214", "Pretendo WiiU Chat Auth", "1005A000", 3, 3, 2},
 	}
 	got := relaylink.NexGameDefaults()
 	if len(got) != len(want) {

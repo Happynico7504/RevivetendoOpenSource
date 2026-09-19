@@ -58,7 +58,10 @@ func NexGameDefaults() map[string]NexGame {
 		// wsc-edge is WSC's auth server with a different secure server: the relay itself, where
 		// the WSC edge terminates the session. Everything else, including the Kerberos secret,
 		// is WSC's (see EdgeGame); it is derived per relay, never configured on its own.
-		WSCEdgeGame:    {Name: WSCEdgeGame, GameServerID: "1012F100", Port: 60114, AccessKey: "4d324052", NEXMajor: 3, NEXMinor: 4, NEXPatch: 0, BuildName: "Pretendo WSC"},
+		WSCEdgeGame: {Name: WSCEdgeGame, GameServerID: "1012F100", Port: 60114, AccessKey: "4d324052", NEXMajor: 3, NEXMinor: 4, NEXPatch: 0, BuildName: "Pretendo WSC"},
+		// Wii U Chat: its auth and secure servers run in one process on the main (wiiu-chat) with
+		// NEX library version 3.3.2 and this access key; the auth server listens on 60004.
+		"wiiu-chat":    {Name: "wiiu-chat", GameServerID: "1005A000", Port: 60004, AccessKey: "e7a47214", NEXMajor: 3, NEXMinor: 3, NEXPatch: 2, BuildName: "Pretendo WiiU Chat Auth"},
 		"badge-arcade": {Name: "badge-arcade", GameServerID: "00134600", Port: 60018, AccessKey: "82d5962d", NEXMajor: 3, NEXMinor: 7, NEXPatch: 16, BuildName: "Badge Arcade Auth"},
 	}
 }

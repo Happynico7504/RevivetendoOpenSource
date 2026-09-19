@@ -28,12 +28,21 @@ var nexAuthDirs = map[string]string{
 	"wsc":          "wsc-authentication",
 	"mk8":          "mk8-authentication",
 	"badge-arcade": "badge-arcade-authentication",
+	"wiiu-chat":    "wiiu-chat-secure", // its auth server is part of the chat process
+}
+
+// nexSecureEnvKeys names the .env keys holding a game's secure-server address, for the games
+// that do not use the SECURE_SERVER_LOCATION / SECURE_SERVER_PORT pair.
+var nexSecureEnvKeys = map[string][2]string{
+	"wiiu-chat": {"PN_WUC_SECURE_SERVER_HOST", "PN_WUC_SECURE_SERVER_PORT"},
 }
 
 // nexKerberosEnv names the environment variable holding each game's Kerberos
 // password (start.sh generates them at every bridge start).
 var nexKerberosEnv = map[string]string{
 	"wsc": "WSC_KERBEROS_PASSWORD", "mk8": "MK8_KERBEROS_PASSWORD", "badge-arcade": "BA_KERBEROS_PASSWORD",
+	// wiiu-chat generates its own unless this is set; start.sh sets it so the relay can share it.
+	"wiiu-chat": "PN_WUC_KERBEROS_PASSWORD",
 }
 
 func readDotEnv(path string) map[string]string {
@@ -67,7 +76,11 @@ func LoadNexGames(root string, getenv func(string) string) map[string]relaylink.
 			continue // derived per relay from wsc (see edgeGame), never configured on its own
 		}
 		env := readDotEnv(filepath.Join(root, nexAuthDirs[name], ".env"))
-		g.SecureHost, g.SecurePort = env["SECURE_SERVER_LOCATION"], env["SECURE_SERVER_PORT"]
+		hostKey, portKey := "SECURE_SERVER_LOCATION", "SECURE_SERVER_PORT"
+		if k, ok := nexSecureEnvKeys[name]; ok {
+			hostKey, portKey = k[0], k[1]
+		}
+		g.SecureHost, g.SecurePort = env[hostKey], env[portKey]
 		g.KerberosPassword = getenv(nexKerberosEnv[name])
 		if g.SecureHost == "" || g.SecurePort == "" || g.KerberosPassword == "" {
 			continue

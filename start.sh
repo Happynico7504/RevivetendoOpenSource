@@ -250,6 +250,12 @@ ABSW_KERBEROS_PASSWORD="$(openssl rand -hex 16)"
 	env $(cat .env | xargs) PN_KERBEROS_PASSWORD="$ABSW_KERBEROS_PASSWORD" "$BUILD/absw") &
 ABSW_PID=$!
 
+# Wii U Chat encrypts its tickets with this. wiiu-chat used to make one up on its own at every start;
+# exporting it (wiiu-chat reads PN_WUC_KERBEROS_PASSWORD) lets relayhub give a regional relay's Wii U
+# Chat auth server the same secret, which a relay needs to issue tickets this server can decrypt.
+PN_WUC_KERBEROS_PASSWORD="$(openssl rand -hex 16)"
+export PN_WUC_KERBEROS_PASSWORD
+
 WSC_KERBEROS_PASSWORD="$(openssl rand -hex 16)"
 export WSC_KERBEROS_PASSWORD
 (cd "$ROOT/wsc-authentication" && autostart wsc-authentication "$LOG/wsc-authentication.log" \

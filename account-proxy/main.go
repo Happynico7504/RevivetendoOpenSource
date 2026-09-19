@@ -813,6 +813,14 @@ func handleNexToken(w http.ResponseWriter, r *http.Request, host string, port ui
 	if pid != 0 {
 		db.Exec(`INSERT INTO relay_requests (pid, game_server_id) VALUES ($1, $2)`, pid, "1005A000")
 	}
+	// Regional auth: if the hub can serve this console from a relay it stages the credential there
+	// and we send the console to that relay's Wii U Chat auth server instead of the main's (the
+	// same mechanism as WSC / MK8 / Badge Arcade). Anything else falls back to the main.
+	if pid != 0 {
+		if rh, rp, ok := relayAssign("wiiu-chat", pid, sessionToken, ip); ok {
+			host, port = rh, rp
+		}
+	}
 	log.Printf("nex_token for %s: PID=%d token=%s…", ip, pid, sessionToken[:8])
 
 	tkn := nexToken{
