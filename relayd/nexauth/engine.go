@@ -80,6 +80,14 @@ func Validate(g relaylink.NexGame) error {
 // ever runs in the child process; the panic ends the child and the parent
 // restarts it.
 func (e *Engine) Start(games []relaylink.NexGame, store *Store, pull PullFunc) error {
+	// nex-protocols-common-go keeps its configuration (password lookup, secure-server address,
+	// build name) in package-level globals: a second auth server in the same process silently
+	// overwrites the first, and every port then answers with the LAST game's settings. That is
+	// how plain WSC logins ended in InvalidUsername once wsc-edge was added. One game per process
+	// (relayd starts one child per game); refuse anything else instead of misbehaving quietly.
+	if len(games) > 1 {
+		return fmt.Errorf("nexauth: %d games in one process: the auth library's configuration is global, so each game needs its own process", len(games))
+	}
 	for _, g := range games {
 		if err := Validate(g); err != nil {
 			return err

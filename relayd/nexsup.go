@@ -41,9 +41,27 @@ type NexSupervisor struct {
 
 	mu      sync.Mutex
 	games   []relaylink.NexGame
-	child   *nexChild
-	wake    chan struct{}
+	runs    map[string]*gameRun // one supervised child process per game
+	ctx     context.Context     // set by Run; runs created before it are started then
 	started atomic.Bool
+}
+
+// gameRun supervises the child process of ONE game.
+//
+// Why one process per game: the auth library (nex-protocols-common-go) keeps its configuration in
+// package-level globals, so a second NewCommonAuthenticationProtocol in the same process silently
+// overwrites the first: every auth server in the process would use the LAST game's password lookup,
+// secure-server address and build name. The main avoids this by running one auth process per game
+// (wsc-authentication, mk8-authentication, ...), and so must a relay. A side effect worth having:
+// a crash, a rotated Kerberos secret or a game coming or going only restarts that game's process,
+// and only wipes that game's credential store.
+type gameRun struct {
+	name   string
+	cfg    relaylink.NexGame // guarded by NexSupervisor.mu
+	child  *nexChild         // guarded by NexSupervisor.mu
+	wake   chan struct{}
+	cancel context.CancelFunc // ends this run (the game was removed)
+	run    atomic.Bool
 }
 
 type nexChild struct {
@@ -64,34 +82,69 @@ func (s *NexSupervisor) logf(f string, a ...any) {
 	}
 }
 
-func (s *NexSupervisor) notify() {
-	s.mu.Lock()
-	if s.wake == nil {
-		s.wake = make(chan struct{}, 1)
-	}
-	w := s.wake
-	s.mu.Unlock()
+func (g *gameRun) notify() {
 	select {
-	case w <- struct{}{}:
+	case g.wake <- struct{}{}:
 	default:
 	}
 }
 
-// SetGames installs (or changes) the configuration. An identical configuration
-// is a no-op; a different one restarts the child.
+// SetGames installs (or changes) the configuration. An identical configuration is a no-op. For a
+// different one only the games that changed are restarted, new games are started, and games no
+// longer listed are stopped.
 func (s *NexSupervisor) SetGames(games []relaylink.NexGame) {
 	s.mu.Lock()
 	same := reflect.DeepEqual(s.games, games)
 	s.games = append([]relaylink.NexGame(nil), games...)
-	kid := s.child
-	s.mu.Unlock()
 	if same {
+		s.mu.Unlock()
 		return
 	}
-	if kid != nil {
-		kid.kill() // Run notices, and starts a fresh child with the new configuration
+	if s.runs == nil {
+		s.runs = map[string]*gameRun{}
 	}
-	s.notify()
+	want := map[string]relaylink.NexGame{}
+	for _, g := range games {
+		want[g.Name] = g
+	}
+	var kill []*nexChild
+	for name, r := range s.runs {
+		g, ok := want[name]
+		switch {
+		case !ok: // no longer hosted
+			if r.child != nil {
+				kill = append(kill, r.child)
+			}
+			if r.cancel != nil { // nil until its loop has started
+				r.cancel()
+			}
+			delete(s.runs, name)
+		case !reflect.DeepEqual(r.cfg, g): // changed: restart just this game
+			r.cfg = g
+			if r.child != nil {
+				kill = append(kill, r.child)
+			}
+			r.notify()
+		}
+	}
+	var started []*gameRun
+	for name, g := range want {
+		if _, ok := s.runs[name]; !ok {
+			r := &gameRun{name: name, cfg: g, wake: make(chan struct{}, 1)}
+			s.runs[name] = r
+			started = append(started, r)
+		}
+	}
+	ctx := s.ctx
+	s.mu.Unlock()
+	for _, k := range kill {
+		k.kill() // each game's loop notices and starts a fresh child with the new configuration
+	}
+	if ctx != nil {
+		for _, r := range started {
+			go s.superviseGame(ctx, r)
+		}
+	}
 	if s.OnGames != nil {
 		s.OnGames(games)
 	}
@@ -109,22 +162,32 @@ func (s *NexSupervisor) Game(name string) (relaylink.NexGame, bool) {
 	return relaylink.NexGame{}, false
 }
 
-// Ready reports whether the child is running and serving.
+// Ready reports whether every configured game's child is running and serving.
 func (s *NexSupervisor) Ready() bool {
 	s.mu.Lock()
-	kid := s.child
-	s.mu.Unlock()
-	return kid != nil && kid.isUp.Load()
+	defer s.mu.Unlock()
+	if len(s.runs) == 0 {
+		return false
+	}
+	for _, r := range s.runs {
+		if r.child == nil || !r.child.isUp.Load() {
+			return false
+		}
+	}
+	return true
 }
 
 // PutCred stores a password in the child and waits for its acknowledgement, so
 // the caller knows the console can authenticate here before it is sent here.
 func (s *NexSupervisor) PutCred(ctx context.Context, p relaylink.NexCredPut) error {
 	s.mu.Lock()
-	kid := s.child
+	var kid *nexChild
+	if r := s.runs[p.Game]; r != nil {
+		kid = r.child
+	}
 	s.mu.Unlock()
 	if kid == nil || !kid.isUp.Load() {
-		return errors.New("nexauth child is not running")
+		return errors.New("nexauth child for " + p.Game + " is not running")
 	}
 	id := kid.nextID.Add(1)
 	ack := make(chan struct{}, 1)
@@ -272,11 +335,52 @@ func (s *NexSupervisor) answerPull(k *nexChild, req nexauth.Msg) {
 	k.send(resp)
 }
 
-// Run keeps a child running for the current configuration until ctx ends.
+// Run supervises one child per configured game until ctx ends.
 func (s *NexSupervisor) Run(ctx context.Context) {
 	if !s.started.CompareAndSwap(false, true) {
 		return
 	}
+	s.mu.Lock()
+	s.ctx = ctx
+	var pending []*gameRun
+	for _, r := range s.runs {
+		pending = append(pending, r)
+	}
+	s.mu.Unlock()
+	for _, r := range pending { // games configured before Run started
+		go s.superviseGame(ctx, r)
+	}
+	<-ctx.Done()
+	// Stopping: every child ends with its loop; give them a moment so none outlives us.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		alive := false
+		for _, r := range s.runs {
+			if r.child != nil {
+				alive = true
+			}
+		}
+		s.mu.Unlock()
+		if !alive {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// superviseGame keeps one game's child running, restarting it with backoff if it fails or exits
+// and immediately when its configuration changes, until the game is removed or ctx ends.
+func (s *NexSupervisor) superviseGame(parent context.Context, r *gameRun) {
+	if !r.run.CompareAndSwap(false, true) {
+		return
+	}
+	ctx, cancel := context.WithCancel(parent)
+	s.mu.Lock()
+	r.cancel = func() { cancel() }
+	s.mu.Unlock()
+	defer cancel()
+
 	minB, maxB := s.MinBackoff, s.MaxBackoff
 	if minB <= 0 {
 		minB = time.Second
@@ -285,33 +389,19 @@ func (s *NexSupervisor) Run(ctx context.Context) {
 		maxB = 15 * time.Second
 	}
 	backoff := minB
-	s.notify() // in case games were set before Run started
 	for ctx.Err() == nil {
 		s.mu.Lock()
-		games := append([]relaylink.NexGame(nil), s.games...)
-		wake := s.wake
-		if wake == nil {
-			s.wake = make(chan struct{}, 1)
-			wake = s.wake
-		}
+		cfg := r.cfg
 		s.mu.Unlock()
-		if len(games) == 0 { // nothing to host yet: wait for the main's configuration
-			select {
-			case <-ctx.Done():
-				return
-			case <-wake:
-			}
-			continue
-		}
-		kid, err := s.start(games)
+		kid, err := s.start([]relaylink.NexGame{cfg})
 		if err != nil {
 			wait := backoff + time.Duration(rand.Int63n(int64(backoff)/2+1))
-			s.logf("nexauth: could not start (%v); retrying in %v", err, wait)
+			s.logf("nexauth: %s could not start (%v); retrying in %v", r.name, err, wait)
 			select {
 			case <-ctx.Done():
 				return
 			case <-time.After(wait):
-			case <-wake:
+			case <-r.wake:
 			}
 			if backoff *= 2; backoff > maxB {
 				backoff = maxB
@@ -319,20 +409,23 @@ func (s *NexSupervisor) Run(ctx context.Context) {
 			continue
 		}
 		s.mu.Lock()
-		s.child = kid
+		r.child = kid
 		s.mu.Unlock()
-		s.logf("nexauth: child running (%d games)", len(games))
+		s.logf("nexauth: %s child running", r.name)
 		started := time.Now()
 		select {
 		case <-kid.done:
-			s.logf("nexauth: child exited; restarting")
+			s.logf("nexauth: %s child exited; restarting", r.name)
 		case <-ctx.Done():
 			kid.kill()
 			<-kid.done
+			s.mu.Lock()
+			r.child = nil
+			s.mu.Unlock()
 			return
 		}
 		s.mu.Lock()
-		s.child = nil
+		r.child = nil
 		s.mu.Unlock()
 		if time.Since(started) > 30*time.Second {
 			backoff = minB

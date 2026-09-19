@@ -347,3 +347,15 @@ func TestLookupOutcomesAreLoggedWithoutLeakingPasswords(t *testing.T) {
 		}
 	}
 }
+
+func TestEngineRefusesSeveralGamesInOneProcess(t *testing.T) {
+	a := relaylink.NexGameDefaults()["wsc"]
+	b := relaylink.NexGameDefaults()["mk8"]
+	for _, g := range []*relaylink.NexGame{&a, &b} {
+		g.SecureHost, g.SecurePort, g.KerberosPassword = "203.0.113.1", "60015", "secret"
+	}
+	err := (&Engine{}).Start([]relaylink.NexGame{a, b}, &Store{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "own process") {
+		t.Fatalf("two games in one process were accepted: %v", err)
+	}
+}

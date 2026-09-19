@@ -171,9 +171,13 @@ func TestSupervisorRestartsOnlyWhenTheConfigurationChanges(t *testing.T) {
 	mk8 := relaylink.NexGameDefaults()["mk8"]
 	mk8.SecureHost, mk8.SecurePort, mk8.KerberosPassword = "203.0.113.1", "60003", "k2"
 	r.sup.SetGames([]relaylink.NexGame{g, mk8})
-	waitUntil(t, "the restart with the new configuration", func() bool { return len(r.lines()) == 2 && r.sup.Ready() })
-	if l := r.lines(); l[1] != "start:wsc,mk8" {
-		t.Fatalf("second start: %v", l)
+	waitUntil(t, "wsc restarted and mk8 started", func() bool { return len(r.lines()) == 3 && r.sup.Ready() })
+	count := map[string]int{}
+	for _, l := range r.lines() {
+		count[l]++
+	}
+	if count["start:wsc"] != 2 || count["start:mk8"] != 1 {
+		t.Fatalf("starts: %v (each game runs alone in its own process)", r.lines())
 	}
 }
 
@@ -237,8 +241,8 @@ func TestSupervisorStopsTheChildWhenTheParentContextEnds(t *testing.T) {
 	r.sup.SetGames([]relaylink.NexGame{wscGame()})
 	r.waitReady(t)
 	r.sup.mu.Lock()
-	pid := r.sup.child.cmd.Process.Pid
-	done := r.sup.child.done
+	pid := r.sup.runs["wsc"].child.cmd.Process.Pid
+	done := r.sup.runs["wsc"].child.done
 	r.sup.mu.Unlock()
 	r.cancel()
 	select {
@@ -273,5 +277,125 @@ func TestNexSupervisorReportsChangesAndLooksUpGames(t *testing.T) {
 	}
 	if _, ok := s.Game("wsc-edge"); ok {
 		t.Fatal("a game that was dropped from the configuration is still found")
+	}
+}
+
+func mk8Game() relaylink.NexGame {
+	g := relaylink.NexGameDefaults()["mk8"]
+	g.SecureHost, g.SecurePort, g.KerberosPassword = "203.0.113.1", "60003", "k2"
+	return g
+}
+
+// childPID returns the pid of a game's child process (0 if it has none).
+func (r *supRig) childPID(game string) int {
+	r.sup.mu.Lock()
+	defer r.sup.mu.Unlock()
+	if run := r.sup.runs[game]; run != nil && run.child != nil {
+		return run.child.cmd.Process.Pid
+	}
+	return 0
+}
+
+// The auth library keeps its configuration in package-level globals, so two auth servers in one
+// process make every port use the LAST game's settings (this is what broke plain WSC logins when
+// wsc-edge was added, and had silently affected mk8 and badge-arcade before). Each game must run
+// in its own process.
+func TestEachGameRunsInItsOwnProcess(t *testing.T) {
+	r := newSupRig(t)
+	r.sup.SetGames([]relaylink.NexGame{wscGame(), mk8Game()})
+	r.waitReady(t)
+	pw, pm := r.childPID("wsc"), r.childPID("mk8")
+	if pw == 0 || pm == 0 || pw == pm {
+		t.Fatalf("wsc pid %d, mk8 pid %d: they must be two different processes", pw, pm)
+	}
+	for _, l := range r.lines() {
+		if strings.Contains(l, ",") {
+			t.Fatalf("a child was told to host several games: %v", r.lines())
+		}
+	}
+}
+
+func TestChangingOneGameRestartsOnlyThatGame(t *testing.T) {
+	r := newSupRig(t)
+	r.sup.SetGames([]relaylink.NexGame{wscGame(), mk8Game()})
+	r.waitReady(t)
+	wscBefore, mk8Before := r.childPID("wsc"), r.childPID("mk8")
+
+	g := mk8Game()
+	g.KerberosPassword = "rotated" // only mk8's secret changed
+	r.sup.SetGames([]relaylink.NexGame{wscGame(), g})
+	waitUntil(t, "mk8 to be restarted", func() bool {
+		p := r.childPID("mk8")
+		return p != 0 && p != mk8Before && r.sup.Ready()
+	})
+	if got := r.childPID("wsc"); got != wscBefore {
+		t.Fatalf("wsc was restarted (pid %d -> %d) although only mk8 changed: its credential store would have been wiped", wscBefore, got)
+	}
+}
+
+func TestAddingAGameLeavesTheRunningOnesAlone(t *testing.T) {
+	r := newSupRig(t)
+	r.sup.SetGames([]relaylink.NexGame{wscGame()})
+	r.waitReady(t)
+	before := r.childPID("wsc")
+	// What happens 30 s after the edge comes up: the hello grows by one game.
+	edge := relaylink.EdgeGame(wscGame(), "203.0.113.5")
+	r.sup.SetGames([]relaylink.NexGame{wscGame(), edge})
+	waitUntil(t, "the new game", func() bool { return r.childPID(relaylink.WSCEdgeGame) != 0 && r.sup.Ready() })
+	if got := r.childPID("wsc"); got != before {
+		t.Fatalf("adding wsc-edge restarted wsc (pid %d -> %d)", before, got)
+	}
+}
+
+func TestRemovedGameIsStoppedAndOthersKeepWorking(t *testing.T) {
+	r := newSupRig(t)
+	r.sup.SetGames([]relaylink.NexGame{wscGame(), mk8Game()})
+	r.waitReady(t)
+	r.sup.mu.Lock()
+	gone := r.sup.runs["mk8"].child
+	r.sup.mu.Unlock()
+	r.sup.SetGames([]relaylink.NexGame{wscGame()})
+	select {
+	case <-gone.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("mk8's child kept running after mk8 was removed")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := r.sup.PutCred(ctx, relaylink.NexCredPut{Game: "mk8", PID: 1, Password: "p", TTLSeconds: 60}); err == nil {
+		t.Fatal("PutCred reached a game that is no longer hosted")
+	}
+	if err := r.sup.PutCred(ctx, relaylink.NexCredPut{Game: "wsc", PID: 1, Password: "p", TTLSeconds: 60}); err != nil {
+		t.Fatalf("wsc stopped working when mk8 was removed: %v", err)
+	}
+}
+
+func TestCredentialsGoToTheRightGamesChild(t *testing.T) {
+	// Both children watch for mk8:7; only the mk8 child can ever have it.
+	r := newSupRig(t, "RELAYD_TEST_WATCH=mk8:7")
+	r.sup.SetGames([]relaylink.NexGame{wscGame(), mk8Game()})
+	r.waitReady(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := r.sup.PutCred(ctx, relaylink.NexCredPut{Game: "mk8", PID: 7, Password: "tok", TTLSeconds: 60}); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, "the mk8 child to store it", func() bool {
+		for _, l := range r.lines() {
+			if l == "stored:tok" {
+				return true
+			}
+		}
+		return false
+	})
+	time.Sleep(300 * time.Millisecond)
+	n := 0
+	for _, l := range r.lines() {
+		if l == "stored:tok" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("%d children stored the credential, want exactly the mk8 one", n)
 	}
 }
