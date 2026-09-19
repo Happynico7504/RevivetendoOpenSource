@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -163,6 +164,28 @@ type AssignResult struct {
 // NexAssigner decides which relay (if any) a console should authenticate at,
 // gives that relay the credential BEFORE the console is told to go there, and
 // answers a relay's later pull only for consoles it sent there.
+// ForceAll is the ForcePIDs key that stands for every player.
+const ForceAll uint32 = 0
+
+// ParseForcePIDs reads a list of PIDs separated by whitespace or commas, with "#" comments;
+// "*" means everyone. Unparseable words are ignored.
+func ParseForcePIDs(text string) map[uint32]bool {
+	out := map[uint32]bool{}
+	for _, line := range strings.Split(text, "\n") {
+		if i := strings.Index(line, "#"); i >= 0 {
+			line = line[:i]
+		}
+		for _, w := range strings.FieldsFunc(line, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' || r == '\r' }) {
+			if w == "*" {
+				out[ForceAll] = true
+			} else if n, err := strconv.ParseUint(w, 10, 32); err == nil && n != 0 {
+				out[uint32(n)] = true
+			}
+		}
+	}
+	return out
+}
+
 type NexAssigner struct {
 	Streams  *StreamHub
 	Registry Registry
@@ -175,6 +198,11 @@ type NexAssigner struct {
 	ResolveIP func(host string) (string, error)
 	// RTT returns the stream round trip to a relay (default: from the stream hub).
 	RTT func(relayID string) time.Duration
+	// ForcePIDs, if set, returns players who are assigned to a relay whatever their region
+	// (the fastest connected relay that hosts the game); key ForceAll (0) means every
+	// player. It mirrors a DNS that forces clients onto a relay, and for testing a relay
+	// with one console before the region rules cover its country.
+	ForcePIDs func() map[uint32]bool
 
 	mu       sync.Mutex
 	hello    map[string]map[string]bool // relay id -> games it hosts
@@ -310,14 +338,22 @@ func (a *NexAssigner) Assign(ctx context.Context, req AssignRequest) (*AssignRes
 	if !ok || req.PID == 0 || req.Password == "" {
 		return nil, ErrUnknownGame
 	}
-	ip := net.ParseIP(req.ClientIP)
-	if ip == nil || a.Geo == nil {
-		return nil, ErrNoRelay
+	forced := false
+	if a.ForcePIDs != nil {
+		m := a.ForcePIDs()
+		forced = m[req.PID] || m[ForceAll]
 	}
-	country, continent := a.Geo.Lookup(ip)
-	region := RegionForClient(country, continent)
-	if region == "" {
-		return nil, ErrNoRelay
+	region := ""
+	if !forced {
+		ip := net.ParseIP(req.ClientIP)
+		if ip == nil || a.Geo == nil {
+			return nil, ErrNoRelay
+		}
+		country, continent := a.Geo.Lookup(ip)
+		region = RegionForClient(country, continent)
+		if region == "" {
+			return nil, ErrNoRelay
+		}
 	}
 	relays, err := a.Registry.List(ctx)
 	if err != nil {
@@ -329,7 +365,7 @@ func (a *NexAssigner) Assign(ctx context.Context, req AssignRequest) (*AssignRes
 	}
 	var cands []*Relay
 	for _, r := range relays {
-		if r.Enabled && r.Region == region && connected[r.ID] && a.hostsGame(r.ID, req.Game) {
+		if r.Enabled && (forced || r.Region == region) && connected[r.ID] && a.hostsGame(r.ID, req.Game) {
 			cands = append(cands, r)
 		}
 	}

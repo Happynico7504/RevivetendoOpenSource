@@ -315,3 +315,62 @@ func TestLoadNexGames(t *testing.T) {
 		t.Fatal("games offered without an .env")
 	}
 }
+
+func TestForcedPlayersGoToARelayWhateverTheirRegion(t *testing.T) {
+	r := newNexRig(t)
+	us := r.connectRelay(t, "us-1", "wsc")
+	force := map[uint32]bool{}
+	r.assigner.ForcePIDs = func() map[uint32]bool { return force }
+
+	// Not forced: a German console is served by the main, as before.
+	if _, err := assign(r, "wsc", 1435853600, ipDE); err == nil {
+		t.Fatal("a German console was assigned without being forced")
+	}
+	// Forced by PID: assigned to the relay, and only that PID.
+	force[1435853600] = true
+	res, err := assign(r, "wsc", 1435853600, ipDE)
+	if err != nil || res.Relay != "us-1" || res.Port != 60014 {
+		t.Fatalf("forced German console: %+v %v", res, err)
+	}
+	if us.putCount() != 1 {
+		t.Fatalf("relay got %d credentials, want 1", us.putCount())
+	}
+	if _, err := assign(r, "wsc", 42, ipDE); err == nil {
+		t.Fatal("forcing one PID assigned another")
+	}
+	// Forced players need no usable client IP at all.
+	if _, err := assign(r, "wsc", 1435853600, ""); err != nil {
+		t.Fatalf("forced player with no client IP: %v", err)
+	}
+	// "Everyone".
+	force[ForceAll] = true
+	if res, err := assign(r, "wsc", 42, ipDE); err != nil || res.Relay != "us-1" {
+		t.Fatalf("force-all: %+v %v", res, err)
+	}
+}
+
+func TestForcingNeverPicksARelayThatDoesNotHostTheGameOrIsDown(t *testing.T) {
+	r := newNexRig(t)
+	r.assigner.ForcePIDs = func() map[uint32]bool { return map[uint32]bool{ForceAll: true} }
+	r.connectRelay(t, "us-1", "mk8") // hosts mk8 only
+	if _, err := assign(r, "wsc", 5, ipDE); err == nil {
+		t.Fatal("assigned to a relay that does not host the game")
+	}
+	// jp-1 is registered but not connected: never chosen either.
+	if res, err := assign(r, "mk8", 5, ipDE); err != nil || res.Relay != "us-1" {
+		t.Fatalf("mk8: %+v %v", res, err)
+	}
+}
+
+func TestParseForcePIDs(t *testing.T) {
+	m := ParseForcePIDs("# my consoles\n1435853600, 1532880379   # second console\n\nabc 0 -5\n")
+	if len(m) != 2 || !m[1435853600] || !m[1532880379] || m[ForceAll] {
+		t.Fatalf("parsed: %v", m)
+	}
+	if !ParseForcePIDs("*")[ForceAll] || !ParseForcePIDs("1, *")[ForceAll] {
+		t.Fatal(`"*" not recognised`)
+	}
+	if len(ParseForcePIDs("")) != 0 || len(ParseForcePIDs("# only a comment")) != 0 {
+		t.Fatal("empty input produced entries")
+	}
+}

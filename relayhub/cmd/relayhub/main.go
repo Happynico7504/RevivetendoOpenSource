@@ -226,8 +226,26 @@ func cmdServe(args []string) {
 				gcache map[string]relaylink.NexGame
 				gtime  time.Time
 			)
+			// ~/.relayhub/nex-force-pids: consoles (or "*" = everyone) that are sent to a relay
+			// whatever the region rules say. Re-read every few seconds, so it can be changed
+			// (or deleted to go back to the region rules) without restarting the hub.
+			var (
+				fmu    sync.Mutex
+				fcache map[uint32]bool
+				ftime  time.Time
+			)
+			forcePath := filepath.Join(filepath.Dir(*keyPath), "nex-force-pids")
 			assigner = &relayhub.NexAssigner{
 				Streams: streams, Registry: reg, Geo: geo,
+				ForcePIDs: func() map[uint32]bool {
+					fmu.Lock()
+					defer fmu.Unlock()
+					if fcache == nil || time.Since(ftime) > 5*time.Second {
+						raw, _ := os.ReadFile(forcePath)
+						fcache, ftime = relayhub.ParseForcePIDs(string(raw)), time.Now()
+					}
+					return fcache
+				},
 				Games: func() map[string]relaylink.NexGame {
 					gmu.Lock()
 					defer gmu.Unlock()
