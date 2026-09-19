@@ -26,8 +26,10 @@ type Backend struct {
 //	olv     127.0.0.1:7443  account-proxy's SNI-routed HTTPS listener (nginx :443 stream)
 //	account 127.0.0.1:6666  account-proxy's account API listener
 //	hpp     127.0.0.1:9010  swapdoodle HPP (nginx terminates TLS on :9013 today)
+//	web     127.0.0.1:80    nginx on plain HTTP (the consoles' conntest.* connection test, routed by Host)
 func DefaultBackends() map[string]Backend {
 	return map[string]Backend{
+		"web":     {Addr: "127.0.0.1:80", TLS: false},
 		"olv":     {Addr: "127.0.0.1:7443", TLS: true},
 		"account": {Addr: "127.0.0.1:6666", TLS: true},
 		"hpp":     {Addr: "127.0.0.1:9010", TLS: false},

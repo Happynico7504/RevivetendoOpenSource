@@ -445,3 +445,41 @@ func mustCAKey(t *testing.T, dir string) *ecdsa.PrivateKey {
 }
 
 func pkixName(cn string) pkix.Name { return pkix.Name{CommonName: cn} }
+
+func TestPlainHTTPListenerForwardsByHost(t *testing.T) {
+	e := newE2E(t)
+	e.mu.Lock()
+	web := e.backends["hpp"] // a plain-HTTP backend from the rig
+	e.mu.Unlock()
+	_ = web
+	addr := e.serve(t, relayd.Listener{Listen: "x", Backend: "hpp", Mode: "plain"})
+	// No TLS at all: this is what a console's connection test sends to port 80.
+	req, _ := http.NewRequest("GET", "http://"+addr+"/", nil)
+	req.Host = "conntest.nicochristmann.net"
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || string(b) != "backend:hpp" {
+		t.Fatalf("plain listener: %d %q", resp.StatusCode, b)
+	}
+	bl := e.backends["hpp"]
+	bl.mu.Lock()
+	defer bl.mu.Unlock()
+	if bl.last.host != "conntest.nicochristmann.net" || bl.last.xff != "127.0.0.1" || bl.last.sni != "" {
+		t.Fatalf("backend saw %+v", bl.last)
+	}
+	// A TLS client must NOT get a handshake from a plain port.
+	if _, err := tls.Dial("tcp", addr, &tls.Config{InsecureSkipVerify: true}); err == nil {
+		t.Fatal("plain listener answered a TLS handshake")
+	}
+}
+
+func TestDefaultBackendsIncludeWebForConntest(t *testing.T) {
+	be := DefaultBackends()
+	if b, ok := be["web"]; !ok || b.TLS || b.Addr != "127.0.0.1:80" {
+		t.Fatalf("web backend: %+v", b)
+	}
+}

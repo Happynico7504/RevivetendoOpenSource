@@ -6,15 +6,20 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rsa"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -22,6 +27,7 @@ import (
 	_ "github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/Happynico7504/relayd"
 	"github.com/Happynico7504/relayhub"
 	"github.com/Happynico7504/relaylink"
 )
@@ -37,8 +43,12 @@ func usage() {
   dns-config  [-base FILE] [-o FILE]            regiondns config from the registry
   invalidate  TAG...                            drop cached entries on all relays
   call        -bundle FILE [-method M] PATH     make one request as a relay (for testing)
+  stream-ping -bundle FILE [-n N] [-addr H:P]   measure the real-time stream latency to the main
   certs       [-dir DIR] [-default NAME]        show which certificates relays may fetch
   pubkey      [-key FILE]                       (re)write main-public.pem next to the main key
+  release keygen [-out FILE]                    create the OTA release signing key (keep it OFF the main if you can)
+  release sign   -binary FILE -version N -os linux -arch amd64 [-label L] [-key FILE] [-out DIR] [-force]
+  release list   [-dir DIR]                     show what the hub serves
 
 Database: PN_WUC_POSTGRES_URI (loaded from -env, default ../wiiu-chat-secure/.env).
 `)
@@ -81,10 +91,14 @@ func main() {
 		cmdInvalidate(args)
 	case "call":
 		cmdCall(args)
+	case "stream-ping":
+		cmdStreamPing(args)
 	case "certs":
 		cmdCerts(args)
 	case "pubkey":
 		cmdPubkey(args)
+	case "release":
+		cmdRelease(args)
 	default:
 		usage()
 	}
@@ -158,6 +172,8 @@ func cmdServe(args []string) {
 	redisAddr := fs.String("redis", "127.0.0.1:6379", "Redis for replay protection")
 	certDir := fs.String("certs", "/nico-pretendo-bridge/certs", "directory of certificates relays may fetch (\"\" disables)")
 	defCert := fs.String("default-cert", "olv-nicochristmann-net", "certificate relays serve when the SNI matches nothing")
+	releasesDir := fs.String("releases", defaultReleasesDir(), "directory of signed relayd releases (\"\" disables OTA)")
+	streamListen := fs.String("stream-listen", "0.0.0.0:7778", "real-time relay stream listen address (\"\" disables)")
 	fs.Parse(args)
 
 	db := openDB(*envFile)
@@ -170,6 +186,9 @@ func cmdServe(args []string) {
 		Src: &relayhub.PGSource{DB: db}, Log: invlog,
 		Fwd: &relayhub.Forwarder{Backends: relayhub.DefaultBackends()},
 	}
+	if *releasesDir != "" {
+		hub.Rel = &relayhub.ReleaseStore{Dir: *releasesDir}
+	}
 	if *certDir != "" {
 		hub.Certs = &relayhub.CertStore{Dir: *certDir, Default: *defCert, Routes: relayhub.DefaultCertRoutes()}
 	}
@@ -178,6 +197,23 @@ func cmdServe(args []string) {
 		Priv:     loadKey(*keyPath),
 		RelayKey: keys.Lookup,
 		Replay:   &relayhub.RedisReplay{Client: redis.NewClient(&redis.Options{Addr: *redisAddr})},
+	}
+
+	// Real-time streams: one persistent encrypted connection per relay. Data
+	// changes are pushed over it the moment they are announced.
+	streams := relayhub.NewStreamHub()
+	streams.OnRelayUp = func(id string) { log.Printf("stream: relay %q connected", id) }
+	streams.OnRelayDown = func(id string, pids []uint32) {
+		log.Printf("stream: relay %q disconnected (%d players were connected through it)", id, len(pids))
+	}
+	invlog.OnAppend = streams.PushInvalidation
+	if *streamListen != "" {
+		sln, err := net.Listen("tcp", *streamListen)
+		if err != nil {
+			log.Fatalf("stream listen: %v", err)
+		}
+		go func() { log.Fatal(srv.ServeStream(sln, relaylink.StreamOptions{}, streams.Handlers, streams.OnConn)) }()
+		log.Printf("relayhub: real-time streams on %s", *streamListen)
 	}
 
 	// Local-only: the other services tell the hub that data changed.
@@ -245,6 +281,9 @@ func cmdRelay(args []string) {
 		b, err := relaylink.NewBundle(*id, priv, &mainKey.PublicKey, *mainURL)
 		if err != nil {
 			log.Fatal(err)
+		}
+		if rk, err := os.ReadFile(defaultReleaseKeyPath() + ".pub"); err == nil {
+			b.ReleasePublicKey = strings.TrimSpace(string(rk)) // enables OTA updates on this relay
 		}
 		reg := &relayhub.PGRegistry{DB: openDB(envFile)}
 		if err := reg.Init(ctx); err != nil {
@@ -403,4 +442,174 @@ func cmdCerts(args []string) {
 		fmt.Printf("  %-6s %-32s -> %s\n", r.Match, r.Value, r.Cert)
 	}
 	fmt.Printf("default: %q\n(CA certificates and every non-matching/backup/CSR file are excluded by design)\n", m.Default)
+}
+
+func defaultReleasesDir() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".relayhub", "releases")
+}
+
+func defaultReleaseKeyPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".relayhub", "release-key")
+}
+
+func loadReleaseKey(path string) ed25519.PrivateKey {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		log.Fatalf("release key: %v (create it with: relayhub release keygen)", err)
+	}
+	b, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(raw)))
+	if err != nil || len(b) != ed25519.PrivateKeySize {
+		log.Fatal("release key file is not a base64 Ed25519 private key")
+	}
+	return ed25519.PrivateKey(b)
+}
+
+func cmdRelease(args []string) {
+	if len(args) == 0 {
+		usage()
+	}
+	sub, rest := args[0], args[1:]
+	switch sub {
+	case "keygen":
+		fs := flag.NewFlagSet("release keygen", flag.ExitOnError)
+		out := fs.String("out", defaultReleaseKeyPath(), "private key file (public half is written next to it as <file>.pub)")
+		fs.Parse(rest)
+		if _, err := os.Stat(*out); err == nil {
+			log.Fatalf("%s exists; refusing to overwrite the release key (relays pin its public half)", *out)
+		}
+		pub, priv, err := relaylink.NewRelayIdentity()
+		if err != nil {
+			log.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(*out), 0o700); err != nil {
+			log.Fatal(err)
+		}
+		if err := os.WriteFile(*out, []byte(base64.StdEncoding.EncodeToString(priv)+"\n"), 0o600); err != nil {
+			log.Fatal(err)
+		}
+		pubB64 := relaylink.EncodeReleasePublicKey(pub)
+		if err := os.WriteFile(*out+".pub", []byte(pubB64+"\n"), 0o644); err != nil {
+			log.Fatal(err)
+		}
+		fmt.Printf("wrote %s (0600) and %s.pub\nrelease public key (new relay bundles pin this): %s\nBest practice: move the private key off this machine and sign releases elsewhere.\n", *out, *out, pubB64)
+	case "sign":
+		fs := flag.NewFlagSet("release sign", flag.ExitOnError)
+		binPath := fs.String("binary", "", "relayd binary to publish")
+		version := fs.Uint64("version", 0, "release version (strictly increasing)")
+		goos := fs.String("os", "linux", "target OS")
+		goarch := fs.String("arch", "amd64", "target architecture")
+		label := fs.String("label", "", "free-text label")
+		keyPath := fs.String("key", defaultReleaseKeyPath(), "release signing key")
+		out := fs.String("out", defaultReleasesDir(), "releases directory (use any directory to sign elsewhere and copy it over)")
+		force := fs.Bool("force", false, "allow a version that is not newer than the published one")
+		fs.Parse(rest)
+		bin, err := os.ReadFile(*binPath)
+		if err != nil {
+			log.Fatal(err)
+		}
+		m, err := relayhub.PublishRelease(*out, bin, *version, *label, *goos, *goarch, loadReleaseKey(*keyPath), *force)
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Printf("published %s/%s version %d (%d bytes, sha256 %s) to %s\n", m.OS, m.Arch, m.Version, m.Size, m.SHA256[:16], *out)
+	case "list":
+		fs := flag.NewFlagSet("release list", flag.ExitOnError)
+		dir := fs.String("dir", defaultReleasesDir(), "releases directory")
+		fs.Parse(rest)
+		store := &relayhub.ReleaseStore{Dir: *dir}
+		found := false
+		for _, plat := range [][2]string{{"linux", "amd64"}, {"linux", "arm64"}, {"linux", "arm"}} {
+			if m, err := store.Manifest(plat[0], plat[1]); err == nil {
+				fmt.Printf("%s/%s  version %d  %d bytes  sha256 %s  %s\n", m.OS, m.Arch, m.Version, m.Size, m.SHA256[:16], m.Label)
+				found = true
+			}
+		}
+		if !found {
+			fmt.Println("no releases published")
+		}
+	default:
+		usage()
+	}
+}
+
+func cmdStreamPing(args []string) {
+	fs := flag.NewFlagSet("stream-ping", flag.ExitOnError)
+	bundle := fs.String("bundle", "", "relay bundle file")
+	n := fs.Int("n", 20, "number of echo calls")
+	addr := fs.String("addr", "", "stream address (default: the bundle's host, port 7778)")
+	rawAddr := fs.String("raw", "", "also measure a plain TCP echo server at this address, interleaved sample by sample (fair A/B comparison)")
+	fs.Parse(args)
+	raw, err := os.ReadFile(*bundle)
+	if err != nil {
+		log.Fatal(err)
+	}
+	b, err := relaylink.ParseBundle(raw)
+	if err != nil {
+		log.Fatal(err)
+	}
+	c, err := b.Client()
+	if err != nil {
+		log.Fatal(err)
+	}
+	if *addr == "" {
+		if *addr, err = relayd.StreamAddrFromURL(b.MainURL); err != nil {
+			log.Fatal(err)
+		}
+	}
+	t0 := time.Now()
+	sc, err := c.DialStream(context.Background(), *addr, relaylink.StreamHandlers{}, relaylink.StreamOptions{})
+	if err != nil {
+		log.Fatalf("connect %s: %v", *addr, err)
+	}
+	defer sc.Close()
+	fmt.Printf("connected to %s in %v (TCP + encrypted handshake)\n", *addr, time.Since(t0).Round(time.Millisecond))
+	var rawConn net.Conn
+	var rawMin, rawSum time.Duration
+	if *rawAddr != "" {
+		if rawConn, err = net.Dial("tcp", *rawAddr); err != nil {
+			log.Fatalf("raw connect: %v", err)
+		}
+		defer rawConn.Close()
+	}
+	var min, max, sum time.Duration
+	for i := 0; i < *n; i++ {
+		if rawConn != nil {
+			buf := make([]byte, 32)
+			s := time.Now()
+			rawConn.Write(buf)
+			io.ReadFull(rawConn, buf)
+			d := time.Since(s)
+			if i == 0 || d < rawMin {
+				rawMin = d
+			}
+			rawSum += d
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		s := time.Now()
+		if _, err := sc.Call(ctx, relayhub.MethodEcho, []byte("ping")); err != nil {
+			cancel()
+			log.Fatalf("echo %d: %v", i, err)
+		}
+		cancel()
+		d := time.Since(s)
+		if i == 0 || d < min {
+			min = d
+		}
+		if d > max {
+			max = d
+		}
+		sum += d
+		time.Sleep(50 * time.Millisecond)
+	}
+	fmt.Printf("%d encrypted echo calls: min %v  avg %v  max %v\n", *n, min.Round(10*time.Microsecond), (sum / time.Duration(*n)).Round(10*time.Microsecond), max.Round(10*time.Microsecond))
+	if rawConn != nil {
+		ravg := rawSum / time.Duration(*n)
+		savg := sum / time.Duration(*n)
+		fmt.Printf("interleaved plain TCP echo:  min %v  avg %v\n", rawMin.Round(10*time.Microsecond), ravg.Round(10*time.Microsecond))
+		fmt.Printf("=> encrypted stream costs %v more than plain TCP (avg)  [%v on the 32-byte echo]\n", (savg - ravg).Round(10*time.Microsecond), (min - rawMin).Round(10*time.Microsecond))
+	}
+	time.Sleep(1500 * time.Millisecond)
+	fmt.Printf("heartbeat RTT (smoothed): %v   best: %v\n", sc.RTT().Round(10*time.Microsecond), sc.RTTMin().Round(10*time.Microsecond))
 }

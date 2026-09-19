@@ -12,6 +12,10 @@ import (
 // entries to drop. Sequence numbers are only meaningful within one epoch: a
 // hub restart starts a new epoch, and relays that see it flush everything.
 type InvalidationLog struct {
+	// OnAppend, if set, is called (outside the lock) for every new event so it
+	// can be pushed to relays immediately.
+	OnAppend func(epoch string, e relaylink.Event)
+
 	mu     sync.Mutex
 	epoch  string
 	seq    int64
@@ -34,13 +38,18 @@ func (l *InvalidationLog) Append(tags []string) int64 {
 		return l.Latest()
 	}
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	l.seq++
-	l.events = append(l.events, relaylink.Event{Seq: l.seq, Tags: append([]string(nil), tags...)})
+	ev := relaylink.Event{Seq: l.seq, Tags: append([]string(nil), tags...)}
+	l.events = append(l.events, ev)
 	if len(l.events) > l.max {
 		l.events = l.events[len(l.events)-l.max:]
 	}
-	return l.seq
+	epoch, hook := l.epoch, l.OnAppend
+	l.mu.Unlock()
+	if hook != nil {
+		hook(epoch, ev)
+	}
+	return ev.Seq
 }
 
 func (l *InvalidationLog) Latest() int64 {

@@ -85,6 +85,22 @@ func relayHubPublicKeyPath() string {
 	return filepath.Join(home, ".relayhub", "main-public.pem")
 }
 
+// relayHubReleasePublicKey returns the pinned OTA release key (base64) if one
+// has been created with `relayhub release keygen`; relays registered without
+// one never auto-update.
+func relayHubReleasePublicKey() string {
+	p := os.Getenv("RELAYHUB_RELEASE_PUBLIC_KEY_FILE")
+	if p == "" {
+		home, _ := os.UserHomeDir()
+		p = filepath.Join(home, ".relayhub", "release-key.pub")
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
 func relayHubPublicURL() string {
 	if u := os.Getenv("RELAYHUB_PUBLIC_URL"); u != "" {
 		return u
@@ -162,12 +178,16 @@ func adminRelaysAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Same JSON as relaylink.RelayBundle: what the relay's relayd reads.
-	bundle, _ := json.MarshalIndent(map[string]string{
+	fields := map[string]string{
 		"relay_id":        id,
 		"signing_key":     base64.StdEncoding.EncodeToString(priv),
 		"main_public_key": string(pubPEM),
 		"main_url":        relayHubPublicURL(),
-	}, "", "  ")
+	}
+	if rk := relayHubReleasePublicKey(); rk != "" {
+		fields["release_public_key"] = rk // enables over-the-air updates on this relay
+	}
+	bundle, _ := json.MarshalIndent(fields, "", "  ")
 	log.Printf("relay %q added (region %s, host %s)", id, region, host)
 	renderRelays(w, relaysPage{
 		Msg: fmt.Sprintf("Relay %s added.", id), NewID: id, Bundle: string(bundle),

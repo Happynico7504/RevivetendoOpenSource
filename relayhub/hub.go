@@ -32,8 +32,9 @@ func TagBans() string            { return "bans" }
 type Hub struct {
 	Src   Source
 	Log   *InvalidationLog
-	Certs *CertStore // optional: certificate sync
-	Fwd   *Forwarder // optional: request forwarding
+	Certs *CertStore    // optional: certificate sync
+	Fwd   *Forwarder    // optional: request forwarding
+	Rel   *ReleaseStore // optional: over-the-air relayd updates
 	Now   func() time.Time
 }
 
@@ -122,6 +123,31 @@ func (h *Hub) Dispatch(ctx context.Context, req *relaylink.Request) *relaylink.R
 			return fail(http.StatusNotFound)
 		}
 		return relaylink.JSON(200, pair, 0)
+
+	case p == relaylink.UpdateManifestPath:
+		if h.Rel == nil {
+			return fail(http.StatusNotFound)
+		}
+		m, err := h.Rel.Manifest(u.Query().Get("os"), u.Query().Get("arch"))
+		if err != nil {
+			return fail(http.StatusNotFound)
+		}
+		return relaylink.JSON(200, m, 0)
+
+	case p == relaylink.UpdateChunkPath:
+		if h.Rel == nil {
+			return fail(http.StatusNotFound)
+		}
+		ver, e1 := strconv.ParseUint(u.Query().Get("version"), 10, 64)
+		off, e2 := strconv.ParseInt(u.Query().Get("offset"), 10, 64)
+		if e1 != nil || e2 != nil {
+			return fail(http.StatusBadRequest)
+		}
+		c, err := h.Rel.Chunk(u.Query().Get("os"), u.Query().Get("arch"), ver, off)
+		if err != nil {
+			return fail(http.StatusNotFound)
+		}
+		return relaylink.JSON(200, c, 0)
 
 	case p == "/relay/v1/config/redirects":
 		rs, err := h.Src.Redirects(ctx)
