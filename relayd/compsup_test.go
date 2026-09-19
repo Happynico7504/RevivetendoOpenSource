@@ -300,3 +300,40 @@ func TestComponentThatCrashesBeforeGoodAfterIsNeverReportedHealthy(t *testing.T)
 		t.Fatal("a crash-looping edge was reported healthy (the relay would offer it to consoles)")
 	}
 }
+
+// Regression: relayd once exited after every component update and ran no component at all, because
+// a refactor of cmd/relayd dropped `upd.Exit = sup.Restart` and `go sup.Run(ctx)`. An Updater whose
+// Exit is unset ends the WHOLE process (os.Exit(0)), so the wiring has to be pinned by tests.
+func TestNewComponentWiresAnUpdateToRestartOnlyTheChild(t *testing.T) {
+	c := NewComponent(ComponentConfig{Name: "wscedge"}, nil, t.TempDir(), "", nil)
+	if c.Updater.Exit == nil {
+		t.Fatal("the updater has no Exit: after an install it would end relayd itself (os.Exit(0))")
+	}
+	if !c.Updater.KeepRunning {
+		t.Fatal("the updater stops checking after the first install")
+	}
+	c.Updater.Exit() // what Updater.Run does after an install: must ask the SUPERVISOR to restart
+	select {
+	case <-c.Supervisor.restart:
+	default:
+		t.Fatal("Exit did not ask the supervisor to restart the child")
+	}
+	// The component lives under its own directory, never relayd's.
+	if got := c.Updater.Dir; !strings.HasSuffix(got, "components/wscedge") {
+		t.Fatalf("component directory %q", got)
+	}
+}
+
+func TestComponentStartActuallyRunsTheChild(t *testing.T) {
+	dir := t.TempDir()
+	fallback := filepath.Join(dir, "child")
+	if err := os.WriteFile(fallback, compScript("wscedge", "1", false), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c := NewComponent(ComponentConfig{Name: "wscedge", Fallback: fallback}, nil, dir, "", func(string, ...any) {})
+	c.Supervisor.GoodAfter, c.Supervisor.MinDelay = 300*time.Millisecond, 10*time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c.Start(ctx)
+	waitFor(t, "Start to launch the child", func() bool { return c.Supervisor.Launches() == 1 })
+}

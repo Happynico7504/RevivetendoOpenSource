@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"log"
-	"path/filepath"
 	"time"
 
 	"github.com/Happynico7504/relayd"
@@ -27,11 +26,8 @@ func startComponents(ctx context.Context, cfg *relayd.Config, client *relaylink.
 		if cc.Disabled {
 			continue
 		}
-		upd := &relayd.Updater{
-			Component: cc.Name, Client: client, Dir: filepath.Join(cfg.DataDir, "components", cc.Name),
-			Window: cfg.Update.Window, KeepRunning: true, Logf: log.Printf,
-		}
-		sup := &relayd.ComponentSupervisor{Updater: upd, Fallback: cc.Fallback, Args: cc.Args, Env: cc.Env, Logf: log.Printf}
+		comp := relayd.NewComponent(cc, client, cfg.DataDir, cfg.Update.Window, log.Printf)
+		upd, sup := comp.Updater, comp.Supervisor
 		if spec, isEdge := relayd.KnownEdges[cc.Name]; isEdge && bridges[cc.Name] != nil {
 			// Connected to the main through the stream: the child runs in pipe mode.
 			sup.Args = append(append([]string(nil), cc.Args...), "-pipe")
@@ -57,6 +53,7 @@ func startComponents(ctx context.Context, cfg *relayd.Config, client *relaylink.
 				})
 			}
 		}
+		comp.Start(ctx) // an update restarts only this child (NewComponent); see relayd/component.go
 		if bundle.ReleasePublicKey == "" || cfg.Update.Disabled {
 			log.Printf("component %s: over-the-air updates are off; it runs only from its fallback binary", cc.Name)
 			continue
