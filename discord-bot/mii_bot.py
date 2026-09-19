@@ -12,6 +12,34 @@ from discord.ext import commands
 import psycopg2
 import aiohttp
 from aiohttp import ClientSession
+import hashlib
+
+# Shared local Redis (same instance the Go services use). Fails open: if the
+# `redis` package is missing or Redis is down, every cache call is a miss/no-op.
+try:
+    import redis as _redis_mod
+    _redis = _redis_mod.Redis(host="127.0.0.1", port=6379, socket_timeout=1, socket_connect_timeout=1)
+except Exception:
+    _redis = None
+
+
+def _cache_get(key: str):
+    if _redis is None:
+        return None
+    try:
+        return _redis.get(key)
+    except Exception:
+        return None
+
+
+def _cache_set(key: str, value, ttl_seconds: int):
+    if _redis is None:
+        return
+    try:
+        _redis.set(key, value, ex=ttl_seconds)
+    except Exception:
+        pass
+
 
 _env_path = os.path.join(os.path.dirname(__file__), ".env")
 if os.path.exists(_env_path):
@@ -109,13 +137,18 @@ async def revivetendo_mii_cmd(interaction: discord.Interaction, pnid: str = ""):
             )
             return
 
-        mii_b64 = base64.urlsafe_b64encode(mii_bytes).decode().rstrip("=")
-        render_url = f"https://mii-unsecure.ariankordi.net/miis/image.png?data={mii_b64}&width=2048&type=face&api_id=1"
-        async with session.get(render_url) as resp:
-            if resp.status != 200:
-                await interaction.followup.send(f"❌ Mii render API returned HTTP {resp.status}.", ephemeral=True)
-                return
-            img_data = await resp.read()
+        # Same bytes always render the same image, so cache the PNG for 24h.
+        cache_key = "miirender:" + hashlib.sha256(mii_bytes).hexdigest()
+        img_data = await asyncio.to_thread(_cache_get, cache_key)
+        if not img_data:
+            mii_b64 = base64.urlsafe_b64encode(mii_bytes).decode().rstrip("=")
+            render_url = f"https://mii-unsecure.ariankordi.net/miis/image.png?data={mii_b64}&width=2048&type=face&api_id=1"
+            async with session.get(render_url) as resp:
+                if resp.status != 200:
+                    await interaction.followup.send(f"❌ Mii render API returned HTTP {resp.status}.", ephemeral=True)
+                    return
+                img_data = await resp.read()
+            await asyncio.to_thread(_cache_set, cache_key, img_data, 24 * 3600)
 
     embed = discord.Embed(
         title=mii_name,

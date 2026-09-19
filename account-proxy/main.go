@@ -749,6 +749,7 @@ func handle(w http.ResponseWriter, r *http.Request) {
 					         VALUES ($1, $2)
 					         ON CONFLICT (pid) DO UPDATE SET pnid = EXCLUDED.pnid, updated_at = NOW()`,
 						p.PID, p.PNID)
+					cachePNIDMapping(p.PID, p.PNID)
 				}
 				log.Printf("profile: captured PID=%d PNID=%q for %s", p.PID, p.PNID, ip)
 			}
@@ -1346,6 +1347,7 @@ func storeMiiName(pid uint32, name string) {
 	         VALUES ($1, $2)
 	         ON CONFLICT (pid) DO UPDATE SET mii_name = EXCLUDED.mii_name`,
 		pid, name)
+	invalidateLookupCache(pid)
 }
 
 var (
@@ -2402,6 +2404,46 @@ type lookupResult struct {
 	MiiName string `json:"mii_name"`
 }
 
+// PNID <-> PID mappings never change, so they are cached with a long TTL and
+// no invalidation: "pnid:<pid>" -> PNID and "pidof:<pnid>" -> PID (both also
+// read by relay-admin). Only real, non-empty mappings are ever stored.
+const pnidMappingTTL = 30 * 24 * time.Hour
+
+func cachePNIDMapping(pid uint32, pnid string) {
+	if pid == 0 || pnid == "" {
+		return
+	}
+	p := strconv.FormatUint(uint64(pid), 10)
+	ctx := context.Background()
+	runtimeCacheSet(ctx, "pnid:"+p, pnid, pnidMappingTTL)
+	runtimeCacheSet(ctx, "pidof:"+pnid, p, pnidMappingTTL)
+	// A new PNID for this PID changes what /internal/lookup would answer.
+	invalidateLookupCache(pid)
+}
+
+// invalidateLookupCache drops the cached /internal/lookup response, which also
+// embeds the (mutable) Mii name.
+func invalidateLookupCache(pid uint32) {
+	runtimeCacheClient.Del(context.Background(), "lookup:"+strconv.FormatUint(uint64(pid), 10))
+}
+
+// pidForPNID resolves PNID -> PID via pnid_cache behind the Redis mapping cache.
+// Returns 0 if unknown.
+func pidForPNID(pnid string) uint32 {
+	if pnid == "" {
+		return 0
+	}
+	if v, ok := runtimeCacheGet(context.Background(), "pidof:"+pnid); ok {
+		if n, err := strconv.ParseUint(v, 10, 32); err == nil && n != 0 {
+			return uint32(n)
+		}
+	}
+	var pid uint32
+	db.QueryRow(`SELECT pid FROM pnid_cache WHERE pnid = $1`, pnid).Scan(&pid)
+	cachePNIDMapping(pid, pnid)
+	return pid
+}
+
 func handleInternalLookup(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	fail := func(msg string, code int) {
@@ -2413,6 +2455,12 @@ func handleInternalLookup(w http.ResponseWriter, r *http.Request) {
 	targetPID, err := strconv.ParseUint(targetStr, 10, 64)
 	if err != nil || targetPID == 0 {
 		fail("bad pid", http.StatusBadRequest)
+		return
+	}
+
+	lookupKey := "lookup:" + strconv.FormatUint(targetPID, 10)
+	if cached, ok := runtimeCacheGet(r.Context(), lookupKey); ok {
+		io.WriteString(w, cached)
 		return
 	}
 
@@ -2433,13 +2481,19 @@ func handleInternalLookup(w http.ResponseWriter, r *http.Request) {
 		db.QueryRow(`SELECT friend_nnid FROM pretendo_friends WHERE friend_pid = $1 AND friend_nnid != '' LIMIT 1`, targetPID).Scan(&pnid)
 		if pnid != "" {
 			db.Exec(`INSERT INTO pnid_cache (pid, pnid) VALUES ($1, $2) ON CONFLICT (pid) DO UPDATE SET pnid = EXCLUDED.pnid, updated_at = NOW()`, targetPID, pnid)
+			cachePNIDMapping(uint32(targetPID), pnid)
 		}
 	}
 
 	if pnid != "" {
 		var miiName string
 		db.QueryRow(`SELECT mii_name FROM mii_names WHERE pid = $1`, targetPID).Scan(&miiName)
-		json.NewEncoder(w).Encode(lookupResult{PID: targetPID, PNID: pnid, MiiName: miiName})
+		out, _ := json.Marshal(lookupResult{PID: targetPID, PNID: pnid, MiiName: miiName})
+		out = append(out, '\n')
+		w.Write(out)
+		if miiName != "" {
+			runtimeCacheSet(r.Context(), lookupKey, string(out), 3*time.Hour)
+		}
 		return
 	}
 
@@ -2648,8 +2702,7 @@ func handleInternalAuth(w http.ResponseWriter, r *http.Request) {
 	entered := sha256.Sum256([]byte(password))
 	if hex.EncodeToString(entered[:]) != webPwHash {
 		log.Printf("internal/auth: wrong web password for %q", userID)
-		var pid uint32
-		db.QueryRow(`SELECT pid FROM pnid_cache WHERE pnid = $1`, userID).Scan(&pid)
+		pid := pidForPNID(userID)
 		db.Exec(`INSERT INTO web_logins (pid, ip, success) VALUES ($1, $2, FALSE)`, pid, ip)
 		fail("invalid username or password", 401)
 		return
@@ -2662,8 +2715,7 @@ func handleInternalAuth(w http.ResponseWriter, r *http.Request) {
 	// Juxt access independent of Pretendo account state - a banned-from-Pretendo user (who
 	// may get unbanned later but still wants Juxt access now) would otherwise pass the
 	// local check above and then get rejected anyway by a real Pretendo OAuth call.
-	var pid uint32
-	db.QueryRow(`SELECT pid FROM pnid_cache WHERE pnid = $1`, userID).Scan(&pid)
+	pid := pidForPNID(userID)
 	if pid == 0 {
 		log.Printf("internal/auth: no cached PID for %q, cannot authenticate locally", userID)
 		fail("authentication failed", 401)
@@ -2787,8 +2839,7 @@ func handleInternalMii(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 3. Look up PID from any local table: pnid_cache, pretendo_friends.
-	var targetPID uint64
-	db.QueryRow(`SELECT pid FROM pnid_cache WHERE pnid = $1`, pnid).Scan(&targetPID)
+	targetPID := uint64(pidForPNID(pnid))
 	if targetPID == 0 {
 		db.QueryRow(`SELECT friend_pid FROM pretendo_friends WHERE friend_nnid = $1 LIMIT 1`, pnid).Scan(&targetPID)
 	}
@@ -2862,6 +2913,7 @@ func handleInternalMii(w http.ResponseWriter, r *http.Request) {
 		db.Exec(`INSERT INTO pnid_cache (pid, pnid) VALUES ($1, $2)
 			ON CONFLICT (pid) DO UPDATE SET pnid=EXCLUDED.pnid, updated_at=NOW()`,
 			targetPID, result.PNID)
+		cachePNIDMapping(uint32(targetPID), result.PNID)
 	}
 	log.Printf("internal/mii: PRUDP fetched mii for pnid=%s pid=%d (%d bytes)", pnid, targetPID, len(miiBytes))
 
@@ -3014,6 +3066,10 @@ var wiiuTaskSheetTitleIDRe = regexp.MustCompile(`<TitleId>([0-9a-fA-F]{16})</Tit
 // this is a fixed identity, not something that changes over time.
 var realTaskSheetTitleIDCache sync.Map
 
+// Failed lookups are remembered briefly in Redis so an unreachable or
+// unregistered bossAppId does not hit Nintendo on every poll.
+const realTitleIDNegativeTTL = 5 * time.Minute
+
 // lookupRealWiiUTaskSheetTitleID queries the real Nintendo BOSS server for the
 // outer TaskSheet TitleId a given bossAppId is really registered under, so we
 // echo back the same value the console already expects instead of a guessed
@@ -3026,6 +3082,13 @@ func lookupRealWiiUTaskSheetTitleID(bossAppID, taskID string) (string, bool) {
 	if v, ok := realTaskSheetTitleIDCache.Load(bossAppID); ok {
 		return v.(string), true
 	}
+	if v, ok := runtimeCacheGet(context.Background(), "tasksheet-titleid:"+bossAppID); ok {
+		if v == "" {
+			return "", false // negative-cached recent failure
+		}
+		realTaskSheetTitleIDCache.Store(bossAppID, v)
+		return v, true
+	}
 	url := fmt.Sprintf("https://npts.app.nintendo.net/p01/tasksheet/1/%s/%s?c=US&l=en", bossAppID, taskID)
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -3035,10 +3098,12 @@ func lookupRealWiiUTaskSheetTitleID(bossAppID, taskID string) (string, bool) {
 	req.Header.Set("Accept", "*/*")
 	resp, err := realNintendoHTTPClient.Do(req)
 	if err != nil {
+		runtimeCacheSet(context.Background(), "tasksheet-titleid:"+bossAppID, "", realTitleIDNegativeTTL)
 		return "", false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		runtimeCacheSet(context.Background(), "tasksheet-titleid:"+bossAppID, "", realTitleIDNegativeTTL)
 		return "", false
 	}
 	body, err := io.ReadAll(resp.Body)
@@ -3051,6 +3116,7 @@ func lookupRealWiiUTaskSheetTitleID(bossAppID, taskID string) (string, bool) {
 	}
 	titleID := string(m[1])
 	realTaskSheetTitleIDCache.Store(bossAppID, titleID)
+	runtimeCacheSet(context.Background(), "tasksheet-titleid:"+bossAppID, titleID, 90*24*time.Hour)
 	return titleID, true
 }
 
@@ -3328,7 +3394,19 @@ const (
 // rankingTemplateSlots returns, for each rank slot found in the template
 // (a run of 3 consecutive sub-records), the file offset of its first
 // sub-record.
+// The template is embedded and never changes, so its slot layout is computed
+// once. Callers must treat the returned slice as read-only.
+var (
+	rankingSlotsOnce   sync.Once
+	rankingSlotsCached [][3]int
+)
+
 func rankingTemplateSlots() [][3]int {
+	rankingSlotsOnce.Do(func() { rankingSlotsCached = computeRankingTemplateSlots() })
+	return rankingSlotsCached
+}
+
+func computeRankingTemplateSlots() [][3]int {
 	var starts []int
 	i := 0
 	for {
@@ -3466,11 +3544,18 @@ func miiNameForPID(pid uint32) string {
 // format embedded in rankingDataTemplate's slots - see patchMiiData), or nil
 // if they have none stored yet.
 func miiDataForPID(pid uint32) []byte {
+	// Redis-cached for 30 minutes (only real 96-byte structures are stored, so
+	// a player whose Mii hasn't synced yet is retried on the next request).
+	key := "miidata:" + strconv.FormatUint(uint64(pid), 10)
+	if cached, ok := runtimeCacheGetBytes(context.Background(), key); ok && len(cached) == rankingMiiStructSize {
+		return cached
+	}
 	var data []byte
 	db.QueryRow(`SELECT mii_data FROM user_settings WHERE pid = $1`, pid).Scan(&data)
 	if len(data) != rankingMiiStructSize {
 		return nil
 	}
+	runtimeCacheSetBytes(context.Background(), key, data, 30*time.Minute)
 	return data
 }
 
@@ -3516,7 +3601,24 @@ func clubAndRegionForRequest(r *http.Request) (uint32, uint32) {
 // rankingMiiStructOffset (see patchMiiData) - confirmed byte-for-byte to
 // match our own user_settings.mii_data format - rather than anything
 // touching the rest of the not-fully-understood record internals.
+// generateRankingData returns the plaintext ranking file for a club/region.
+// The result only changes when scores or Miis change, so it is cached in Redis
+// for 5 minutes. Only the plaintext is cached: callers still encrypt per
+// request with a fresh IV (the TaskSheet hash is computed from that output).
 func generateRankingData(clubCode, region uint32) ([]byte, error) {
+	key := fmt.Sprintf("rankingdata:%d:%d", clubCode, region)
+	if cached, ok := runtimeCacheGetBytes(context.Background(), key); ok && len(cached) == len(rankingDataTemplate) {
+		return cached, nil
+	}
+	out, err := buildRankingData(clubCode, region)
+	if err != nil {
+		return nil, err
+	}
+	runtimeCacheSetBytes(context.Background(), key, out, 5*time.Minute)
+	return out, nil
+}
+
+func buildRankingData(clubCode, region uint32) ([]byte, error) {
 	slots := rankingTemplateSlots()
 	if len(slots) == 0 {
 		return nil, fmt.Errorf("rankingdata template: no slots found")
@@ -3582,6 +3684,16 @@ var wscSpotPassDataCache sync.Map
 // fresh/never-used bossAppId doesn't. Falls back to false if the real server
 // can't be reached (e.g. WAF), so the caller can use a placeholder instead.
 func realNintendoDataID(bossAppID, taskID, fileName, rawQuery string) (string, bool) {
+	// Verified 2026-09-19: Nintendo's answer is frozen (identical on repeat
+	// queries, matches the archived shutdown-era tasksheets, same for DE/US),
+	// so the country/lang query string is not part of the key.
+	cacheKey := "tasksheet-dataid:" + bossAppID + "/" + taskID + "/" + fileName
+	if v, ok := runtimeCacheGet(context.Background(), cacheKey); ok {
+		if v == "" {
+			return "", false // negative-cached recent failure
+		}
+		return v, true
+	}
 	target := fmt.Sprintf("https://npts.app.nintendo.net/p01/tasksheet/1/%s/%s/%s", bossAppID, taskID, fileName)
 	if rawQuery != "" {
 		target += "?" + rawQuery
@@ -3589,11 +3701,13 @@ func realNintendoDataID(bossAppID, taskID, fileName, rawQuery string) (string, b
 	resp, err := realNintendoHTTPClient.Get(target)
 	if err != nil {
 		log.Printf("BOSS capture: real Nintendo DataId lookup failed: %v", err)
+		runtimeCacheSet(context.Background(), cacheKey, "", realTitleIDNegativeTTL)
 		return "", false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("BOSS capture: real Nintendo DataId lookup status=%d", resp.StatusCode)
+		runtimeCacheSet(context.Background(), cacheKey, "", realTitleIDNegativeTTL)
 		return "", false
 	}
 	body, err := io.ReadAll(resp.Body)
@@ -3614,6 +3728,7 @@ func realNintendoDataID(bossAppID, taskID, fileName, rawQuery string) (string, b
 	if sheet.Files.File.DataId == "" {
 		return "", false
 	}
+	runtimeCacheSet(context.Background(), cacheKey, sheet.Files.File.DataId, 90*24*time.Hour)
 	return sheet.Files.File.DataId, true
 }
 
@@ -3652,7 +3767,7 @@ func handleWSCSpotPassFile(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 	hash := fmt.Sprintf("%x", md5.Sum(encrypted))
-	wscSpotPassDataCache.Store(hash, encrypted)
+	bossDataStore(&wscSpotPassDataCache, hash, encrypted)
 
 	dataID := "1"
 	if real, ok := realNintendoDataID(bossAppID, taskID, fileName, r.URL.RawQuery); ok {
@@ -3700,8 +3815,8 @@ func handleWSCSpotPassData(w http.ResponseWriter, r *http.Request) bool {
 	hash := parts[len(parts)-1]
 
 	var encrypted []byte
-	if v, ok := wscSpotPassDataCache.Load(hash); ok {
-		encrypted = v.([]byte)
+	if data, ok := bossDataLoad(&wscSpotPassDataCache, hash); ok {
+		encrypted = data
 	} else {
 		// No matching TaskSheet fetch happened first (shouldn't normally
 		// occur) - regenerate with no club/region filter rather than fail.
@@ -3982,7 +4097,7 @@ func handleWiiUSysMsgTasksheet(w http.ResponseWriter, r *http.Request) bool {
 			continue
 		}
 		hash := fmt.Sprintf("%x", md5.Sum(encrypted))
-		wiiuSysMsgDataCache.Store(hash, encrypted)
+		bossDataStore(&wiiuSysMsgDataCache, hash, encrypted)
 
 		// * DataId must be a large, ever-increasing value, not just the DB
 		// * row's own small serial id - confirmed live 2026-08-24: a real
@@ -4039,12 +4154,11 @@ func handleWiiUSysMsgData(w http.ResponseWriter, r *http.Request) bool {
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 	hash := parts[len(parts)-1]
 
-	v, ok := wiiuSysMsgDataCache.Load(hash)
+	encrypted, ok := bossDataLoad(&wiiuSysMsgDataCache, hash)
 	if !ok {
 		http.NotFound(w, r)
 		return true
 	}
-	encrypted := v.([]byte)
 
 	log.Printf("BOSS capture: %s %s -> served %d bytes", r.Method, r.URL.Path, len(encrypted))
 	w.Header().Set("Content-Type", "application/octet-stream")
@@ -4176,7 +4290,7 @@ func handle3DSSysMsgTasksheet(w http.ResponseWriter, r *http.Request) bool {
 			continue
 		}
 		hash := fmt.Sprintf("%x", md5.Sum(encrypted))
-		wiiuSysMsgDataCache.Store(hash, encrypted)
+		bossDataStore(&wiiuSysMsgDataCache, hash, encrypted)
 
 		dataID := time.Now().Unix()*1000 + int64(m.id)
 
@@ -5357,6 +5471,46 @@ func runtimeCacheGet(ctx context.Context, key string) (string, bool) {
 }
 
 func runtimeCacheSet(ctx context.Context, key string, value string, ttl time.Duration) {
+	if err := runtimeCacheClient.Set(ctx, key, value, ttl).Err(); err != nil {
+		log.Printf("runtimeCache: set failed for key %q: %v", key, err)
+	}
+}
+
+// bossDataStore/bossDataLoad keep hash -> encrypted BOSS file bytes so the
+// data request that follows a TaskSheet still matches the hash it advertised
+// even if this process restarts in between. Redis is the shared tier; the
+// in-process wiiuSysMsgDataCache/wscSpotPassDataCache maps stay as a
+// fail-open fallback if Redis is down.
+const bossDataTTL = time.Hour
+
+func bossDataStore(m *sync.Map, hash string, data []byte) {
+	m.Store(hash, data)
+	if err := runtimeCacheClient.Set(context.Background(), "bossdata:"+hash, data, bossDataTTL).Err(); err != nil {
+		log.Printf("runtimeCache: set failed for bossdata %s: %v", hash, err)
+	}
+}
+
+func bossDataLoad(m *sync.Map, hash string) ([]byte, bool) {
+	if v, ok := m.Load(hash); ok {
+		return v.([]byte), true
+	}
+	data, err := runtimeCacheClient.Get(context.Background(), "bossdata:"+hash).Bytes()
+	if err != nil {
+		return nil, false
+	}
+	m.Store(hash, data)
+	return data, true
+}
+
+func runtimeCacheGetBytes(ctx context.Context, key string) ([]byte, bool) {
+	val, err := runtimeCacheClient.Get(ctx, key).Bytes()
+	if err != nil {
+		return nil, false
+	}
+	return val, true
+}
+
+func runtimeCacheSetBytes(ctx context.Context, key string, value []byte, ttl time.Duration) {
 	if err := runtimeCacheClient.Set(ctx, key, value, ttl).Err(); err != nil {
 		log.Printf("runtimeCache: set failed for key %q: %v", key, err)
 	}

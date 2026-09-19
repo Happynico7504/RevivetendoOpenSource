@@ -22,6 +22,35 @@ from piper import PiperVoice
 import psycopg2
 import aiohttp
 from aiohttp import web, ClientSession
+import hashlib
+import json
+
+# Shared local Redis (same instance the Go services use). Fails open: if the
+# `redis` package is missing or Redis is down, every cache call is a miss/no-op.
+try:
+    import redis as _redis_mod
+    _redis = _redis_mod.Redis(host="127.0.0.1", port=6379, socket_timeout=1, socket_connect_timeout=1)
+except Exception:
+    _redis = None
+
+
+def _cache_get(key: str):
+    if _redis is None:
+        return None
+    try:
+        return _redis.get(key)
+    except Exception:
+        return None
+
+
+def _cache_set(key: str, value, ttl_seconds: int):
+    if _redis is None:
+        return
+    try:
+        _redis.set(key, value, ex=ttl_seconds)
+    except Exception:
+        pass
+
 
 # ──────────────────────────────────────────────
 # Config — loaded from .env in the same directory
@@ -316,12 +345,19 @@ async def _fetch_pretendo_mii(pnid: str, session: ClientSession):
 async def _render_mii_png(mii_bytes: bytes, session: ClientSession):
     """Render FFLStoreData to a PNG via the same backend /mii uses. Returns (img_data, error) —
     exactly one of which is set."""
+    # The render is deterministic for the given Mii bytes, so cache the PNG for 24h.
+    cache_key = "miirender:" + hashlib.sha256(mii_bytes).hexdigest()
+    cached = await asyncio.to_thread(_cache_get, cache_key)
+    if cached:
+        return cached, None
     mii_b64 = base64.urlsafe_b64encode(mii_bytes).decode().rstrip("=")
     render_url = f"https://mii-unsecure.ariankordi.net/miis/image.png?data={mii_b64}&width=2048&type=face&api_id=1"
     async with session.get(render_url) as resp:
         if resp.status != 200:
             return None, f"Mii render API returned HTTP {resp.status}."
-        return await resp.read(), None
+        data = await resp.read()
+    await asyncio.to_thread(_cache_set, cache_key, data, 24 * 3600)
+    return data, None
 
 
 @bot.tree.command(guild=_guild, name="mii", description="Render a Mii as a 2048×2048 image")
@@ -396,7 +432,18 @@ async def mii_cmd(interaction: discord.Interaction, pnid: str = ""):
 
 def _pick_random_mii():
     """Pick one random (pnid, mii_name, mii_bytes) from every PNID we have Mii data for,
-    across all three sources /mii falls back through. Returns None if none found."""
+    across all three sources /mii falls back through. Returns None if none found.
+    The candidate list (small: ~96 bytes per Mii) is cached in Redis for 5 minutes,
+    since the slideshow calls this every few seconds."""
+    cached = _cache_get("bot:mii-candidates")
+    if cached:
+        try:
+            rows = [(p, n, base64.b64decode(d)) for p, n, d in json.loads(cached)]
+            if rows:
+                pnid, mii_name, mii_data = random.choice(rows)
+                return pnid, (mii_name or pnid), mii_data
+        except Exception:
+            pass
     with db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -415,6 +462,11 @@ def _pick_random_mii():
             rows = cur.fetchall()
     if not rows:
         return None
+    try:
+        _cache_set("bot:mii-candidates", json.dumps(
+            [[p, n, base64.b64encode(bytes(d)).decode()] for p, n, d in rows]), 300)
+    except Exception:
+        pass
     pnid, mii_name, mii_data = random.choice(rows)
     return pnid, (mii_name or pnid), bytes(mii_data)
 

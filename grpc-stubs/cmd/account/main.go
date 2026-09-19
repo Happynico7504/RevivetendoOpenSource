@@ -26,6 +26,7 @@ import (
 	pb "github.com/PretendoNetwork/grpc-go/account"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
+	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -199,6 +200,38 @@ func (s *accountServer) GetUserData(ctx context.Context, req *pb.GetUserDataRequ
 //  4. NEX GetBasicInfo — live call to Pretendo via account-proxy internal endpoint,
 //     authenticated as the caller identified by x-caller-pid gRPC metadata
 func (s *accountServer) lookupPID(ctx context.Context, pid uint32) (username, miiName string, err error) {
+	// Redis layer, shared with account-proxy: "lookup:<pid>" holds the same
+	// {"pid","pnid","mii_name"} JSON its /internal/lookup endpoint serves (and
+	// which it deletes when the Mii name changes); "pnid:<pid>" is the
+	// permanent PID -> PNID mapping. Both fail open on a Redis outage.
+	key := "lookup:" + strconv.FormatUint(uint64(pid), 10)
+	if v, cerr := runtimeCacheClient.Get(ctx, key).Result(); cerr == nil {
+		var cached struct {
+			PNID    string `json:"pnid"`
+			MiiName string `json:"mii_name"`
+		}
+		if json.Unmarshal([]byte(v), &cached) == nil && cached.PNID != "" {
+			return cached.PNID, cached.MiiName, nil
+		}
+	}
+	username, miiName, err = s.lookupPIDUncached(ctx, pid)
+	if err == nil && username != "" {
+		pidStr := strconv.FormatUint(uint64(pid), 10)
+		runtimeCacheClient.Set(ctx, "pnid:"+pidStr, username, 30*24*time.Hour)
+		runtimeCacheClient.Set(ctx, "pidof:"+username, pidStr, 30*24*time.Hour)
+		if miiName != "" {
+			if blob, merr := json.Marshal(map[string]interface{}{"pid": pid, "pnid": username, "mii_name": miiName}); merr == nil {
+				runtimeCacheClient.Set(ctx, key, blob, 3*time.Hour)
+			}
+		}
+	}
+	return username, miiName, err
+}
+
+// runtimeCacheClient points at the local Redis shared by every service.
+var runtimeCacheClient = redis.NewClient(&redis.Options{Addr: "127.0.0.1:6379"})
+
+func (s *accountServer) lookupPIDUncached(ctx context.Context, pid uint32) (username, miiName string, err error) {
 	// 1. nex_accounts — but skip when username is the PID as a decimal string (NEX protocol convention)
 	dbErr := s.db.QueryRowContext(ctx, `SELECT username FROM nex_accounts WHERE pid = $1`, pid).Scan(&username)
 	if dbErr != nil && dbErr != sql.ErrNoRows {

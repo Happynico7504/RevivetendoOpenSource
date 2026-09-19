@@ -159,7 +159,41 @@ func clubAppData(code uint32) string {
 	return base64.StdEncoding.EncodeToString([]byte("\x00\x00\x00" + fmt.Sprintf("%03d", code) + "\x00\x00"))
 }
 
+// clubNameCache holds resolveClubName results in-process (this module is
+// vendored, so it deliberately doesn't pull in a Redis client). Club names
+// almost never change: hits live 1 hour, misses 1 minute so a newly created
+// community is picked up quickly.
+type clubNameEntry struct {
+	name    string
+	ok      bool
+	expires time.Time
+}
+
+var (
+	clubNameCacheMu sync.Mutex
+	clubNameCache   = map[string]clubNameEntry{}
+)
+
 func resolveClubName(regionPrefix string, code uint32) (string, bool) {
+	key := fmt.Sprintf("%s/%d", regionPrefix, code)
+	clubNameCacheMu.Lock()
+	e, hit := clubNameCache[key]
+	clubNameCacheMu.Unlock()
+	if hit && time.Now().Before(e.expires) {
+		return e.name, e.ok
+	}
+	name, ok := resolveClubNameUncached(regionPrefix, code)
+	ttl := time.Minute
+	if ok {
+		ttl = time.Hour
+	}
+	clubNameCacheMu.Lock()
+	clubNameCache[key] = clubNameEntry{name: name, ok: ok, expires: time.Now().Add(ttl)}
+	clubNameCacheMu.Unlock()
+	return name, ok
+}
+
+func resolveClubNameUncached(regionPrefix string, code uint32) (string, bool) {
 	mainID, ok := juxtMainCommunityByRegion[regionPrefix]
 	if !ok || juxtCommunitiesCol == nil {
 		return "", false

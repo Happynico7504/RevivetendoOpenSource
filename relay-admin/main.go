@@ -52,6 +52,68 @@ func runtimeCacheSet(ctx context.Context, key string, value string, ttl time.Dur
 	}
 }
 
+func runtimeCacheGetBytes(ctx context.Context, key string) ([]byte, bool) {
+	val, err := runtimeCacheClient.Get(ctx, key).Bytes()
+	if err != nil {
+		return nil, false
+	}
+	return val, true
+}
+
+func runtimeCacheSetBytes(ctx context.Context, key string, value []byte, ttl time.Duration) {
+	if err := runtimeCacheClient.Set(ctx, key, value, ttl).Err(); err != nil {
+		log.Printf("runtimeCache: set failed for key %q: %v", key, err)
+	}
+}
+
+// pnidForPID resolves pid -> PNID via pnid_cache, behind the Redis mapping
+// cache shared with account-proxy ("pnid:<pid>" / "pidof:<pnid>"). PNID <-> PID
+// mappings never change, so entries live 30 days and are never invalidated.
+// Only non-empty results are cached, so a not-yet-known PID is retried.
+func pnidForPID(pid int64) (string, error) {
+	key := "pnid:" + strconv.FormatInt(pid, 10)
+	if v, ok := runtimeCacheGet(context.Background(), key); ok {
+		return v, nil
+	}
+	var pnid string
+	if err := db.QueryRow(`SELECT pnid FROM pnid_cache WHERE pid = $1`, pid).Scan(&pnid); err != nil {
+		return "", err
+	}
+	if pnid != "" {
+		runtimeCacheSet(context.Background(), key, pnid, pnidMappingTTL)
+		runtimeCacheSet(context.Background(), "pidof:"+pnid, strconv.FormatInt(pid, 10), pnidMappingTTL)
+	}
+	return pnid, nil
+}
+
+const pnidMappingTTL = 30 * 24 * time.Hour
+
+// pidForPNID is the reverse of pnidForPID (same shared cache keys).
+func pidForPNID(pnid string) (int64, error) {
+	if v, ok := runtimeCacheGet(context.Background(), "pidof:"+pnid); ok {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n != 0 {
+			return n, nil
+		}
+	}
+	var pid int64
+	if err := db.QueryRow(`SELECT pid FROM pnid_cache WHERE pnid = $1`, pnid).Scan(&pid); err != nil {
+		return 0, err
+	}
+	if pid != 0 {
+		runtimeCacheSet(context.Background(), "pidof:"+pnid, strconv.FormatInt(pid, 10), pnidMappingTTL)
+		runtimeCacheSet(context.Background(), "pnid:"+strconv.FormatInt(pid, 10), pnid, pnidMappingTTL)
+	}
+	return pid, nil
+}
+
+const redirectsAPICacheKey = "relay-admin:api-redirects"
+
+// invalidateRedirectsCache must be called after every write to the redirects
+// table (all writers live in this file).
+func invalidateRedirectsCache() {
+	runtimeCacheClient.Del(context.Background(), redirectsAPICacheKey)
+}
+
 var gameServerTitles = map[string]string{
 	"00003200": "Friends / Presence",
 	"1005A000": "WiiU Chat",
@@ -358,6 +420,19 @@ var swapdoodleS3 *minio.Client
 var swapdoodleS3Bucket string
 
 func fetchWiiUTitleDB() {
+	// The flattened titleID-suffix -> name map is cached in Redis so restarts
+	// don't refetch (and depend on) the external GitHub Pages file each time.
+	const titleDBKey = "titledb:wup-names"
+	if cached, ok := runtimeCacheGet(context.Background(), titleDBKey); ok {
+		var names map[string]string
+		if json.Unmarshal([]byte(cached), &names) == nil && len(names) > 0 {
+			for k, v := range names {
+				gameServerTitles[k] = v
+			}
+			log.Printf("[titledb] loaded %d titles from redis cache", len(names))
+			return
+		}
+	}
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Get("https://dantheman827.github.io/nus-info/complete-wup-regionprimaries.json")
 	if err != nil {
@@ -375,6 +450,7 @@ func fetchWiiUTitleDB() {
 		return
 	}
 	added := 0
+	names := map[string]string{}
 	for _, titles := range db {
 		for titleID, entry := range titles {
 			if len(titleID) != 16 || entry.Name == "" {
@@ -382,8 +458,12 @@ func fetchWiiUTitleDB() {
 			}
 			key := strings.ToUpper(titleID[8:])
 			gameServerTitles[key] = entry.Name
+			names[key] = entry.Name
 			added++
 		}
+	}
+	if blob, err := json.Marshal(names); err == nil && len(names) > 0 {
+		runtimeCacheSet(context.Background(), titleDBKey, string(blob), 24*time.Hour)
 	}
 	log.Printf("[titledb] loaded %d additional titles", added)
 }
@@ -529,6 +609,11 @@ func main() {
 // --- API ---
 
 func apiRedirects(w http.ResponseWriter, r *http.Request) {
+	if cached, ok := runtimeCacheGetBytes(context.Background(), redirectsAPICacheKey); ok {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(cached)
+		return
+	}
 	rows, err := db.Query(`
 		SELECT id, type, COALESCE(address, ''), from_host, to_host, COALESCE(game_server_id, ''), COALESCE(port, 0), COALESCE(access_mode, 'whitelist'), enabled, created_at
 		FROM redirects WHERE enabled = true ORDER BY id`)
@@ -549,8 +634,11 @@ func apiRedirects(w http.ResponseWriter, r *http.Request) {
 	if list == nil {
 		list = []Redirect{}
 	}
+	out, _ := json.Marshal(list)
+	out = append(out, '\n')
+	runtimeCacheSetBytes(context.Background(), redirectsAPICacheKey, out, 5*time.Minute)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(list)
+	w.Write(out)
 }
 
 func apiStats(w http.ResponseWriter, r *http.Request) {
@@ -561,10 +649,21 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 
 func collectStats() Stats {
 	var s Stats
+	// Public and unauthenticated, 4 COUNT(*)s per hit: live numbers, so only
+	// a 60s cache.
+	if cached, ok := runtimeCacheGetBytes(context.Background(), "relay-admin:stats"); ok {
+		if json.Unmarshal(cached, &s) == nil {
+			return s
+		}
+		s = Stats{}
+	}
 	db.QueryRow(`SELECT COUNT(*) FROM nex_accounts`).Scan(&s.TotalPIDs)
 	db.QueryRow(`SELECT COUNT(*) FROM relay_requests`).Scan(&s.TotalRequests)
 	db.QueryRow(`SELECT COUNT(*) FROM relay_requests WHERE requested_at > NOW() - INTERVAL '24 hours'`).Scan(&s.Requests24h)
 	db.QueryRow(`SELECT COUNT(*) FROM redirects WHERE enabled = true`).Scan(&s.ActiveRedirects)
+	if blob, err := json.Marshal(s); err == nil {
+		runtimeCacheSetBytes(context.Background(), "relay-admin:stats", blob, 60*time.Second)
+	}
 	return s
 }
 
@@ -2038,6 +2137,7 @@ func adminAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	_, err := db.Exec(`INSERT INTO redirects (type, address, game_server_id, port, from_host, to_host) VALUES ($1, $2, $3, $4, $5, $6)`,
 		rType, addrVal, gameVal, portVal, fromHost, toHost)
+	invalidateRedirectsCache()
 	if err != nil {
 		log.Printf("add redirect: %v", err)
 		http.Redirect(w, r, "/inkay/admin/?msg=DB+error", http.StatusSeeOther)
@@ -2057,6 +2157,7 @@ func adminDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	db.Exec(`DELETE FROM redirects WHERE id = $1`, id)
+	invalidateRedirectsCache()
 	http.Redirect(w, r, fmt.Sprintf("/inkay/admin/?msg=Deleted+%d", id), http.StatusSeeOther)
 }
 
@@ -2071,6 +2172,7 @@ func adminToggle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	db.Exec(`UPDATE redirects SET enabled = NOT enabled WHERE id = $1`, id)
+	invalidateRedirectsCache()
 	http.Redirect(w, r, "/inkay/admin/", http.StatusSeeOther)
 }
 
@@ -2725,8 +2827,7 @@ func allSwapdoodleNotes() []SwapdoodleNote {
 
 	pnids := map[int64]string{}
 	for pid := range pids {
-		var pnid string
-		if err := db.QueryRow(`SELECT pnid FROM pnid_cache WHERE pid = $1`, pid).Scan(&pnid); err == nil {
+		if pnid, err := pnidForPID(pid); err == nil {
 			pnids[pid] = pnid
 		}
 	}
@@ -2773,8 +2874,7 @@ func swapdoodleNoteByDataID(dataID int64) []SwapdoodleNote {
 	}
 	pnids := map[int64]string{}
 	for pid := range pids {
-		var pnid string
-		if err := db.QueryRow(`SELECT pnid FROM pnid_cache WHERE pid = $1`, pid).Scan(&pnid); err == nil {
+		if pnid, err := pnidForPID(pid); err == nil {
 			pnids[pid] = pnid
 		}
 	}
@@ -2971,12 +3071,23 @@ type swapdoodleNoteDetail struct {
 // done directly from relay-admin. Shared by the JSON API endpoint (kept
 // for local admin scripting) and the SSR note detail page.
 func fetchSwapdoodleNoteDetail(dataID string) (*swapdoodleNoteDetail, int, error) {
-	resp, err := http.Get("http://127.0.0.1:9191/internal/swapdoodle-note-detail/" + dataID)
-	if err != nil {
-		return nil, http.StatusBadGateway, err
+	// Notes are immutable once uploaded, so the raw upstream body is cached
+	// (200s only). Recipient PNIDs are resolved fresh below.
+	detailKey := "swapdoodle:note-detail:" + dataID
+	body, cachedDetail := runtimeCacheGetBytes(context.Background(), detailKey)
+	status := http.StatusOK
+	if !cachedDetail {
+		resp, err := http.Get("http://127.0.0.1:9191/internal/swapdoodle-note-detail/" + dataID)
+		if err != nil {
+			return nil, http.StatusBadGateway, err
+		}
+		defer resp.Body.Close()
+		body, _ = io.ReadAll(resp.Body)
+		status = resp.StatusCode
+		if status == http.StatusOK {
+			runtimeCacheSetBytes(context.Background(), detailKey, body, 10*time.Minute)
+		}
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
 
 	var parsed struct {
 		PageCount     int     `json:"page_count"`
@@ -2986,16 +3097,15 @@ func fetchSwapdoodleNoteDetail(dataID string) (*swapdoodleNoteDetail, int, error
 		Error         string  `json:"error"`
 	}
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, resp.StatusCode, fmt.Errorf("bad response from account-proxy: %v", err)
+		return nil, status, fmt.Errorf("bad response from account-proxy: %v", err)
 	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, resp.StatusCode, fmt.Errorf("%s", parsed.Error)
+	if status != http.StatusOK {
+		return nil, status, fmt.Errorf("%s", parsed.Error)
 	}
 
 	recipients := make([]swapdoodleRecipient, len(parsed.RecipientPIDs))
 	for i, pid := range parsed.RecipientPIDs {
-		var pnid string
-		db.QueryRow(`SELECT pnid FROM pnid_cache WHERE pid = $1`, pid).Scan(&pnid)
+		pnid, _ := pnidForPID(pid)
 		recipients[i] = swapdoodleRecipient{PID: pid, PNID: pnid}
 	}
 	return &swapdoodleNoteDetail{parsed.PageCount, parsed.PointsPerPage, parsed.TotalSize, recipients}, http.StatusOK, nil
@@ -3023,16 +3133,25 @@ func adminSwapdoodleNoteDetail(w http.ResponseWriter, r *http.Request) {
 // endpoint - path shape /admin/spotpass-3ds/thumbnail/{data_id}/{page}.
 func adminSwapdoodleThumbnail(w http.ResponseWriter, r *http.Request) {
 	suffix := strings.TrimPrefix(r.URL.Path, "/admin/spotpass-3ds/thumbnail/")
+	thumbKey := "swapdoodle:thumb:" + suffix
+	w.Header().Set("Content-Type", "image/jpeg")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	if cached, ok := runtimeCacheGetBytes(context.Background(), thumbKey); ok {
+		w.Write(cached)
+		return
+	}
 	resp, err := http.Get("http://127.0.0.1:9191/internal/swapdoodle-thumbnail/" + suffix)
 	if err != nil {
 		http.Error(w, "internal request failed", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
-	w.Header().Set("Content-Type", "image/jpeg")
-	w.Header().Set("Cache-Control", "public, max-age=86400")
+	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusOK && len(data) > 0 {
+		runtimeCacheSetBytes(context.Background(), thumbKey, data, 10*time.Minute)
+	}
 	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	w.Write(data)
 }
 
 // adminSwapdoodleSend replicates PreparePostObjectV1 -> S3 upload ->
@@ -3416,6 +3535,7 @@ func apiV1RedirectsAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	_, err := db.Exec(`INSERT INTO redirects (type, address, game_server_id, port, from_host, to_host) VALUES ($1, $2, $3, $4, $5, $6)`,
 		body.Type, addrVal, gameVal, portVal, body.FromHost, body.ToHost)
+	invalidateRedirectsCache()
 	if err != nil {
 		log.Printf("api redirects add: %v", err)
 		writeJSONError(w, http.StatusInternalServerError, "database error")
@@ -3436,6 +3556,7 @@ func apiV1RedirectsDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	db.Exec(`DELETE FROM redirects WHERE id = $1`, body.ID)
+	invalidateRedirectsCache()
 	writeJSONOKNoData(w)
 }
 
@@ -3451,6 +3572,7 @@ func apiV1RedirectsToggle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	db.Exec(`UPDATE redirects SET enabled = NOT enabled WHERE id = $1`, body.ID)
+	invalidateRedirectsCache()
 	writeJSONOKNoData(w)
 }
 
@@ -4085,8 +4207,8 @@ func myLoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var pid int64
-	if err := db.QueryRow(`SELECT pid FROM pnid_cache WHERE pnid = $1`, pnid).Scan(&pid); err != nil || pid == 0 {
+	pid, err := pidForPNID(pnid)
+	if err != nil || pid == 0 {
 		fail("Account not found in local database.")
 		return
 	}
@@ -4185,8 +4307,8 @@ func myAccountHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var pnid string
-	if err := db.QueryRow(`SELECT pnid FROM pnid_cache WHERE pid = $1`, pid).Scan(&pnid); err != nil || pnid == "" {
+	pnid, err := pnidForPID(pid)
+	if err != nil || pnid == "" {
 		myAccountTmpl.Execute(w, myAccountData{Error: "Could not resolve your account, try signing in again."})
 		return
 	}
