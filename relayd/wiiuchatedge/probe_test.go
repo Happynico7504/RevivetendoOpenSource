@@ -133,7 +133,7 @@ func TestProbeAllMeasuresEveryConnectedPlayer(t *testing.T) {
 	}
 	e := New(Config{}, &EchoBackend{})
 	a, b := fakeConn(1, "8.8.8.8"), fakeConn(2, "9.9.9.9")
-	a.RTT().Adjust(40 * time.Millisecond) // one ack seen from player 1, none from player 2
+	a.RTT().Observe(40 * time.Millisecond) // one ack seen from player 1, none from player 2
 	e.conns[1], e.conns[2] = a, b
 
 	got := map[uint32]relaylink.WSCStats{}
@@ -203,22 +203,29 @@ func TestTraceAsyncReportsTheBaselineSnapshot(t *testing.T) {
 	}
 }
 
-// v2's own RTT type is a retransmission timeout (three times the first sample); the added
-// Smoothed accessor must report the plain round trip instead.
+// v2's own RTT type is a retransmission timeout (three times the first sample) and is fed only by
+// packets that were sent at least twice; the added Observe/Smoothed pair must report the plain round
+// trip of first transmissions instead.
 func TestRTTReportsPlainSmoothedAndMinimum(t *testing.T) {
 	r := nex.NewRTT()
 	if _, _, n := r.Smoothed(); n != 0 {
 		t.Fatalf("samples before any ack: %d", n)
 	}
-	r.Adjust(40 * time.Millisecond)
+	r.Observe(40 * time.Millisecond)
 	sm, min, n := r.Smoothed()
 	if n != 1 || sm != 40*time.Millisecond || min != 40*time.Millisecond {
 		t.Fatalf("first sample: smoothed %v min %v n %d", sm, min, n)
 	}
-	r.Adjust(80 * time.Millisecond) // alpha 1/8: 40 + (80-40)/8 = 45
-	r.Adjust(20 * time.Millisecond)
+	r.Observe(80 * time.Millisecond) // alpha 1/8: 40 + (80-40)/8 = 45
+	r.Observe(20 * time.Millisecond)
 	sm, min, n = r.Smoothed()
 	if n != 3 || min != 20*time.Millisecond || sm < 40*time.Millisecond || sm > 46*time.Millisecond {
 		t.Fatalf("after three samples: smoothed %v min %v n %d", sm, min, n)
+	}
+	// Adjust is upstream's retransmission-timeout estimator (fed by resent packets): it must not
+	// change the plain figures.
+	r.Adjust(900 * time.Millisecond)
+	if sm2, min2, n2 := r.Smoothed(); sm2 != sm || min2 != min || n2 != n {
+		t.Fatalf("Adjust changed the plain round trip: %v/%v/%d -> %v/%v/%d", sm, min, n, sm2, min2, n2)
 	}
 }

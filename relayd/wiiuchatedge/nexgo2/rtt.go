@@ -34,15 +34,6 @@ type RTT struct {
 func (rtt *RTT) Adjust(next time.Duration) {
 	// * This calculation comes from the RFC6298 which defines RTT calculation for TCP packets
 	rtt.Lock()
-	if rtt.samples == 0 {
-		rtt.smoothed, rtt.min = float64(next), float64(next)
-	} else {
-		rtt.smoothed = (1.0-alpha)*rtt.smoothed + alpha*float64(next)
-		if float64(next) < rtt.min {
-			rtt.min = float64(next)
-		}
-	}
-	rtt.samples++
 	if rtt.initialized {
 		rtt.variance = (1.0-beta)*rtt.variance + beta*math.Abs(rtt.variance-float64(next))
 		rtt.average = (1.0-alpha)*rtt.average + alpha*float64(next)
@@ -88,4 +79,25 @@ func (rtt *RTT) Smoothed() (smoothed, min time.Duration, samples int) {
 	rtt.Lock()
 	defer rtt.Unlock()
 	return time.Duration(rtt.smoothed), time.Duration(rtt.min), rtt.samples
+}
+
+// Observe records one plain round trip sample: the time between sending a packet for the first time
+// and receiving its acknowledgement (or a ping and its ack). Retransmitted packets must not be passed
+// in, since an ack for them could belong to either transmission (Karn's rule).
+//
+// Adjust is not used for this: upstream feeds it ONLY packets that were sent at least
+// RTTRetransmit (2) times, so on a healthy connection it never sees a sample, and the ones it does
+// see are the ambiguous ones.
+func (rtt *RTT) Observe(next time.Duration) {
+	rtt.Lock()
+	defer rtt.Unlock()
+	if rtt.samples == 0 {
+		rtt.smoothed, rtt.min = float64(next), float64(next)
+	} else {
+		rtt.smoothed = (1.0-alpha)*rtt.smoothed + alpha*float64(next)
+		if float64(next) < rtt.min {
+			rtt.min = float64(next)
+		}
+	}
+	rtt.samples++
 }

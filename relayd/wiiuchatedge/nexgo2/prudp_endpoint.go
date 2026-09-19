@@ -175,6 +175,7 @@ func (pep *PRUDPEndPoint) handleAcknowledgment(packet PRUDPPacketInterface) {
 	if packet.Type() == constants.PingPacket {
 		if packet.SequenceID() == connection.outgoingPingSequenceIDCounter.Value {
 			connection.rtt.Adjust(time.Since(connection.lastSentPingTime))
+			connection.rtt.Observe(time.Since(connection.lastSentPingTime))
 		}
 	} else {
 		slidingWindow := connection.SlidingWindow(packet.SubstreamID())

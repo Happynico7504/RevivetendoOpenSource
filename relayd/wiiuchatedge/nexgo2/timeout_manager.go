@@ -39,6 +39,10 @@ func (tm *TimeoutManager) AcknowledgePacket(sequenceID uint16) {
 			rttm := time.Since(packet.SentAt())
 			packet.Sender().(*PRUDPConnection).rtt.Adjust(rttm)
 		}
+		// Local addition: the plain, unambiguous sample (first transmission only), see RTT.Observe.
+		if packet.SendCount() == 1 {
+			packet.Sender().(*PRUDPConnection).rtt.Observe(time.Since(packet.SentAt()))
+		}
 	})
 }
 
