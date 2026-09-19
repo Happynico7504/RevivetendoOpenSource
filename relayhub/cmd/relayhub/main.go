@@ -37,6 +37,8 @@ func usage() {
   dns-config  [-base FILE] [-o FILE]            regiondns config from the registry
   invalidate  TAG...                            drop cached entries on all relays
   call        -bundle FILE [-method M] PATH     make one request as a relay (for testing)
+  certs       [-dir DIR] [-default NAME]        show which certificates relays may fetch
+  pubkey      [-key FILE]                       (re)write main-public.pem next to the main key
 
 Database: PN_WUC_POSTGRES_URI (loaded from -env, default ../wiiu-chat-secure/.env).
 `)
@@ -79,6 +81,10 @@ func main() {
 		cmdInvalidate(args)
 	case "call":
 		cmdCall(args)
+	case "certs":
+		cmdCerts(args)
+	case "pubkey":
+		cmdPubkey(args)
 	default:
 		usage()
 	}
@@ -104,7 +110,31 @@ func cmdKeygen(args []string) {
 		log.Fatal(err)
 	}
 	pub, _ := relaylink.MarshalPublicPEM(&k.PublicKey)
-	fmt.Printf("wrote %s (0600)\npublic key:\n%s", *out, pub)
+	pubPath := publicKeyPath(*out)
+	if err := os.WriteFile(pubPath, pub, 0o644); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("wrote %s (0600) and %s\npublic key:\n%s", *out, pubPath, pub)
+}
+
+// publicKeyPath is where the public half lives: <dir>/main-public.pem. The
+// relay-admin dashboard reads it to build relay bundles without ever touching
+// the private key.
+func publicKeyPath(privPath string) string {
+	return filepath.Join(filepath.Dir(privPath), "main-public.pem")
+}
+
+func cmdPubkey(args []string) {
+	fs := flag.NewFlagSet("pubkey", flag.ExitOnError)
+	keyPath := fs.String("key", defaultKeyPath(), "main RSA private key")
+	fs.Parse(args)
+	k := loadKey(*keyPath)
+	pub, _ := relaylink.MarshalPublicPEM(&k.PublicKey)
+	out := publicKeyPath(*keyPath)
+	if err := os.WriteFile(out, pub, 0o644); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("wrote %s\n%s", out, pub)
 }
 
 func loadKey(path string) *rsa.PrivateKey {
@@ -126,6 +156,8 @@ func cmdServe(args []string) {
 	keyPath := fs.String("key", defaultKeyPath(), "main RSA private key")
 	envFile := fs.String("env", "../wiiu-chat-secure/.env", "env file with PN_WUC_POSTGRES_URI")
 	redisAddr := fs.String("redis", "127.0.0.1:6379", "Redis for replay protection")
+	certDir := fs.String("certs", "/nico-pretendo-bridge/certs", "directory of certificates relays may fetch (\"\" disables)")
+	defCert := fs.String("default-cert", "olv-nicochristmann-net", "certificate relays serve when the SNI matches nothing")
 	fs.Parse(args)
 
 	db := openDB(*envFile)
@@ -134,7 +166,13 @@ func cmdServe(args []string) {
 		log.Fatalf("registry schema: %v", err)
 	}
 	invlog := relayhub.NewInvalidationLog(10000)
-	hub := &relayhub.Hub{Src: &relayhub.PGSource{DB: db}, Log: invlog}
+	hub := &relayhub.Hub{
+		Src: &relayhub.PGSource{DB: db}, Log: invlog,
+		Fwd: &relayhub.Forwarder{Backends: relayhub.DefaultBackends()},
+	}
+	if *certDir != "" {
+		hub.Certs = &relayhub.CertStore{Dir: *certDir, Default: *defCert, Routes: relayhub.DefaultCertRoutes()}
+	}
 	keys := &relayhub.KeyLookup{Reg: reg}
 	srv := &relaylink.Server{
 		Priv:     loadKey(*keyPath),
@@ -343,4 +381,26 @@ func cmdCall(args []string) {
 		log.Fatal(err)
 	}
 	fmt.Printf("status=%d ttl=%ds tags=%v\n%s\n", resp.Status, resp.TTL, resp.Tags, resp.Body)
+}
+
+func cmdCerts(args []string) {
+	fs := flag.NewFlagSet("certs", flag.ExitOnError)
+	dir := fs.String("dir", "/nico-pretendo-bridge/certs", "certificate directory")
+	def := fs.String("default", "olv-nicochristmann-net", "default certificate name")
+	fs.Parse(args)
+	m, err := (&relayhub.CertStore{Dir: *dir, Default: *def, Routes: relayhub.DefaultCertRoutes()}).Manifest()
+	if err != nil {
+		log.Fatal(err)
+	}
+	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "NAME\tEXPIRES\tNAMES")
+	for _, c := range m.Certs {
+		fmt.Fprintf(tw, "%s\t%s\t%v\n", c.Name, time.Unix(c.NotAfter, 0).Format("2006-01-02"), c.DNSNames)
+	}
+	tw.Flush()
+	fmt.Println("\nSNI routes (first match wins):")
+	for _, r := range m.Routes {
+		fmt.Printf("  %-6s %-32s -> %s\n", r.Match, r.Value, r.Cert)
+	}
+	fmt.Printf("default: %q\n(CA certificates and every non-matching/backup/CSR file are excluded by design)\n", m.Default)
 }

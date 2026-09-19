@@ -30,9 +30,11 @@ func TagBans() string            { return "bans" }
 
 // Hub is the main-side request router for relay calls.
 type Hub struct {
-	Src Source
-	Log *InvalidationLog
-	Now func() time.Time
+	Src   Source
+	Log   *InvalidationLog
+	Certs *CertStore // optional: certificate sync
+	Fwd   *Forwarder // optional: request forwarding
+	Now   func() time.Time
 }
 
 func (h *Hub) now() time.Time {
@@ -51,10 +53,20 @@ func (h *Hub) Dispatch(ctx context.Context, req *relaylink.Request) *relaylink.R
 	if err != nil {
 		return fail(http.StatusBadRequest)
 	}
+	p := u.Path
+	if p == relaylink.ForwardPath {
+		if req.Method != http.MethodPost || h.Fwd == nil {
+			return fail(http.StatusMethodNotAllowed)
+		}
+		fr, ok := decodeForward(req.Body)
+		if !ok {
+			return fail(http.StatusBadRequest)
+		}
+		return h.Fwd.Do(ctx, fr)
+	}
 	if req.Method != http.MethodGet {
 		return fail(http.StatusMethodNotAllowed)
 	}
-	p := u.Path
 	switch {
 	case p == "/relay/v1/ping":
 		return relaylink.JSON(200, map[string]any{"now": h.now().Unix(), "relay": req.RelayID}, 0)
@@ -90,6 +102,26 @@ func (h *Hub) Dispatch(ctx context.Context, req *relaylink.Request) *relaylink.R
 			return fail(http.StatusInternalServerError)
 		}
 		return relaylink.JSON(200, map[string]any{"pid": pid, "pnid": pnid}, ttlIdentity, TagPID(pid), TagPNID(pnid))
+
+	case p == relaylink.CertManifestPath:
+		if h.Certs == nil {
+			return fail(http.StatusNotFound)
+		}
+		m, err := h.Certs.Manifest()
+		if err != nil {
+			return fail(http.StatusInternalServerError)
+		}
+		return relaylink.JSON(200, m, 0) // TTL 0: keys must never enter a relay cache
+
+	case strings.HasPrefix(p, relaylink.CertPairPrefix):
+		if h.Certs == nil {
+			return fail(http.StatusNotFound)
+		}
+		pair, ok := h.Certs.Pair(strings.TrimPrefix(p, relaylink.CertPairPrefix))
+		if !ok {
+			return fail(http.StatusNotFound)
+		}
+		return relaylink.JSON(200, pair, 0)
 
 	case p == "/relay/v1/config/redirects":
 		rs, err := h.Src.Redirects(ctx)
