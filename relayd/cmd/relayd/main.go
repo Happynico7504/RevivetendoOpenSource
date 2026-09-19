@@ -19,10 +19,17 @@ import (
 	"time"
 
 	"github.com/Happynico7504/relayd"
+	"github.com/Happynico7504/relayd/nexauth"
 	"github.com/Happynico7504/relaylink"
 )
 
 func main() {
+	// `relayd nexauth` is the NEX authentication child process (see nexauth.RunChild):
+	// the same binary, so over-the-air updates cover it.
+	if len(os.Args) > 1 && os.Args[1] == "nexauth" {
+		nexauth.RunChild()
+		return
+	}
 	cfgPath := flag.String("config", "/etc/relayd/relayd.json", "config file")
 	showVersion := flag.Bool("version", false, "print the version and exit (also used as the OTA pre-flight check)")
 	flag.Parse()
