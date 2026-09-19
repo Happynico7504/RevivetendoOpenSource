@@ -391,3 +391,38 @@ func TestMemoryStoreCapAndTags(t *testing.T) {
 		t.Fatal("JSON helper")
 	}
 }
+
+func TestPushedInvalidationIsAppliedOnlyInOrder(t *testing.T) {
+	r := newCacheRig(t)
+	r.main.data["/a"] = &Response{Status: 200, Body: []byte("a1"), TTL: 600, Tags: []string{"t"}}
+	r.f.Sync(context.Background())
+	r.get(t, "/a")
+	if r.store.Len() != 1 {
+		t.Fatal("not cached")
+	}
+	// Wrong epoch, a gap and a duplicate must all be ignored (the poll repairs).
+	if r.f.ApplyPushed("other-epoch", Event{Seq: 1, Tags: []string{"t"}}) || r.store.Len() != 1 {
+		t.Fatal("event from another epoch applied")
+	}
+	if r.f.ApplyPushed("e1", Event{Seq: 5, Tags: []string{"t"}}) || r.store.Len() != 1 {
+		t.Fatal("event after a gap applied")
+	}
+	if !r.f.ApplyPushed("e1", Event{Seq: 1, Tags: []string{"t"}}) || r.store.Len() != 0 {
+		t.Fatal("the next event in order was not applied")
+	}
+	if r.f.ApplyPushed("e1", Event{Seq: 1, Tags: []string{"t"}}) {
+		t.Fatal("duplicate applied twice")
+	}
+	// The regular poll then finds nothing left to do (it is already at seq 1).
+	r.main.mu.Lock()
+	r.main.seq, r.main.events = 1, []Event{{Seq: 1, Tags: []string{"t"}}}
+	r.main.mu.Unlock()
+	if err := r.f.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// Before the first sync nothing is applied at all.
+	fresh := newCacheRig(t)
+	if fresh.f.ApplyPushed("e1", Event{Seq: 1, Tags: []string{"t"}}) {
+		t.Fatal("push applied before the first sync")
+	}
+}

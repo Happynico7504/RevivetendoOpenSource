@@ -78,6 +78,9 @@ type RelayBundle struct {
 	SigningKey    string `json:"signing_key"`     // base64 Ed25519 private key
 	MainPublicKey string `json:"main_public_key"` // PEM
 	MainURL       string `json:"main_url"`        // e.g. http://main.example:7777
+	// ReleasePublicKey pins the key OTA updates must be signed with (base64
+	// Ed25519). Empty disables over-the-air updates on that relay.
+	ReleasePublicKey string `json:"release_public_key,omitempty"`
 }
 
 // NewRelayIdentity creates a fresh signing key pair for a relay.

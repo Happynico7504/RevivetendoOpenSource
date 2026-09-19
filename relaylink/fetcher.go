@@ -128,6 +128,24 @@ func (f *Fetcher) Sync(ctx context.Context) error {
 	return nil
 }
 
+// ApplyPushed applies one invalidation delivered over the real-time stream. It
+// is applied only if it is the very next event of the epoch this relay follows;
+// anything else (other epoch, gap, duplicate) is ignored and the regular poll
+// repairs the state. So a push can make invalidation faster but never wrong.
+func (f *Fetcher) ApplyPushed(epoch string, e Event) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.epoch == "" || epoch != f.epoch || e.Seq != f.lastSeq+1 {
+		return false
+	}
+	for _, t := range e.Tags {
+		f.Store.DeleteTag(t)
+	}
+	f.lastSeq = e.Seq
+	f.gen++
+	return true
+}
+
 // Run polls until ctx is cancelled.
 func (f *Fetcher) Run(ctx context.Context) {
 	iv := f.PollInterval
@@ -199,4 +217,16 @@ func (f *Fetcher) Get(ctx context.Context, path string) (*Response, error) {
 // Do performs an uncached request (writes, live calls).
 func (f *Fetcher) Do(ctx context.Context, method, path string, body []byte) (*Response, error) {
 	return f.Client.Call(ctx, method, path, body)
+}
+
+// ApplyBatchForTest applies an invalidation batch exactly as Sync does after
+// receiving it. Exported for tests in other packages.
+func (f *Fetcher) ApplyBatchForTest(b InvalidationBatch) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if b.Reset || b.Epoch != f.epoch {
+		f.Store.Flush()
+		f.gen++
+	}
+	f.epoch, f.lastSeq, f.lastOK = b.Epoch, b.Latest, f.now()
 }
