@@ -130,6 +130,15 @@ func main() {
 		log.Printf("content cache ON for %d hosts (ttl %ds, %d MB budget, %d never-cache prefixes)", len(ec.Hosts), ec.TTLSeconds, ec.MaxMB, len(ec.NeverCache))
 	}
 
+	// The WSC edge child talks to the main through the stream, so its bridge exists only
+	// when the edge component is configured and the stream is on.
+	var wscBridge *relayd.WSCBridge
+	for _, c := range cfg.Components {
+		if c.Name == "wscedge" && !c.Disabled && !cfg.StreamDisabled {
+			wscBridge = &relayd.WSCBridge{Logf: log.Printf}
+		}
+	}
+
 	if !cfg.StreamDisabled {
 		addr := cfg.StreamAddr
 		if addr == "" {
@@ -145,6 +154,10 @@ func main() {
 		var stream *relayd.StreamClient
 		handlers := relaylink.StreamHandlers{
 			Event: func(_ *relaylink.StreamConn, topic string, body []byte) {
+				if topic == relaylink.TopicWSCOut && wscBridge != nil { // an RMC message for an edge player
+					wscBridge.DeliverOut(body)
+					return
+				}
 				if topic == "invalidate" && fetcher != nil { // instant cache invalidation from the main
 					var m struct {
 						Epoch string   `json:"epoch"`
@@ -189,8 +202,18 @@ func main() {
 			go nexSup.Run(ctx)
 			log.Printf("NEX authentication enabled for %v", cfg.NexAuth)
 		}
+		if wscBridge != nil {
+			wscBridge.Call = func(cctx context.Context, method string, body []byte) ([]byte, error) {
+				return stream.Call(cctx, method, body)
+			}
+		}
 		stream = &relayd.StreamClient{
 			Client: client, Addr: addr, Logf: log.Printf, Handlers: handlers,
+			OnDown: func(error) {
+				if wscBridge != nil {
+					wscBridge.StreamDown() // the main closes our players when the stream drops
+				}
+			},
 			OnUp: func(c *relaylink.StreamConn) {
 				// No players are connected through this relay yet; announcing the
 				// (empty) set after every reconnect keeps the main's table exact.
@@ -249,7 +272,7 @@ func main() {
 		}
 		go upd.Run(ctx, every, first)
 	}
-	startComponents(ctx, cfg, client, bundle)
+	startComponents(ctx, cfg, client, bundle, wscBridge)
 	select {
 	case err := <-errc:
 		log.Fatalf("listener stopped: %v", err)

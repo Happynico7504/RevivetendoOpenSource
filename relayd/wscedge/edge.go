@@ -30,21 +30,23 @@ type Call struct {
 	Port     int
 	CallID   uint32
 	Protocol uint8
+	Custom   uint16 // protocol id extension when Protocol is 0x7f
 	Method   uint32
 	Params   []byte
 }
 
-// Reply is what goes back to the player. Empty Payload with OK is a bare success.
-type Reply struct {
-	Payload []byte
-}
-
-// Backend answers calls. The prototype's default echoes an empty success; the real one
-// forwards to the main.
+// Backend is where the edge sends what it terminates. Responses do not come back from
+// Handle: the main answers asynchronously, and the answer arrives as Edge.Out. (The echo
+// backend used in tests answers itself.)
 type Backend interface {
-	Open(pid uint32, ip string, port int)
+	// Open reports a player who finished the handshake. An error refuses the session: the
+	// Connect is not acknowledged, so the console sees a failed connection, exactly as if
+	// the server were down.
+	Open(pid uint32, ip string, port int) error
 	Close(pid uint32)
-	Handle(c Call) (Reply, error)
+	Handle(c Call) error
+	// Alive reports players heard from since the last call.
+	Alive(pids []uint32)
 }
 
 // Edge is one running terminator.
@@ -55,13 +57,14 @@ type Edge struct {
 
 	mu      sync.Mutex
 	clients map[uint32]*nex.Client // pid -> live client
+	seen    map[uint32]struct{}    // players heard from since the last liveness report
 }
 
 func New(cfg Config, b Backend) *Edge {
 	if cfg.AccessKey == "" {
 		cfg.AccessKey = "4d324052"
 	}
-	return &Edge{cfg: cfg, backend: b, clients: map[uint32]*nex.Client{}}
+	return &Edge{cfg: cfg, backend: b, clients: map[uint32]*nex.Client{}, seen: map[uint32]struct{}{}}
 }
 
 func (e *Edge) logf(f string, a ...any) {
@@ -97,7 +100,10 @@ func (e *Edge) Serve() {
 
 	srv.On("Connect", e.onConnect)
 	srv.On("Disconnect", e.onDisconnect)
+	srv.On("Kick", e.onDisconnect) // nex-go's own timeout ends a session like a disconnect
 	srv.On("Data", e.onData)
+	srv.On("Packet", e.onPacket)
+	go e.reportAlive()
 
 	e.logf("wscedge: listening on :%d", e.cfg.Port)
 	srv.Listen(fmt.Sprintf(":%d", e.cfg.Port))
@@ -142,12 +148,16 @@ func (e *Edge) onConnect(packet *nex.PacketV1) {
 	client := packet.Sender()
 	client.SetPID(pid)
 
+	if addr := client.Address(); addr != nil {
+		if err := e.backend.Open(pid, addr.IP.String(), addr.Port); err != nil {
+			// Not acknowledged: the console retries and then reports a failed connection.
+			e.logf("wscedge: PID=%d refused by the main: %v", pid, err)
+			return
+		}
+	}
 	e.mu.Lock()
 	e.clients[pid] = client
 	e.mu.Unlock()
-	if addr := client.Address(); addr != nil {
-		e.backend.Open(pid, addr.IP.String(), addr.Port)
-	}
 
 	val := nex.NewStreamOut(srv)
 	val.WriteUInt32LE(responseCheck + 1)
@@ -185,9 +195,15 @@ func (e *Edge) onData(packet *nex.PacketV1) {
 	}()
 	req := packet.RMCRequest()
 	client := packet.Sender()
+	e.mu.Lock()
+	cur := e.clients[client.PID()]
+	e.mu.Unlock()
+	if client.PID() == 0 || cur != client {
+		return // never completed the handshake here (or was refused by the main)
+	}
 	addr := client.Address()
 	call := Call{
-		PID: client.PID(), CallID: req.CallID(), Protocol: req.ProtocolID(),
+		PID: client.PID(), CallID: req.CallID(), Protocol: req.ProtocolID(), Custom: req.CustomID(),
 		Method: req.MethodID(), Params: req.Parameters(),
 	}
 	if addr != nil {
@@ -195,35 +211,100 @@ func (e *Edge) onData(packet *nex.PacketV1) {
 	}
 	// Never block the packet loop: the main may take a while.
 	go func() {
-		start := time.Now()
-		rep, err := e.backend.Handle(call)
-		if err != nil {
+		if err := e.backend.Handle(call); err != nil {
 			e.logf("wscedge: PID=%d proto=%#x method=%#x failed: %v", call.PID, call.Protocol, call.Method, err)
-			return
 		}
-		e.Respond(client, call.Protocol, call.CallID, call.Method, rep.Payload)
-		e.logf("wscedge: PID=%d proto=%#x method=%#x answered in %v", call.PID, call.Protocol, call.Method, time.Since(start).Round(time.Millisecond))
 	}()
+}
+
+// onPacket notes that a player is alive: every packet counts, including the keepalive pings
+// the edge answers locally and the main never sees.
+func (e *Edge) onPacket(packet *nex.PacketV1) {
+	if pid := packet.Sender().PID(); pid != 0 {
+		e.mu.Lock()
+		e.seen[pid] = struct{}{}
+		e.mu.Unlock()
+	}
+}
+
+// AliveEvery is how often liveness is reported to the main.
+var AliveEvery = 2 * time.Second
+
+func (e *Edge) reportAlive() {
+	for range time.Tick(AliveEvery) {
+		e.mu.Lock()
+		pids := make([]uint32, 0, len(e.seen))
+		for pid := range e.seen {
+			if _, live := e.clients[pid]; live {
+				pids = append(pids, pid)
+			}
+		}
+		e.seen = map[uint32]struct{}{}
+		e.mu.Unlock()
+		if len(pids) > 0 {
+			e.backend.Alive(pids)
+		}
+	}
+}
+
+// Out delivers an RMC message from the main (a response or a notification) to a player.
+func (e *Edge) Out(pid uint32, payload []byte) {
+	e.mu.Lock()
+	client := e.clients[pid]
+	e.mu.Unlock()
+	if client == nil {
+		e.logf("wscedge: message for PID=%d, who is not connected here", pid)
+		return
+	}
+	e.send(client, payload)
+}
+
+// Reset drops every session without telling the backend: the main has already closed them
+// (its stream to this relay was lost), and the consoles reconnect and handshake again.
+func (e *Edge) Reset() {
+	e.mu.Lock()
+	old := e.clients
+	e.clients = map[uint32]*nex.Client{}
+	e.mu.Unlock()
+	for _, c := range old {
+		e.srv.Kick(c)
+	}
+	e.logf("wscedge: reset: dropped %d sessions", len(old))
 }
 
 // Respond sends an RMC success response to a player: the same packet wsc-secure builds.
 func (e *Edge) Respond(client *nex.Client, protocolID uint8, callID uint32, methodID uint32, payload []byte) {
 	rmc := nex.NewRMCResponse(protocolID, callID)
 	rmc.SetSuccess(methodID, payload)
+	e.send(client, rmc.Bytes())
+}
+
+// send puts a complete RMC message into a reliable data packet for the player.
+func (e *Edge) send(client *nex.Client, rmcBytes []byte) {
 	pkt, _ := nex.NewPacketV1(client, nil)
 	pkt.SetVersion(1)
 	pkt.SetSource(0xA1)
 	pkt.SetDestination(0xAF)
 	pkt.SetType(nex.DataPacket)
-	pkt.SetPayload(rmc.Bytes())
+	pkt.SetPayload(rmcBytes)
 	pkt.AddFlag(nex.FlagNeedsAck)
 	pkt.AddFlag(nex.FlagReliable)
 	e.srv.Send(pkt)
 }
 
-// EchoBackend is milestone 1: prove the handshake, acks and keepalives locally.
-type EchoBackend struct{ Logf func(string, ...any) }
+// EchoBackend answers every call with an empty success, itself: the handshake, acks and
+// keepalives are still terminated locally. Set Edge after New.
+type EchoBackend struct{ Edge *Edge }
 
-func (b EchoBackend) Open(pid uint32, ip string, port int) {}
-func (b EchoBackend) Close(pid uint32)                     {}
-func (b EchoBackend) Handle(c Call) (Reply, error)         { return Reply{}, nil }
+func (b *EchoBackend) Open(pid uint32, ip string, port int) error { return nil }
+func (b *EchoBackend) Close(pid uint32)                           {}
+func (b *EchoBackend) Alive(pids []uint32)                        {}
+func (b *EchoBackend) Handle(c Call) error {
+	b.Edge.mu.Lock()
+	client := b.Edge.clients[c.PID]
+	b.Edge.mu.Unlock()
+	if client != nil {
+		b.Edge.Respond(client, c.Protocol, c.CallID, c.Method, nil)
+	}
+	return nil
+}

@@ -13,7 +13,7 @@ import (
 // startComponents runs every configured separately shipped binary under its own
 // supervisor, each kept current by its own updater. A component never affects relayd: it
 // has its own directory, version line, rollback and restarts.
-func startComponents(ctx context.Context, cfg *relayd.Config, client *relaylink.Client, bundle *relaylink.RelayBundle) {
+func startComponents(ctx context.Context, cfg *relayd.Config, client *relaylink.Client, bundle *relaylink.RelayBundle, wsc *relayd.WSCBridge) {
 	for _, cc := range cfg.Components {
 		cc := cc
 		if cc.Disabled {
@@ -24,6 +24,11 @@ func startComponents(ctx context.Context, cfg *relayd.Config, client *relaylink.
 			Window: cfg.Update.Window, KeepRunning: true, Logf: log.Printf,
 		}
 		sup := &relayd.ComponentSupervisor{Updater: upd, Fallback: cc.Fallback, Args: cc.Args, Env: cc.Env, Logf: log.Printf}
+		if cc.Name == "wscedge" && wsc != nil {
+			// Connected to the main through the stream: the child runs in pipe mode.
+			sup.Args = append(append([]string(nil), cc.Args...), "-pipe")
+			sup.Pipe = wsc.Attach
+		}
 		upd.Exit = sup.Restart
 		go sup.Run(ctx)
 

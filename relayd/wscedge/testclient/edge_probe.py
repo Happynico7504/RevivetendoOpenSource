@@ -58,7 +58,7 @@ async def main():
             try:
                 # raw RMC call: empty parameters, we only care that a response comes back
                 resp = await asyncio.wait_for(client.request(a.proto, a.method, b""), 10)
-                print(f"call {i}: proto={a.proto:#x} method={a.method:#x} -> {len(resp)} bytes in {(time.monotonic()-t)*1000:.0f} ms")
+                print(f"call {i}: proto={a.proto:#x} method={a.method:#x} -> {len(resp)} bytes {resp.hex()} in {(time.monotonic()-t)*1000:.0f} ms")
             except Exception as e:
                 print(f"call {i}: FAILED {type(e).__name__}: {e}")
         if a.hold:

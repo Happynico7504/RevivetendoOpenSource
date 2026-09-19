@@ -51,3 +51,4 @@ vendor-patches/
 restartd/secret.key
 run/
 restartd/php/restart-config.php
+wsc-secure/edge.enabled

@@ -169,6 +169,7 @@ func cmdServe(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	listen := fs.String("listen", "0.0.0.0:7777", "relay API listen address")
 	internal := fs.String("internal", "127.0.0.1:9401", "local-only invalidation endpoint")
+	wscEdge := fs.String("wsc-edge", "http://127.0.0.1:9451", "wsc-secure's edge endpoint for relay-terminated WSC sessions (empty = off)")
 	keyPath := fs.String("key", defaultKeyPath(), "main RSA private key")
 	envFile := fs.String("env", "../wiiu-chat-secure/.env", "env file with PN_WUC_POSTGRES_URI")
 	redisAddr := fs.String("redis", "127.0.0.1:6379", "Redis for replay protection")
@@ -245,6 +246,13 @@ func cmdServe(args []string) {
 			log.Printf("relayhub: regional NEX routing ON for %v", names)
 		}
 	}
+	// WSC edge: relays that terminate players' PRUDP sessions reach wsc-secure through here.
+	// Inert unless wsc-secure runs with the edge enabled and a relay runs the edge component.
+	var edge *relayhub.EdgeBridge
+	if *wscEdge != "" {
+		edge = &relayhub.EdgeBridge{Streams: streams, Main: *wscEdge, Logf: log.Printf}
+		edge.Register()
+	}
 	if *streamListen != "" {
 		sln, err := net.Listen("tcp", *streamListen)
 		if err != nil {
@@ -279,6 +287,9 @@ func cmdServe(args []string) {
 			log.Printf("nex: %s pid=%d -> relay %s", req.Game, req.PID, res.Relay)
 			json.NewEncoder(w).Encode(res)
 		})
+		if edge != nil {
+			mux.HandleFunc("/edge/out", edge.Out)
+		}
 		mux.HandleFunc("/invalidate", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
 				http.Error(w, "POST only", http.StatusMethodNotAllowed)

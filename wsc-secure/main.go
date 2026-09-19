@@ -1466,6 +1466,7 @@ func main() {
 		fmt.Println("wsc-secure: PRUDP socket never became ready - could not raise UDP buffer size")
 	}()
 
+	startEdgeServer() // after the handlers above are registered: relay-terminated sessions use them
 	nexServer.Listen(":60015")
 }
 

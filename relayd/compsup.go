@@ -29,6 +29,10 @@ type ComponentSupervisor struct {
 	Args     []string // the child's arguments
 	Env      []string // extra environment ("KEY=value")
 	Logf     func(string, ...any)
+	// Pipe, if set, is called on every launch with a line channel to the child: it reads the
+	// child's messages from fromChild and writes to toChild. The child sees them as inherited
+	// descriptors 3 (reads) and 4 (writes). Pipe blocks until the child's end closes.
+	Pipe func(fromChild io.Reader, toChild io.Writer)
 
 	GoodAfter time.Duration // uptime that proves a version healthy (default 30s)
 	MinDelay  time.Duration // restart backoff start (default 1s)
@@ -189,6 +193,25 @@ func (s *ComponentSupervisor) runChild(ctx context.Context, path string, ver uin
 	cmd.Env = append(os.Environ(), s.Env...)
 	pr, pw := io.Pipe()
 	cmd.Stdout, cmd.Stderr = pw, pw
+	var toChild, fromChild *os.File // the parent's ends of the message pipes
+	var childEnds []*os.File
+	if s.Pipe != nil {
+		cr, pwr, err := os.Pipe() // parent -> child (descriptor 3)
+		if err != nil {
+			s.logf("%s: pipe: %v", name, err)
+			return 0
+		}
+		prd, cw, err := os.Pipe() // child -> parent (descriptor 4)
+		if err != nil {
+			cr.Close()
+			pwr.Close()
+			s.logf("%s: pipe: %v", name, err)
+			return 0
+		}
+		toChild, fromChild = pwr, prd
+		childEnds = []*os.File{cr, cw}
+		cmd.ExtraFiles = childEnds
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL} // never outlive relayd
 	go func() {
 		sc := bufio.NewScanner(pr)
@@ -201,10 +224,27 @@ func (s *ComponentSupervisor) runChild(ctx context.Context, path string, ver uin
 	}()
 
 	start := time.Now()
+	closePipes := func() {
+		for _, f := range []*os.File{toChild, fromChild} {
+			if f != nil {
+				f.Close()
+			}
+		}
+	}
 	if err := cmd.Start(); err != nil {
 		pw.Close()
+		for _, f := range childEnds {
+			f.Close()
+		}
+		closePipes()
 		s.logf("%s: start failed: %v", name, err)
 		return 0
+	}
+	for _, f := range childEnds {
+		f.Close() // the child has its own copies now
+	}
+	if s.Pipe != nil {
+		go s.Pipe(fromChild, toChild)
 	}
 	s.mu.Lock()
 	s.running = cmd
@@ -213,7 +253,7 @@ func (s *ComponentSupervisor) runChild(ctx context.Context, path string, ver uin
 	s.logf("%s: version %d started (pid %d)", name, ver, cmd.Process.Pid)
 
 	done := make(chan error, 1)
-	go func() { done <- cmd.Wait(); pw.Close() }()
+	go func() { done <- cmd.Wait(); pw.Close(); closePipes() }()
 	proven := time.NewTimer(s.GoodAfter)
 	defer proven.Stop()
 

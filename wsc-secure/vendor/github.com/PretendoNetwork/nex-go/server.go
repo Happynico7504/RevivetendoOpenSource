@@ -549,6 +549,10 @@ func (server *Server) FindClientFromConnectionID(rvcid uint32) *Client {
 
 // Send writes data to client
 func (server *Server) Send(packet PacketInterface) {
+	if hook := packet.Sender().OutHook(); hook != nil {
+		hook(packet) // terminated elsewhere: hand over the plain packet, never touch the socket
+		return
+	}
 	data := packet.Payload()
 	fragments := int(int16(len(data)) / server.fragmentSize)
 
@@ -648,6 +652,25 @@ func (server *Server) processAcknowledgment(client *Client, packet PacketInterfa
 	}
 
 	client.AcknowledgePendingUpTo(baseSequenceID, additional)
+}
+
+// RegisterClient adds a client that was not created by a UDP packet (a session terminated
+// on an edge relay) so lookups by PID and connection ID, which the NAT traversal
+// notifications rely on, find it. It is keyed by its address like any other client.
+func (server *Server) RegisterClient(client *Client) {
+	server.clientsMu.Lock()
+	server.clients[client.Address().String()] = client
+	server.clientsMu.Unlock()
+}
+
+// UnregisterClient removes a client added with RegisterClient, only if it is still the one
+// registered for its address.
+func (server *Server) UnregisterClient(client *Client) {
+	server.clientsMu.Lock()
+	if server.clients[client.Address().String()] == client {
+		delete(server.clients, client.Address().String())
+	}
+	server.clientsMu.Unlock()
 }
 
 // SendRaw writes raw packet data to the client socket

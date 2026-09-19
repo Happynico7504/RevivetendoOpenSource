@@ -295,3 +295,14 @@ func (h *StreamHub) PushInvalidation(epoch string, e relaylink.Event) {
 	body, _ := json.Marshal(map[string]any{"epoch": epoch, "seq": e.Seq, "tags": e.Tags})
 	h.Broadcast(relaylink.High, TopicInvalidate, body)
 }
+
+// SetPlayer records (or removes) a player as connected through a relay, on the hub's own
+// authority (as opposed to the relay's presence.* calls).
+func (h *StreamHub) SetPlayer(relayID string, pid uint32, present bool) {
+	h.mu.Lock()
+	c := h.conns[relayID]
+	h.mu.Unlock()
+	if c != nil {
+		h.setPresence(c, []uint32{pid}, present)
+	}
+}

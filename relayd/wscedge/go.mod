@@ -1,8 +1,11 @@
 module github.com/Happynico7504/wscedge
 
-go 1.19
+go 1.22
 
-require github.com/PretendoNetwork/nex-go v1.0.16
+require (
+	github.com/Happynico7504/relaylink v0.0.0
+	github.com/PretendoNetwork/nex-go v1.0.16
+)
 
 require (
 	github.com/PretendoNetwork/plogger-go v1.0.2 // indirect
@@ -18,3 +21,5 @@ require (
 // The same patched nex-go wsc-secure vendors (resend tracking, signature-before-decipher,
 // counters). Stock v1.0.16 lacks reliable retransmission, so the edge must not use it.
 replace github.com/PretendoNetwork/nex-go => ./nexgo
+
+replace github.com/Happynico7504/relaylink => ../../relaylink

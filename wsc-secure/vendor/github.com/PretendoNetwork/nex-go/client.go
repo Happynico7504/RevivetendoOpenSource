@@ -31,6 +31,25 @@ type Client struct {
 	connected                 bool
 	pendingMu                 sync.Mutex
 	pendingPackets            map[uint16]*pendingPacket
+	outHook                   func(packet PacketInterface)
+}
+
+// SetOutHook diverts everything the server would send to this client. The hook gets each
+// packet BEFORE fragmentation and encryption, so a data packet's payload is the plain RMC
+// message. It is for sessions whose PRUDP connection is terminated elsewhere (the WSC edge
+// relay): those clients have no UDP socket, cipher or resend state here. nil restores normal
+// sending.
+func (client *Client) SetOutHook(hook func(packet PacketInterface)) {
+	client.mu.Lock()
+	client.outHook = hook
+	client.mu.Unlock()
+}
+
+// OutHook returns the hook set by SetOutHook, or nil.
+func (client *Client) OutHook() func(packet PacketInterface) {
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	return client.outHook
 }
 
 // pendingPacket is a reliable packet awaiting acknowledgement. data holds the already

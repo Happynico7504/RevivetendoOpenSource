@@ -155,6 +155,12 @@ func (packet *Packet) Payload() []byte {
 }
 
 // RMCRequest returns the packet RMC request
+// SetRMCRequest attaches an already parsed request, for packets that did not arrive over
+// this server's socket (see Client.SetOutHook).
+func (packet *Packet) SetRMCRequest(request RMCRequest) {
+	packet.rmcRequest = request
+}
+
 func (packet *Packet) RMCRequest() RMCRequest {
 	return packet.rmcRequest
 }
