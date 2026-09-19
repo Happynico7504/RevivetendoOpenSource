@@ -46,3 +46,8 @@ discord-bot/piper-voices/
 # compile against this branch's own declared nex-protocols-go version upstream)
 swapdoodle/
 vendor-patches/
+
+# restartd: signing secret, runtime request/pid/status files, and the PHP page's private config
+restartd/secret.key
+run/
+restartd/php/restart-config.php

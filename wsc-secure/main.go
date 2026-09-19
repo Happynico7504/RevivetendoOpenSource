@@ -687,7 +687,7 @@ func isInMatchStartGrace(pid uint32) bool {
 // real matchmaking in both directions without needing a client-visible rejection.
 var natFailureBlockedUntil sync.Map // uint32 pid → time.Time (block expiry)
 
-const natFailureBlockDuration = 5 * time.Minute
+const natFailureBlockDuration = 15 * time.Minute
 
 func blockFromMatchmaking(pid uint32) {
 	natFailureBlockedUntil.Store(pid, time.Now().Add(natFailureBlockDuration))

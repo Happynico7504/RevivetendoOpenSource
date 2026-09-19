@@ -5854,11 +5854,44 @@ func startOLVProxy() {
 	// including the real Exoscale S3 round trip). Sharing one Config lets
 	// legitimate repeat connections from the same client resume cheaply
 	// instead of redoing the full handshake.
-	legacyTLSCfg := &tls.Config{
-		MinVersion:     tls.VersionTLS10,
-		MaxVersion:     tls.VersionTLS12,
-		CipherSuites:   wiiUCiphers,
-		GetCertificate: getCert,
+	// One legacy config PER requested hostname instead of a single shared one,
+	// each with its own random session-ticket key (found 2026-09-19). With one
+	// shared config a ticket issued on a connection for olv.nicochristmann.net
+	// was accepted when the same console connected to portal.olv.nicochristmann.net
+	// (verified with openssl s_client -sess_in: "Reused" across SNIs), so the
+	// resumed handshake carries no Certificate and the client keeps the OTHER
+	// host's certificate. A strict client TLS stack can abort that with an
+	// "unexpected message" alert - and Wii U consoles hit exactly that on the
+	// olv/portal.olv pair, ~20-60 times a day, with no trace in the WSC logs.
+	// Distinct ticket keys mean a ticket only resumes on the host it was issued
+	// for, so repeat connections to the SAME host still resume cheaply (the
+	// reason the config is shared across connections at all - see above) while
+	// cross-host resumption falls back to a full handshake with its own cert.
+	var (
+		legacyCfgMu   sync.Mutex
+		legacyCfgBySN = map[string]*tls.Config{}
+	)
+	legacyTLSCfgFor := func(serverName string) *tls.Config {
+		key := strings.ToLower(serverName)
+		legacyCfgMu.Lock()
+		defer legacyCfgMu.Unlock()
+		if cfg, ok := legacyCfgBySN[key]; ok {
+			return cfg
+		}
+		cfg := &tls.Config{
+			MinVersion:     tls.VersionTLS10,
+			MaxVersion:     tls.VersionTLS12,
+			CipherSuites:   wiiUCiphers,
+			GetCertificate: getCert,
+		}
+		var ticketKey [32]byte
+		if _, err := rand.Read(ticketKey[:]); err != nil {
+			log.Printf("legacyTLSCfgFor(%q): could not generate a ticket key, using the default: %v", serverName, err)
+		} else {
+			cfg.SetSessionTicketKeys([][32]byte{ticketKey})
+		}
+		legacyCfgBySN[key] = cfg
+		return cfg
 	}
 	tlsCfg := &tls.Config{
 		// Default config for modern clients: TLS 1.2+ with standard cipher suites.
@@ -5876,7 +5909,7 @@ func startOLVProxy() {
 			}
 			// Wii U/3DS: cap at TLS 1.2 to suppress the RFC 8446 downgrade sentinel
 			// in ServerHello.Random, which their TLS 1.0/1.1 stacks reject.
-			return legacyTLSCfg, nil
+			return legacyTLSCfgFor(chi.ServerName), nil
 		},
 	}
 	ln, err := net.Listen("tcp", "127.0.0.1:7443")
