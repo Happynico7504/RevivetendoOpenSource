@@ -1,0 +1,10 @@
+{
+  "listen": ["45.157.178.35:53", "[2a03:4000:4b:bf8:98fc:cff:fec9:9f2f]:53"],
+  "zone": "regionselect.nicochristmann.net",
+  "ns": ["netcup-server.nicochristmann.net"],
+  "hostmaster": "hostmaster.nicochristmann.net",
+  "ttl": 60,
+  "geoip_db": "/usr/local/share/revivetendo-dns/dbip-country-lite.mmdb",
+  "default": {"targets": ["45.157.178.35", "2a03:4000:4b:bf8:98fc:cff:fec9:9f2f"]},
+  "regions": []
+}
