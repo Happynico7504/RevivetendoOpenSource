@@ -16,6 +16,11 @@ var ProbeEvery = 30 * time.Second
 // Pinger runs one ICMP probe and returns its raw output. A variable so tests do not need
 // a real network or a ping binary.
 var Pinger = func(ip string) string {
+	// Our own ICMP first: under the relay's systemd hardening the ping binary is killed by the
+	// syscall filter and prints nothing. The binary remains the fallback (IPv6, other OSes).
+	if s, ok := icmpSummary(ip, 5, 250*time.Millisecond, 2*time.Second); ok {
+		return s
+	}
 	out, _ := exec.Command("ping", "-c", "5", "-W", "2", ip).CombinedOutput()
 	return string(out)
 }

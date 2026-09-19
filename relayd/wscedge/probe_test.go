@@ -200,3 +200,35 @@ func TestTraceAsyncReportsTheBaselineSnapshot(t *testing.T) {
 		t.Fatalf("baseline: %+v", tr)
 	}
 }
+
+func TestICMPChecksumKnownVector(t *testing.T) {
+	// RFC 1071 example data: 00 01 f2 03 f4 f5 f6 f7 -> checksum 0x220d.
+	if got := icmpChecksum([]byte{0x00, 0x01, 0xf2, 0x03, 0xf4, 0xf5, 0xf6, 0xf7}); got != 0x220d {
+		t.Fatalf("checksum %#04x, want 0x220d", got)
+	}
+	// An odd length is padded with a zero byte.
+	if a, b := icmpChecksum([]byte{1, 2, 3}), icmpChecksum([]byte{1, 2, 3, 0}); a != b {
+		t.Fatalf("odd length: %#04x vs %#04x", a, b)
+	}
+}
+
+func TestBuiltInICMPPingsLoopbackAndParses(t *testing.T) {
+	s, ok := icmpSummary("127.0.0.1", 3, 10*time.Millisecond, time.Second)
+	if !ok {
+		t.Skip("unprivileged ICMP sockets are not permitted here")
+	}
+	loss, avg := parsePingOutput(s)
+	if loss != "0%" || avg == "?" {
+		t.Fatalf("loopback: loss %q avg %q from %q", loss, avg, s)
+	}
+	if _, ok := icmpSummary("::1", 1, time.Millisecond, time.Millisecond); ok {
+		t.Fatal("an IPv6 target must fall back to the ping binary")
+	}
+	// An address nobody answers for: full loss, and still a summary the parser understands.
+	s, ok = icmpSummary("192.0.2.1", 1, time.Millisecond, 200*time.Millisecond) // TEST-NET-1
+	if ok {
+		if loss, avg := parsePingOutput(s); loss != "100%" || avg != "?" {
+			t.Fatalf("unanswered: loss %q avg %q from %q", loss, avg, s)
+		}
+	}
+}
