@@ -6,9 +6,11 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -464,5 +466,50 @@ func TestEdgeCredentialIsScopedToTheEdgeGame(t *testing.T) {
 	// The plain WSC auth server never received it, so it must not be able to pull it either.
 	if err := get("wsc"); err == nil {
 		t.Fatal("plain wsc auth could pull a credential staged for the edge")
+	}
+}
+
+func TestRefusedCredPullsExplainThemselvesWithoutLeakingThePassword(t *testing.T) {
+	r := newNexRig(t)
+	var lines []string
+	var mu sync.Mutex
+	r.assigner.Logf = func(f string, a ...any) { mu.Lock(); lines = append(lines, fmt.Sprintf(f, a...)); mu.Unlock() }
+	r.connectRelay(t, "us-1", "wsc")
+	r.connectRelay(t, "jp-1", "wsc")
+	if _, err := assign(r, "wsc", 100, ipUS); err != nil { // assigned to us-1 with password "tok"
+		t.Fatal(err)
+	}
+	pull := func(relay string, pid uint32) {
+		r.assigner.handleCredGet(context.Background(), relay, mustJSON(relaylink.NexCredGet{Game: "wsc", PID: pid}))
+	}
+	pull("us-1", 555) // never assigned (or forgotten by a hub restart)
+	pull("jp-1", 100) // assigned to another relay
+	now := time.Now()
+	r.assigner.Now = func() time.Time { return now.Add(AssignTTL + 5*time.Second) }
+	pull("us-1", 100) // expired
+	pull("us-1", 100)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(lines) != 4 {
+		t.Fatalf("%d log lines: %v", len(lines), lines)
+	}
+	for i, want := range []string{"never assigned", "was assigned to relay us-1", "expired", "expired"} {
+		if !strings.Contains(lines[i], want) {
+			t.Errorf("line %d = %q, want it to mention %q", i, lines[i], want)
+		}
+	}
+	for _, l := range lines {
+		if strings.Contains(l, "tok") {
+			t.Fatalf("the credential leaked into a log line: %q", l)
+		}
+	}
+	// A pull that IS allowed logs nothing.
+	r.assigner.Now = nil
+	before := len(lines)
+	mu.Unlock()
+	pull("us-1", 100)
+	mu.Lock()
+	if len(lines) != before {
+		t.Fatalf("a granted pull logged: %v", lines[before:])
 	}
 }

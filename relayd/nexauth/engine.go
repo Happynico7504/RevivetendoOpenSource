@@ -37,17 +37,29 @@ func (e *Engine) logf(f string, a ...any) {
 
 // passwordFrom builds the PasswordFromPID function of one game: the local store
 // first, then (once) the main.
-func passwordFrom(game string, store *Store, pull PullFunc) func(pid uint32) (string, uint32) {
+func passwordFrom(game string, store *Store, pull PullFunc, logf func(string, ...any)) func(pid uint32) (string, uint32) {
+	say := func(f string, a ...any) {
+		if logf != nil {
+			logf(f, a...)
+		}
+	}
 	return func(pid uint32) (string, uint32) {
 		if pw, ok := store.Get(game, pid); ok {
 			return pw, 0
 		}
-		if pull != nil {
-			if pw, err := pull(game, pid); err == nil && pw != "" {
-				store.Put(game, pid, pw, PullTTL)
-				return pw, 0
-			}
+		if pull == nil {
+			say("nexauth: %s login for pid=%d: no credential in the store and no way to ask the main: InvalidUsername", game, pid)
+			return "", nex.Errors.RendezVous.InvalidUsername
 		}
+		pw, err := pull(game, pid)
+		if err == nil && pw != "" {
+			say("nexauth: %s login for pid=%d: not in the store, fetched from the main", game, pid)
+			store.Put(game, pid, pw, PullTTL)
+			return pw, 0
+		}
+		// The console's login will be answered InvalidUsername, with no ticket: the console
+		// then reports an error (106-0102) without ever asking for a secure-server ticket.
+		say("nexauth: %s login for pid=%d: no credential (store empty, main said: %v, store holds %d entries): InvalidUsername", game, pid, err, store.Len())
 		return "", nex.Errors.RendezVous.InvalidUsername
 	}
 }
@@ -94,7 +106,7 @@ func (e *Engine) Start(games []relaylink.NexGame, store *Store, pull PullFunc) e
 		secure.SetType("2")
 		auth.SetSecureStationURL(secure)
 		auth.SetBuildName(g.BuildName)
-		auth.SetPasswordFromPIDFunction(passwordFrom(g.Name, store, pull))
+		auth.SetPasswordFromPIDFunction(passwordFrom(g.Name, store, pull, e.Logf))
 
 		e.logf("nexauth: %s listening on :%d (secure server %s:%s)", g.Name, g.Port, g.SecureHost, g.SecurePort)
 		go srv.Listen(fmt.Sprintf(":%d", g.Port))

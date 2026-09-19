@@ -244,7 +244,7 @@ func cmdServe(args []string) {
 			)
 			edgePath := filepath.Join(filepath.Dir(*keyPath), "wsc-edge-pids")
 			assigner = &relayhub.NexAssigner{
-				Streams: streams, Registry: reg, Geo: geo,
+				Streams: streams, Registry: reg, Geo: geo, Logf: log.Printf,
 				EdgePIDs: func() map[uint32]bool {
 					emu.Lock()
 					defer emu.Unlock()

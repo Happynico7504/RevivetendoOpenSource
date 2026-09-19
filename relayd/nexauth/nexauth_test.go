@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -70,7 +72,7 @@ func TestPasswordFromPIDLogic(t *testing.T) {
 		}
 		return "", nil
 	}
-	f := passwordFrom("wsc", s, pull)
+	f := passwordFrom("wsc", s, pull, nil)
 	if pw, code := f(7); pw != "local" || code != 0 || calls != 0 {
 		t.Fatalf("local hit went to the main: %q %d calls=%d", pw, code, calls)
 	}
@@ -85,7 +87,7 @@ func TestPasswordFromPIDLogic(t *testing.T) {
 			t.Fatalf("unknown pid %d: %q %d", pid, pw, code)
 		}
 	}
-	if pw, code := passwordFrom("wsc", s, nil)(99); pw != "" || code != nex.Errors.RendezVous.InvalidUsername {
+	if pw, code := passwordFrom("wsc", s, nil, nil)(99); pw != "" || code != nex.Errors.RendezVous.InvalidUsername {
 		t.Fatalf("no upstream: %q %d", pw, code)
 	}
 }
@@ -300,4 +302,48 @@ func errString(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+// Every way a console's login can end in InvalidUsername (the 156-byte, ticket-less answer
+// that makes the console report 106-0102) must leave a line saying why, and no line may
+// ever contain a password.
+func TestLookupOutcomesAreLoggedWithoutLeakingPasswords(t *testing.T) {
+	s := &Store{}
+	s.Put("wsc", 1, "SECRET-IN-STORE", time.Hour)
+	var lines []string
+	logf := func(f string, a ...any) { lines = append(lines, fmt.Sprintf(f, a...)) }
+	pull := func(game string, pid uint32) (string, error) {
+		switch pid {
+		case 2:
+			return "SECRET-FROM-MAIN", nil
+		case 3:
+			return "", errors.New("unknown")
+		}
+		return "", errors.New("timed out waiting for the main")
+	}
+	f := passwordFrom("wsc", s, pull, logf)
+
+	f(1) // a plain hit says nothing (it is the normal case)
+	if len(lines) != 0 {
+		t.Fatalf("a store hit logged: %v", lines)
+	}
+	f(2)
+	if len(lines) != 1 || !strings.Contains(lines[0], "pid=2") || !strings.Contains(lines[0], "fetched from the main") {
+		t.Fatalf("pull not logged: %v", lines)
+	}
+	f(3)
+	f(4)
+	if len(lines) != 3 || !strings.Contains(lines[1], "pid=3") || !strings.Contains(lines[1], "main said: unknown") ||
+		!strings.Contains(lines[2], "timed out waiting for the main") {
+		t.Fatalf("misses not explained: %v", lines)
+	}
+	passwordFrom("wsc", s, nil, logf)(5)
+	if !strings.Contains(lines[len(lines)-1], "no way to ask the main") {
+		t.Fatalf("no-upstream case: %v", lines)
+	}
+	for _, l := range lines {
+		if strings.Contains(l, "SECRET") {
+			t.Fatalf("a password leaked into a log line: %q", l)
+		}
+	}
 }

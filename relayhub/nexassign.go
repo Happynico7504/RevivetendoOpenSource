@@ -206,6 +206,8 @@ type NexAssigner struct {
 	// (the fastest connected relay that hosts the game); key ForceAll (0) means every
 	// player. It mirrors a DNS that forces clients onto a relay, and for testing a relay
 	// with one console before the region rules cover its country.
+	// Logf receives the hub's own diagnostics (why a relay's credential pull was refused).
+	Logf      func(string, ...any)
 	ForcePIDs func() map[uint32]bool
 	// EdgePIDs, if set, returns the WSC consoles (or ForceAll) whose session should be
 	// terminated on the relay by the WSC edge instead of going to the main's secure server.
@@ -303,8 +305,19 @@ func (a *NexAssigner) handleCredGet(_ context.Context, relayID string, body []by
 	defer a.mu.Unlock()
 	as, ok := a.assigned[asKey(req.Game, req.PID)]
 	// A relay may only ever read credentials of consoles the hub sent to IT, and
-	// only while the assignment lives. Everything else looks like "unknown".
+	// only while the assignment lives. Everything else looks like "unknown" to the relay;
+	// the hub's own log says which it was (never the password).
 	if !ok || as.relayID != relayID || !a.now().Before(as.expires) {
+		if a.Logf != nil {
+			switch {
+			case !ok:
+				a.Logf("nex: cred.get refused: relay %s asked for %s pid=%d, which the hub never assigned (or has forgotten since a restart)", relayID, req.Game, req.PID)
+			case as.relayID != relayID:
+				a.Logf("nex: cred.get refused: relay %s asked for %s pid=%d, which was assigned to relay %s", relayID, req.Game, req.PID, as.relayID)
+			default:
+				a.Logf("nex: cred.get refused: relay %s asked for %s pid=%d, whose assignment expired %v ago", relayID, req.Game, req.PID, a.now().Sub(as.expires).Round(time.Second))
+			}
+		}
 		return nil, errors.New("unknown")
 	}
 	return json.Marshal(relaylink.NexCredAnswer{Password: as.password})
