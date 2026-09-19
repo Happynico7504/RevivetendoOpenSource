@@ -21,17 +21,18 @@ import (
 //	  ]
 //	}
 type Config struct {
-	Bundle          string       `json:"bundle"`
-	DataDir         string       `json:"data_dir"`
-	CertSyncSeconds int          `json:"cert_sync_seconds"` // default 300
-	PollSeconds     int          `json:"poll_seconds"`      // invalidation poll, default 5
-	Listeners       []Listener   `json:"listeners"`
-	Update          UpdateConfig `json:"update"`
-	NexAuth         []string     `json:"nex_auth"`    // NEX auth servers to host: "wsc", "mk8", "badge-arcade" (needs the stream)
-	StreamAddr      string       `json:"stream_addr"` // default: the bundle host, port 7778
-	StreamDisabled  bool         `json:"stream_disabled"`
-	StaggerHosts    []string     `json:"stagger_hosts"` // SNI names that get the per-IP handshake stagger (sni mode)
-	StaggerEmptySNI *bool        `json:"stagger_empty_sni"`
+	Bundle          string         `json:"bundle"`
+	DataDir         string         `json:"data_dir"`
+	CertSyncSeconds int            `json:"cert_sync_seconds"` // default 300
+	PollSeconds     int            `json:"poll_seconds"`      // invalidation poll, default 5
+	Listeners       []Listener     `json:"listeners"`
+	Update          UpdateConfig   `json:"update"`
+	NexAuth         []string       `json:"nex_auth"`      // NEX auth servers to host: "wsc", "mk8", "badge-arcade" (needs the stream)
+	ContentCache    *ContentConfig `json:"content_cache"` // console-content cache for the OLV hosts (off unless enabled)
+	StreamAddr      string         `json:"stream_addr"`   // default: the bundle host, port 7778
+	StreamDisabled  bool           `json:"stream_disabled"`
+	StaggerHosts    []string       `json:"stagger_hosts"` // SNI names that get the per-IP handshake stagger (sni mode)
+	StaggerEmptySNI *bool          `json:"stagger_empty_sni"`
 }
 
 // UpdateConfig controls over-the-air updates. They only happen if the relay's

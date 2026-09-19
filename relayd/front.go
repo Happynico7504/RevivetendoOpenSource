@@ -37,6 +37,8 @@ type Front struct {
 	Certs  *CertSet
 	Client *relaylink.Client
 	Logf   func(string, ...any)
+	// Content, if set, caches console content for the hosts it covers (see ContentCache).
+	Content *ContentCache
 
 	staggerMu    sync.Mutex
 	staggerNext  map[string]time.Time
@@ -199,39 +201,73 @@ func (f *Front) Handler(l Listener) http.Handler {
 				fr.Headers[k] = vs
 			}
 		}
+		var cacheKey string
+		var cacheGen uint64
+		cacheable := false
+		endWrite := func() {} // runs exactly once
+		if cc := f.Content; cc != nil && l.Backend == "olv" && cc.Covers(r) {
+			if IsWrite(r.Method) {
+				// A write: everything cached is suspect. It is flushed BEFORE the
+				// console hears the answer (endWrite is called ahead of every reply
+				// below), and concurrent reads are kept from re-filling the cache
+				// with a pre-write copy while the write is in flight.
+				cc.BeginWrite()
+				var once sync.Once
+				endWrite = func() { once.Do(cc.EndWrite) }
+				defer endWrite() // safety net for any path that returns early
+			} else {
+				var hit *relaylink.ForwardResponse
+				hit, cacheKey, cacheGen, cacheable = cc.Lookup(r)
+				if hit != nil {
+					writeForwarded(w, r, hit)
+					return
+				}
+			}
+		}
 		payload, _ := json.Marshal(fr)
 		ctx, cancel := context.WithTimeout(r.Context(), 50*time.Second)
 		defer cancel()
 		resp, err := f.Client.Call(ctx, http.MethodPost, relaylink.ForwardPath, payload)
 		if err != nil || resp.Status != http.StatusOK {
 			f.logf("forward %s %s failed: %v", r.Method, r.URL.Path, err)
+			endWrite()
 			http.Error(w, "bad gateway", http.StatusBadGateway)
 			return
 		}
 		var out relaylink.ForwardResponse
 		if json.Unmarshal(resp.Body, &out) != nil {
+			endWrite()
 			http.Error(w, "bad gateway", http.StatusBadGateway)
 			return
 		}
-		for k, vs := range out.Headers {
-			if hopHeaders[http.CanonicalHeaderKey(k)] {
-				continue
-			}
-			for _, v := range vs {
-				w.Header().Add(k, v)
-			}
+		endWrite() // a write has completed: flush before the console sees the result
+		if cacheable {
+			f.Content.Save(cacheKey, cacheGen, &out)
 		}
-		// The backend closes the connection on some endpoints (the WSC BOSS fix
-		// relies on "Connection: close"); the forwarder reports that as Close.
-		if out.Close {
-			w.Header().Set("Connection", "close")
-		}
-		w.Header().Set("Content-Length", itoa(len(out.Body)))
-		w.WriteHeader(out.Status)
-		if r.Method != http.MethodHead {
-			w.Write(out.Body)
-		}
+		writeForwarded(w, r, &out)
 	})
+}
+
+// writeForwarded replays a (forwarded or cached) response to the console.
+func writeForwarded(w http.ResponseWriter, r *http.Request, out *relaylink.ForwardResponse) {
+	for k, vs := range out.Headers {
+		if hopHeaders[http.CanonicalHeaderKey(k)] {
+			continue
+		}
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	// The backend closes the connection on some endpoints (the WSC BOSS fix
+	// relies on "Connection: close"); the forwarder reports that as Close.
+	if out.Close {
+		w.Header().Set("Connection", "close")
+	}
+	w.Header().Set("Content-Length", itoa(len(out.Body)))
+	w.WriteHeader(out.Status)
+	if r.Method != http.MethodHead {
+		w.Write(out.Body)
+	}
 }
 
 func itoa(n int) string {

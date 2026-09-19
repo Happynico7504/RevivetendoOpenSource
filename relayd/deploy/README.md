@@ -63,3 +63,25 @@ Limits: OTA replaces `relayd` only, not the OS, the unit file or `relayd-run`
 (those come from `install.sh`); a manual `install.sh` always wins over an earlier
 OTA binary. A restart takes about two seconds during which connections reset.
 Test the launcher: `sh relayd/deploy/launcher_test.sh`.
+
+## Content cache (Miiverse)
+
+`"content_cache": {"enabled": true}` in `relayd.json` makes the relay keep GET
+answers of the OLV hosts for 5 minutes, so repeated reads are served locally.
+
+- **Per user, never shared.** The key contains the host, the exact path and query
+  and every request header except a short ignore list (so the user's service token
+  and parameter pack are part of it). Only `/assets/` and `/favicon.ico` are shared.
+- **Only plain 200 answers** (no `Set-Cookie`, `no-store`, `private`, or `Connection:
+  close`), at most 1 MB each, within a memory budget (default 32 MB).
+- **Never cached:** notification badges (`/users/notifications`, `/v1/notifications`),
+  other hosts, range requests. Tunable: `never_cache`, `hosts`, `shared_prefixes`,
+  `ttl_seconds`, `max_mb`, `max_entry_kb`.
+- **A write flushes everything ("full resync").** Any non-GET request through the
+  relay flushes its cache before the console hears the answer; the main tells every
+  other relay to flush within about one network hop. A read that overlapped a write
+  is never stored.
+- **Bypassed when the main is unreachable** (no contact for 45 seconds).
+- Known gap: writes that reach the main without passing a relay or `account-proxy`
+  (the Juxt web UI through Cloudflare) do not trigger a flush; they show up when the
+  entry expires.

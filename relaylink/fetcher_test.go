@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -424,5 +425,52 @@ func TestPushedInvalidationIsAppliedOnlyInOrder(t *testing.T) {
 	fresh := newCacheRig(t)
 	if fresh.f.ApplyPushed("e1", Event{Seq: 1, Tags: []string{"t"}}) {
 		t.Fatal("push applied before the first sync")
+	}
+}
+
+func TestMemoryStoreByteCapAndAccounting(t *testing.T) {
+	s := &MemoryStore{MaxBytes: 10_000}
+	big := make([]byte, 3000)
+	for i := 0; i < 20; i++ {
+		s.Set(fmt.Sprintf("k%d", i), &Response{Status: 200, Body: big, Tags: []string{"t"}}, time.Minute)
+	}
+	if s.Bytes() > 10_000 {
+		t.Fatalf("byte budget exceeded: %d", s.Bytes())
+	}
+	if s.Len() == 0 || s.Len() > 3 {
+		t.Fatalf("entries after eviction: %d", s.Len())
+	}
+	// One entry bigger than the whole budget is refused, not stored.
+	s.Set("huge", &Response{Status: 200, Body: make([]byte, 20_000)}, time.Minute)
+	if _, ok := s.Get("huge"); ok {
+		t.Fatal("an entry larger than the budget was stored")
+	}
+	// Replacing a key does not double-count it; removal and flush return the bytes.
+	s.Flush()
+	s.Set("a", &Response{Status: 200, Body: big}, time.Minute)
+	s.Set("a", &Response{Status: 200, Body: big}, time.Minute)
+	one := s.Bytes()
+	s.DeleteTag("nothing")
+	if one > 3200 || one < 3000 {
+		t.Fatalf("accounting after a replace: %d", one)
+	}
+	s.Flush()
+	if s.Bytes() != 0 {
+		t.Fatalf("flush left %d bytes accounted", s.Bytes())
+	}
+}
+
+func TestFetcherFlushBumpsTheGeneration(t *testing.T) {
+	r := newCacheRig(t)
+	r.main.data["/a"] = &Response{Status: 200, Body: []byte("a"), TTL: 600}
+	r.f.Sync(context.Background())
+	r.get(t, "/a")
+	g := r.f.Gen()
+	r.f.Flush()
+	if r.store.Len() != 0 || r.f.Gen() == g {
+		t.Fatal("Flush did not empty the store and change the generation")
+	}
+	if !r.f.Trusted() {
+		t.Fatal("a synced fetcher must stay trusted after a flush")
 	}
 }

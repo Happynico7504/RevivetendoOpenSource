@@ -5802,6 +5802,11 @@ func handleOLV(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Header.Set("X-Forwarded-Proto", "https")
 	resp, err := http.DefaultClient.Do(req)
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
+		// A write to Miiverse content: every relay's content cache is now suspect
+		// (the "full resync"); relays flush the moment they hear this.
+		announceInvalidation("content:all")
+	}
 	if err != nil {
 		log.Printf("OLV proxy: %s %s -> 127.0.0.1:%s upstream error: %v", r.Method, r.URL.Path, port, err)
 		http.Error(w, "upstream error", http.StatusBadGateway)

@@ -92,6 +92,28 @@ func (f *Fetcher) trusted() bool {
 	return f.epoch != "" && f.now().Sub(f.lastOK) <= f.maxStale()
 }
 
+// Trusted reports whether a cache guarded by this fetcher may be used right now
+// (the invalidation stream has been heard from recently).
+func (f *Fetcher) Trusted() bool { return f.trusted() }
+
+// Gen returns a counter that changes whenever an invalidation or flush was
+// applied. A cache records it before fetching and stores the answer only if it is
+// unchanged afterwards, so a response that raced with a change is never kept.
+func (f *Fetcher) Gen() uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.gen
+}
+
+// Flush empties the store and bumps the generation (used when a write passes
+// through this relay: everything cached is now suspect).
+func (f *Fetcher) Flush() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Store.Flush()
+	f.gen++
+}
+
 // Sync polls the invalidation stream once and applies it.
 func (f *Fetcher) Sync(ctx context.Context) error {
 	f.mu.Lock()

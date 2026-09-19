@@ -17,15 +17,26 @@ type Store interface {
 type memItem struct {
 	resp *Response
 	exp  time.Time
+	size int64
+}
+
+func respSize(key string, r *Response) int64 {
+	n := int64(len(key) + len(r.Body) + 64)
+	for _, t := range r.Tags {
+		n += int64(len(t))
+	}
+	return n
 }
 
 // MemoryStore is an in-process Store with per-entry expiry, a tag index and a
 // size cap.
 type MemoryStore struct {
-	Max int              // max entries; 0 = 10000
-	Now func() time.Time // test hook
+	Max      int              // max entries; 0 = 10000
+	MaxBytes int64            // max total size of keys+bodies; 0 = unlimited
+	Now      func() time.Time // test hook
 
 	mu    sync.Mutex
+	bytes int64
 	items map[string]*memItem
 	tags  map[string]map[string]struct{} // tag -> keys
 }
@@ -57,6 +68,7 @@ func (m *MemoryStore) removeLocked(key string) {
 			}
 		}
 	}
+	m.bytes -= it.size
 	delete(m.items, key)
 }
 
@@ -103,7 +115,26 @@ func (m *MemoryStore) Set(key string, r *Response, ttl time.Duration) {
 		}
 	}
 	cp := *r
-	m.items[key] = &memItem{resp: &cp, exp: m.now().Add(ttl)}
+	size := respSize(key, &cp)
+	if m.MaxBytes > 0 && size > m.MaxBytes {
+		return // a single entry larger than the whole budget is never stored
+	}
+	if m.MaxBytes > 0 && m.bytes+size > m.MaxBytes {
+		now := m.now()
+		for k, it := range m.items { // expired first
+			if !now.Before(it.exp) {
+				m.removeLocked(k)
+			}
+		}
+		for k := range m.items { // still over budget: evict arbitrary entries
+			if m.bytes+size <= m.MaxBytes {
+				break
+			}
+			m.removeLocked(k)
+		}
+	}
+	m.items[key] = &memItem{resp: &cp, exp: m.now().Add(ttl), size: size}
+	m.bytes += size
 	for _, t := range cp.Tags {
 		if m.tags[t] == nil {
 			m.tags[t] = map[string]struct{}{}
@@ -124,6 +155,7 @@ func (m *MemoryStore) DeleteTag(tag string) {
 func (m *MemoryStore) Flush() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.bytes = 0
 	m.items = map[string]*memItem{}
 	m.tags = map[string]map[string]struct{}{}
 }
@@ -132,4 +164,11 @@ func (m *MemoryStore) Len() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.items)
+}
+
+// Bytes returns the current accounted size.
+func (m *MemoryStore) Bytes() int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.bytes
 }

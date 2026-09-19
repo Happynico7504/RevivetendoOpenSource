@@ -103,6 +103,33 @@ func main() {
 	log.Printf("relay %q ready with %d certificates", bundle.RelayID, certs.Count())
 	go certs.Run(ctx, cfg.CertSyncEvery())
 
+	// Console-content cache (Miiverse): invalidations come from the main both by
+	// poll and, instantly, over the stream.
+	var content *relayd.ContentCache
+	var fetcher *relaylink.Fetcher
+	if cfg.ContentCache != nil && cfg.ContentCache.Enabled {
+		store := &relaylink.MemoryStore{}
+		fetcher = &relaylink.Fetcher{Client: client, Store: store, MaxStale: 45 * time.Second, PollInterval: 5 * time.Second, Logf: log.Printf}
+		content = relayd.NewContentCache(*cfg.ContentCache, fetcher, store)
+		go fetcher.Run(ctx)
+		go func() {
+			t := time.NewTicker(10 * time.Minute)
+			defer t.Stop()
+			for {
+				select {
+				case <-t.C:
+					s := content.Stats()
+					log.Printf("content cache: %d hits, %d misses, %d stored, %d flushed, %d bypassed; %d KB in %d entries",
+						s.Hits, s.Misses, s.Stores, s.Flushes, s.Bypassed, store.Bytes()>>10, store.Len())
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+		ec := content.Config()
+		log.Printf("content cache ON for %d hosts (ttl %ds, %d MB budget, %d never-cache prefixes)", len(ec.Hosts), ec.TTLSeconds, ec.MaxMB, len(ec.NeverCache))
+	}
+
 	if !cfg.StreamDisabled {
 		addr := cfg.StreamAddr
 		if addr == "" {
@@ -117,7 +144,20 @@ func main() {
 		var nexSup *relayd.NexSupervisor
 		var stream *relayd.StreamClient
 		handlers := relaylink.StreamHandlers{
-			Event: func(_ *relaylink.StreamConn, topic string, _ []byte) { log.Printf("stream: event %q", topic) },
+			Event: func(_ *relaylink.StreamConn, topic string, body []byte) {
+				if topic == "invalidate" && fetcher != nil { // instant cache invalidation from the main
+					var m struct {
+						Epoch string   `json:"epoch"`
+						Seq   int64    `json:"seq"`
+						Tags  []string `json:"tags"`
+					}
+					if json.Unmarshal(body, &m) == nil {
+						fetcher.ApplyPushed(m.Epoch, relaylink.Event{Seq: m.Seq, Tags: m.Tags})
+					}
+					return
+				}
+				log.Printf("stream: event %q", topic)
+			},
 		}
 		if len(cfg.NexAuth) > 0 {
 			nexSup = &relayd.NexSupervisor{Logf: log.Printf}
@@ -181,7 +221,7 @@ func main() {
 		log.Printf("real-time stream to %s enabled", addr)
 	}
 
-	front := &relayd.Front{Cfg: cfg, Certs: certs, Client: client, Logf: log.Printf}
+	front := &relayd.Front{Cfg: cfg, Certs: certs, Client: client, Logf: log.Printf, Content: content}
 	errc := make(chan error, len(cfg.Listeners))
 	for _, l := range cfg.Listeners {
 		l := l

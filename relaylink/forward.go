@@ -27,6 +27,10 @@ type ForwardResponse struct {
 	Body    []byte              `json:"body,omitempty"`
 }
 
+// ContentTag is the invalidation tag of the relays' console-content cache: a
+// write anywhere announces it and every relay drops its whole content cache.
+const ContentTag = "content:all"
+
 // Certificate sync API (GET). Responses are never cacheable (TTL 0), so private
 // keys are never placed in a relay's cache store.
 const (

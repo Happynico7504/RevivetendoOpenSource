@@ -2,6 +2,7 @@
   "bundle": "/etc/relayd/bundle.json",
   "data_dir": "/var/lib/relayd",
   "nex_auth": ["wsc", "mk8", "badge-arcade"],
+  "content_cache": {"enabled": true},
   "listeners": [
     {"listen": ":443",  "backend": "olv",     "mode": "sni",    "stagger": "sni"},
     {"listen": ":6666", "backend": "account", "mode": "single", "cert": "nicochristmann-nn-cert", "min_tls": "1.0", "stagger": "all"},

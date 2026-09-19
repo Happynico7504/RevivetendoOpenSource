@@ -43,6 +43,11 @@ const maxForwardBody = 16 << 20
 // source address, so reusing connections matters).
 type Forwarder struct {
 	Backends map[string]Backend
+	// OnWrite is called for every non-GET/HEAD/OPTIONS request forwarded to the
+	// "olv" backend (Miiverse content), whether or not it succeeded: relays'
+	// content caches must be flushed (the main appends relaylink.ContentTag to the
+	// invalidation log, which is pushed to every relay).
+	OnWrite func()
 
 	mu         sync.Mutex
 	transports map[string]*http.Transport
@@ -114,6 +119,9 @@ func (f *Forwarder) Do(ctx context.Context, fr *relaylink.ForwardRequest) *relay
 	// account-proxy identifies the console by X-Forwarded-For (its realIP()).
 	if net.ParseIP(fr.ClientIP) != nil {
 		req.Header.Set("X-Forwarded-For", fr.ClientIP)
+	}
+	if f.OnWrite != nil && fr.Backend == "olv" && fr.Method != http.MethodGet && fr.Method != http.MethodHead && fr.Method != http.MethodOptions {
+		defer f.OnWrite() // after the write has been attempted
 	}
 	client := &http.Client{
 		Transport: f.transport(fr.Backend, be, fr.SNI),

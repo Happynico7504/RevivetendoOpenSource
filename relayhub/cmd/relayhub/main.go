@@ -196,6 +196,7 @@ func cmdServe(args []string) {
 	if *certDir != "" {
 		hub.Certs = &relayhub.CertStore{Dir: *certDir, Default: *defCert, Routes: relayhub.DefaultCertRoutes()}
 	}
+	hub.Fwd.OnWrite = func() { invlog.Append([]string{relaylink.ContentTag}) }
 	keys := &relayhub.KeyLookup{Reg: reg}
 	srv := &relaylink.Server{
 		Priv:     loadKey(*keyPath),
