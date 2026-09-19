@@ -63,6 +63,9 @@ func readDotEnv(path string) map[string]string {
 func LoadNexGames(root string, getenv func(string) string) map[string]relaylink.NexGame {
 	out := map[string]relaylink.NexGame{}
 	for name, g := range relaylink.NexGameDefaults() {
+		if name == relaylink.WSCEdgeGame {
+			continue // derived per relay from wsc (see edgeGame), never configured on its own
+		}
 		env := readDotEnv(filepath.Join(root, nexAuthDirs[name], ".env"))
 		g.SecureHost, g.SecurePort = env["SECURE_SERVER_LOCATION"], env["SECURE_SERVER_PORT"]
 		g.KerberosPassword = getenv(nexKerberosEnv[name])
@@ -157,7 +160,8 @@ type AssignRequest struct {
 
 type AssignResult struct {
 	Relay string `json:"relay"`
-	Host  string `json:"host"` // IP address the console should use
+	Game  string `json:"game,omitempty"` // the auth game actually assigned (wsc-edge for an edge console)
+	Host  string `json:"host"`           // IP address the console should use
 	Port  int    `json:"port"`
 }
 
@@ -203,6 +207,9 @@ type NexAssigner struct {
 	// player. It mirrors a DNS that forces clients onto a relay, and for testing a relay
 	// with one console before the region rules cover its country.
 	ForcePIDs func() map[uint32]bool
+	// EdgePIDs, if set, returns the WSC consoles (or ForceAll) whose session should be
+	// terminated on the relay by the WSC edge instead of going to the main's secure server.
+	EdgePIDs func() map[uint32]bool
 
 	mu       sync.Mutex
 	hello    map[string]map[string]bool // relay id -> games it hosts
@@ -234,7 +241,30 @@ func (a *NexAssigner) Register() {
 	a.Streams.HandleMethod(relaylink.MethodCredGet, a.handleCredGet)
 }
 
-func (a *NexAssigner) handleHello(_ context.Context, relayID string, body []byte) ([]byte, error) {
+// edgeGame builds the wsc-edge configuration for one relay: its own IPv4 address is the
+// secure server. Not available until WSC itself is configured.
+func (a *NexAssigner) edgeGame(ctx context.Context, cfg map[string]relaylink.NexGame, relayID string) (relaylink.NexGame, bool) {
+	wsc, ok := cfg[relaylink.WSCEdgeBase]
+	if !ok {
+		return relaylink.NexGame{}, false
+	}
+	relays, err := a.Registry.List(ctx)
+	if err != nil {
+		return relaylink.NexGame{}, false
+	}
+	for _, r := range relays {
+		if r.ID == relayID {
+			host, err := a.resolve(r.Host)
+			if err != nil {
+				return relaylink.NexGame{}, false
+			}
+			return relaylink.EdgeGame(wsc, host), true
+		}
+	}
+	return relaylink.NexGame{}, false
+}
+
+func (a *NexAssigner) handleHello(ctx context.Context, relayID string, body []byte) ([]byte, error) {
 	var req relaylink.NexHelloRequest
 	if json.Unmarshal(body, &req) != nil {
 		return nil, errors.New("bad request")
@@ -246,6 +276,12 @@ func (a *NexAssigner) handleHello(_ context.Context, relayID string, body []byte
 		if g, ok := cfg[name]; ok {
 			resp.Games = append(resp.Games, g)
 			hosted[name] = true
+		} else if name == relaylink.WSCEdgeGame {
+			// Derived per relay: WSC's configuration with the relay itself as secure server.
+			if g, ok := a.edgeGame(ctx, cfg, relayID); ok {
+				resp.Games = append(resp.Games, g)
+				hosted[name] = true
+			}
 		}
 	}
 	sort.Slice(resp.Games, func(i, j int) bool { return resp.Games[i].Name < resp.Games[j].Name })
@@ -363,22 +399,41 @@ func (a *NexAssigner) Assign(ctx context.Context, req AssignRequest) (*AssignRes
 	for _, s := range a.Streams.Status() {
 		connected[s.ID] = true
 	}
-	var cands []*Relay
-	for _, r := range relays {
-		if r.Enabled && (forced || r.Region == region) && connected[r.ID] && a.hostsGame(r.ID, req.Game) {
-			cands = append(cands, r)
+	// The relays that could serve this console for a given auth game, fastest first.
+	pick := func(name string) []*Relay {
+		var cands []*Relay
+		for _, r := range relays {
+			if r.Enabled && (forced || r.Region == region) && connected[r.ID] && a.hostsGame(r.ID, name) {
+				cands = append(cands, r)
+			}
 		}
+		sort.Slice(cands, func(i, j int) bool {
+			ri, rj := a.rtt(cands[i].ID), a.rtt(cands[j].ID)
+			if ri != rj {
+				return ri < rj
+			}
+			return cands[i].ID < cands[j].ID
+		})
+		return cands
+	}
+	// A WSC console the operator listed for the edge is sent to a relay that offers the edge
+	// variant (its secure server is the relay itself). A relay only offers it while its edge
+	// is healthy, so this falls back to plain WSC auth whenever no edge is available.
+	name, port := req.Game, game.Port
+	var cands []*Relay
+	if req.Game == relaylink.WSCEdgeBase && a.EdgePIDs != nil {
+		if m := a.EdgePIDs(); m[req.PID] || m[ForceAll] {
+			if c := pick(relaylink.WSCEdgeGame); len(c) > 0 {
+				cands, name, port = c, relaylink.WSCEdgeGame, relaylink.NexGameDefaults()[relaylink.WSCEdgeGame].Port
+			}
+		}
+	}
+	if len(cands) == 0 {
+		cands = pick(req.Game)
 	}
 	if len(cands) == 0 {
 		return nil, ErrNoRelay
 	}
-	sort.Slice(cands, func(i, j int) bool {
-		ri, rj := a.rtt(cands[i].ID), a.rtt(cands[j].ID)
-		if ri != rj {
-			return ri < rj
-		}
-		return cands[i].ID < cands[j].ID
-	})
 	best := cands[0]
 	host, err := a.resolve(best.Host)
 	if err != nil {
@@ -392,7 +447,7 @@ func (a *NexAssigner) Assign(ctx context.Context, req AssignRequest) (*AssignRes
 	}
 	pctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	body, _ := json.Marshal(relaylink.NexCredPut{Game: req.Game, PID: req.PID, Password: req.Password, TTLSeconds: int(AssignTTL / time.Second)})
+	body, _ := json.Marshal(relaylink.NexCredPut{Game: name, PID: req.PID, Password: req.Password, TTLSeconds: int(AssignTTL / time.Second)})
 	if _, err := a.Streams.CallRelay(pctx, best.ID, relaylink.MethodCredPut, body); err != nil {
 		return nil, err
 	}
@@ -408,7 +463,7 @@ func (a *NexAssigner) Assign(ctx context.Context, req AssignRequest) (*AssignRes
 			}
 		}
 	}
-	a.assigned[asKey(req.Game, req.PID)] = assignment{relayID: best.ID, password: req.Password, expires: now.Add(AssignTTL)}
+	a.assigned[asKey(name, req.PID)] = assignment{relayID: best.ID, password: req.Password, expires: now.Add(AssignTTL)}
 	a.mu.Unlock()
-	return &AssignResult{Relay: best.ID, Host: host, Port: game.Port}, nil
+	return &AssignResult{Relay: best.ID, Host: host, Port: port, Game: name}, nil
 }

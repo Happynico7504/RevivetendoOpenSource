@@ -44,6 +44,20 @@ func newBridgeRig(t *testing.T) *bridgeRig {
 		return nil, r.fail[method]
 	}
 	go func() { r.b.Attach(childToParentR, parentToChildW); close(r.done) }()
+	// Attach registers the child's writer on its own goroutine: wait for it, or an early
+	// DeliverOut would be (correctly) dropped as "no edge running".
+	for i := 0; ; i++ {
+		r.b.mu.Lock()
+		attached := r.b.enc != nil
+		r.b.mu.Unlock()
+		if attached {
+			break
+		}
+		if i > 500 {
+			t.Fatal("the bridge never attached")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
 	t.Cleanup(func() { childToParentW.Close(); parentToChildW.Close() })
 	return r
 }

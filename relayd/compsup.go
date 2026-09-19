@@ -28,7 +28,16 @@ type ComponentSupervisor struct {
 	Fallback string   // binary to run when nothing has been installed over the air; "" = wait for one
 	Args     []string // the child's arguments
 	Env      []string // extra environment ("KEY=value")
-	Logf     func(string, ...any)
+	// EnvFunc, if set, is evaluated at every launch and appended after Env: for values that
+	// change while relayd runs (a secret the main rotates).
+	EnvFunc func() []string
+	// Ready, if set, must return true before the child is launched (for example until the
+	// secret it needs has arrived from the main). Until then nothing runs.
+	Ready func() bool
+	// OnHealthy is called with true once a launch has stayed up for GoodAfter, and with false
+	// when that child later exits or is stopped.
+	OnHealthy func(healthy bool)
+	Logf      func(string, ...any)
 	// Pipe, if set, is called on every launch with a line channel to the child: it reads the
 	// child's messages from fromChild and writes to toChild. The child sees them as inherited
 	// descriptors 3 (reads) and 4 (writes). Pipe blocks until the child's end closes.
@@ -122,6 +131,9 @@ func (s *ComponentSupervisor) Run(ctx context.Context) {
 	delay := s.MinDelay
 	for ctx.Err() == nil {
 		path := s.pick()
+		if path != "" && s.Ready != nil && !s.Ready() {
+			path = "" // installed, but what it needs has not arrived yet: wait like "nothing installed"
+		}
 		if path == "" {
 			// Nothing installed yet: the updater will fetch it and call Restart.
 			select {
@@ -191,6 +203,9 @@ func (s *ComponentSupervisor) runChild(ctx context.Context, path string, ver uin
 	cmd := exec.Command(path, s.Args...)
 	cmd.Dir = runDir
 	cmd.Env = append(os.Environ(), s.Env...)
+	if s.EnvFunc != nil {
+		cmd.Env = append(cmd.Env, s.EnvFunc()...)
+	}
 	pr, pw := io.Pipe()
 	cmd.Stdout, cmd.Stderr = pw, pw
 	var toChild, fromChild *os.File // the parent's ends of the message pipes
@@ -256,6 +271,12 @@ func (s *ComponentSupervisor) runChild(ctx context.Context, path string, ver uin
 	go func() { done <- cmd.Wait(); pw.Close(); closePipes() }()
 	proven := time.NewTimer(s.GoodAfter)
 	defer proven.Stop()
+	healthy := false
+	defer func() {
+		if healthy && s.OnHealthy != nil {
+			s.OnHealthy(false)
+		}
+	}()
 
 	stop := func() {
 		cmd.Process.Signal(syscall.SIGTERM)
@@ -276,6 +297,10 @@ func (s *ComponentSupervisor) runChild(ctx context.Context, path string, ver uin
 			return time.Since(start)
 		case <-proven.C:
 			s.Updater.Commit()
+			healthy = true
+			if s.OnHealthy != nil {
+				s.OnHealthy(true)
+			}
 		case <-s.restart:
 			s.logf("%s: restarting", name)
 			stop()

@@ -31,6 +31,8 @@ type NexSupervisor struct {
 	// know yet (a stream cred.get). Called from the child's login path.
 	Pull func(ctx context.Context, game string, pid uint32) (string, error)
 	Logf func(string, ...any)
+	// OnGames, if set, is called after the configuration changed (not for an identical one).
+	OnGames func(games []relaylink.NexGame)
 
 	MinBackoff time.Duration // default 1s
 	MaxBackoff time.Duration // default 15s
@@ -90,6 +92,21 @@ func (s *NexSupervisor) SetGames(games []relaylink.NexGame) {
 		kid.kill() // Run notices, and starts a fresh child with the new configuration
 	}
 	s.notify()
+	if s.OnGames != nil {
+		s.OnGames(games)
+	}
+}
+
+// Game returns the current configuration of one game (ok is false until the main has sent it).
+func (s *NexSupervisor) Game(name string) (relaylink.NexGame, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, g := range s.games {
+		if g.Name == name {
+			return g, true
+		}
+	}
+	return relaylink.NexGame{}, false
 }
 
 // Ready reports whether the child is running and serving.

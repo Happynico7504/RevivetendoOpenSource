@@ -247,3 +247,31 @@ func TestSupervisorStopsTheChildWhenTheParentContextEnds(t *testing.T) {
 		t.Fatalf("child process %d outlived the supervisor", pid)
 	}
 }
+
+func TestNexSupervisorReportsChangesAndLooksUpGames(t *testing.T) {
+	s := &NexSupervisor{}
+	var calls int
+	s.OnGames = func([]relaylink.NexGame) { calls++ }
+	if _, ok := s.Game("wsc"); ok {
+		t.Fatal("a game before any configuration")
+	}
+	a := []relaylink.NexGame{{Name: "wsc", KerberosPassword: "one"}, {Name: "wsc-edge", KerberosPassword: "one"}}
+	s.SetGames(a)
+	s.SetGames(append([]relaylink.NexGame(nil), a...)) // identical: no callback
+	if calls != 1 {
+		t.Fatalf("OnGames called %d times, want 1", calls)
+	}
+	if g, ok := s.Game("wsc"); !ok || g.KerberosPassword != "one" {
+		t.Fatalf("lookup: %+v %v", g, ok)
+	}
+	s.SetGames([]relaylink.NexGame{{Name: "wsc", KerberosPassword: "two"}})
+	if calls != 2 {
+		t.Fatalf("a rotated secret did not call OnGames (%d)", calls)
+	}
+	if g, _ := s.Game("wsc"); g.KerberosPassword != "two" {
+		t.Fatalf("stale secret: %+v", g)
+	}
+	if _, ok := s.Game("wsc-edge"); ok {
+		t.Fatal("a game that was dropped from the configuration is still found")
+	}
+}

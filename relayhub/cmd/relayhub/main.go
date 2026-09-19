@@ -235,8 +235,25 @@ func cmdServe(args []string) {
 				ftime  time.Time
 			)
 			forcePath := filepath.Join(filepath.Dir(*keyPath), "nex-force-pids")
+			// ~/.relayhub/wsc-edge-pids: WSC consoles whose session is terminated on the relay
+			// (the WSC edge). Same format and reload behaviour; empty or missing = nobody.
+			var (
+				emu    sync.Mutex
+				ecache map[uint32]bool
+				etime  time.Time
+			)
+			edgePath := filepath.Join(filepath.Dir(*keyPath), "wsc-edge-pids")
 			assigner = &relayhub.NexAssigner{
 				Streams: streams, Registry: reg, Geo: geo,
+				EdgePIDs: func() map[uint32]bool {
+					emu.Lock()
+					defer emu.Unlock()
+					if ecache == nil || time.Since(etime) > 5*time.Second {
+						raw, _ := os.ReadFile(edgePath)
+						ecache, etime = relayhub.ParseForcePIDs(string(raw)), time.Now()
+					}
+					return ecache
+				},
 				ForcePIDs: func() map[uint32]bool {
 					fmu.Lock()
 					defer fmu.Unlock()
@@ -302,7 +319,7 @@ func cmdServe(args []string) {
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
-			log.Printf("nex: %s pid=%d -> relay %s", req.Game, req.PID, res.Relay)
+			log.Printf("nex: %s pid=%d -> relay %s", res.Game, req.PID, res.Relay)
 			json.NewEncoder(w).Encode(res)
 		})
 		if edge != nil {

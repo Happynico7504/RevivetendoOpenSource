@@ -374,3 +374,95 @@ func TestParseForcePIDs(t *testing.T) {
 		t.Fatal("empty input produced entries")
 	}
 }
+
+func TestHelloDerivesTheEdgeGameFromWSCAndTheRelaysOwnAddress(t *testing.T) {
+	r := newNexRig(t)
+	us := r.connectRelay(t, "us-1") // relay us-1 is registered with host 203.0.113.5
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out, err := us.conn.Call(ctx, relaylink.MethodNexHello, mustJSON(relaylink.NexHelloRequest{Games: []string{"wsc", relaylink.WSCEdgeGame}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var resp relaylink.NexHelloResponse
+	json.Unmarshal(out, &resp)
+	if len(resp.Games) != 2 || resp.Games[0].Name != "wsc" || resp.Games[1].Name != relaylink.WSCEdgeGame {
+		t.Fatalf("games: %+v", resp.Games)
+	}
+	wsc, edge := resp.Games[0], resp.Games[1]
+	// Same secret and protocol settings as WSC (the edge decrypts the tickets the auth issues)...
+	if edge.KerberosPassword != wsc.KerberosPassword || edge.AccessKey != wsc.AccessKey || edge.NEXMinor != wsc.NEXMinor || edge.GameServerID != wsc.GameServerID {
+		t.Fatalf("edge differs from wsc in what must match: %+v vs %+v", edge, wsc)
+	}
+	// ...but consoles are sent to the relay itself, and it has its own auth port.
+	if edge.SecureHost != "203.0.113.5" || edge.SecurePort != relaylink.WSCEdgeSecurePort || edge.Port == wsc.Port {
+		t.Fatalf("edge routing: host %q port %q auth port %d", edge.SecureHost, edge.SecurePort, edge.Port)
+	}
+	// Without WSC configured on the main there is nothing to derive it from.
+	r.assigner.Games = func() map[string]relaylink.NexGame { return map[string]relaylink.NexGame{} }
+	out, _ = us.conn.Call(ctx, relaylink.MethodNexHello, mustJSON(relaylink.NexHelloRequest{Games: []string{relaylink.WSCEdgeGame}}))
+	json.Unmarshal(out, &resp)
+	if len(resp.Games) != 0 {
+		t.Fatalf("edge game offered without wsc: %+v", resp.Games)
+	}
+}
+
+func TestListedConsolesAreSentToTheEdgeAuthAndOthersAreNot(t *testing.T) {
+	r := newNexRig(t)
+	us := r.connectRelay(t, "us-1", "wsc", relaylink.WSCEdgeGame)
+	edgeList := map[uint32]bool{1435853600: true}
+	r.assigner.EdgePIDs = func() map[uint32]bool { return edgeList }
+	r.assigner.ForcePIDs = func() map[uint32]bool { return map[uint32]bool{ForceAll: true} } // relay for every region
+
+	res, err := assign(r, "wsc", 1435853600, ipDE)
+	if err != nil || res.Game != relaylink.WSCEdgeGame || res.Port != 60114 || res.Host != "203.0.113.5" {
+		t.Fatalf("listed console: %+v %v", res, err)
+	}
+	if us.putCount() != 1 || us.puts[0].Game != relaylink.WSCEdgeGame {
+		t.Fatalf("the credential was staged for %+v", us.puts)
+	}
+	// Not listed: ordinary WSC auth on the relay.
+	res, err = assign(r, "wsc", 42, ipDE)
+	if err != nil || res.Game != "wsc" || res.Port != 60014 {
+		t.Fatalf("unlisted console: %+v %v", res, err)
+	}
+	// Only WSC has an edge: other games are untouched even for a listed PID.
+	edgeList[ForceAll] = true
+	if res, err := assign(r, "mk8", 7, ipDE); err == nil && res.Game != "mk8" {
+		t.Fatalf("mk8 was sent to %q", res.Game)
+	}
+	// "*" lists everyone.
+	if res, err := assign(r, "wsc", 43, ipDE); err != nil || res.Game != relaylink.WSCEdgeGame {
+		t.Fatalf("everyone listed: %+v %v", res, err)
+	}
+}
+
+func TestEdgeListedConsoleFallsBackToPlainAuthWhenNoRelayOffersTheEdge(t *testing.T) {
+	r := newNexRig(t)
+	r.connectRelay(t, "us-1", "wsc") // hosts wsc but has NOT announced the edge (its edge is down)
+	r.assigner.EdgePIDs = func() map[uint32]bool { return map[uint32]bool{ForceAll: true} }
+	res, err := assign(r, "wsc", 5, ipUS)
+	if err != nil || res.Game != "wsc" || res.Port != 60014 {
+		t.Fatalf("no edge offered: %+v %v", res, err)
+	}
+}
+
+func TestEdgeCredentialIsScopedToTheEdgeGame(t *testing.T) {
+	r := newNexRig(t)
+	r.connectRelay(t, "us-1", "wsc", relaylink.WSCEdgeGame)
+	r.assigner.EdgePIDs = func() map[uint32]bool { return map[uint32]bool{100: true} }
+	if res, err := assign(r, "wsc", 100, ipUS); err != nil || res.Game != relaylink.WSCEdgeGame {
+		t.Fatalf("%+v %v", res, err)
+	}
+	get := func(game string) error {
+		_, err := r.assigner.handleCredGet(context.Background(), "us-1", mustJSON(relaylink.NexCredGet{Game: game, PID: 100}))
+		return err
+	}
+	if err := get(relaylink.WSCEdgeGame); err != nil {
+		t.Fatalf("the edge auth was refused its own credential: %v", err)
+	}
+	// The plain WSC auth server never received it, so it must not be able to pull it either.
+	if err := get("wsc"); err == nil {
+		t.Fatal("plain wsc auth could pull a credential staged for the edge")
+	}
+}

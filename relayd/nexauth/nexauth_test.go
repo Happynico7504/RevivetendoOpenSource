@@ -120,7 +120,9 @@ func TestDefaultsMatchTheMainsAuthServers(t *testing.T) {
 		key, build, id string
 		maj, min, pat  int
 	}{
-		"wsc":          {60014, "4d324052", "Pretendo WSC", "1012F100", 3, 4, 0},
+		"wsc": {60014, "4d324052", "Pretendo WSC", "1012F100", 3, 4, 0},
+		// The WSC edge variant: WSC's values on its own auth port (see relaylink.EdgeGame).
+		"wsc-edge":     {60114, "4d324052", "Pretendo WSC", "1012F100", 3, 4, 0},
 		"mk8":          {60002, "25dbf96a", "Pretendo MK7", "1010EB00", 3, 5, 4},
 		"badge-arcade": {60018, "82d5962d", "Badge Arcade Auth", "00134600", 3, 7, 16},
 	}

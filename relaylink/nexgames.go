@@ -15,6 +15,25 @@ const (
 	MethodCredGet  = "cred.get"  // relay -> hub: NexCredGet -> NexCredAnswer (only for consoles the hub sent there)
 )
 
+// The WSC edge auth variant.
+const (
+	WSCEdgeGame       = "wsc-edge" // auth server whose secure server is the relay itself
+	WSCEdgeBase       = "wsc"      // the game whose configuration it is derived from
+	WSCEdgeSecurePort = "60015"    // where the edge listens: the same port wsc-secure uses on the main
+)
+
+// EdgeGame derives the wsc-edge configuration from WSC's: same access key, NEX version and
+// Kerberos secret (the edge decrypts the tickets the auth server issues), but consoles are
+// sent to secureHost, the relay.
+func EdgeGame(wsc NexGame, secureHost string) NexGame {
+	g := NexGameDefaults()[WSCEdgeGame]
+	g.GameServerID, g.AccessKey, g.BuildName = wsc.GameServerID, wsc.AccessKey, wsc.BuildName
+	g.NEXMajor, g.NEXMinor, g.NEXPatch = wsc.NEXMajor, wsc.NEXMinor, wsc.NEXPatch
+	g.KerberosPassword = wsc.KerberosPassword
+	g.SecureHost, g.SecurePort = secureHost, WSCEdgeSecurePort
+	return g
+}
+
 type NexGame struct {
 	Name         string `json:"name"`           // "wsc", "mk8", "badge-arcade"
 	GameServerID string `json:"game_server_id"` // the id consoles ask for in nex_token, e.g. 1012F100
@@ -34,8 +53,12 @@ type NexGame struct {
 // NexGameDefaults is the static table.
 func NexGameDefaults() map[string]NexGame {
 	return map[string]NexGame{
-		"wsc":          {Name: "wsc", GameServerID: "1012F100", Port: 60014, AccessKey: "4d324052", NEXMajor: 3, NEXMinor: 4, NEXPatch: 0, BuildName: "Pretendo WSC"},
-		"mk8":          {Name: "mk8", GameServerID: "1010EB00", Port: 60002, AccessKey: "25dbf96a", NEXMajor: 3, NEXMinor: 5, NEXPatch: 4, BuildName: "Pretendo MK7"},
+		"wsc": {Name: "wsc", GameServerID: "1012F100", Port: 60014, AccessKey: "4d324052", NEXMajor: 3, NEXMinor: 4, NEXPatch: 0, BuildName: "Pretendo WSC"},
+		"mk8": {Name: "mk8", GameServerID: "1010EB00", Port: 60002, AccessKey: "25dbf96a", NEXMajor: 3, NEXMinor: 5, NEXPatch: 4, BuildName: "Pretendo MK7"},
+		// wsc-edge is WSC's auth server with a different secure server: the relay itself, where
+		// the WSC edge terminates the session. Everything else, including the Kerberos secret,
+		// is WSC's (see EdgeGame); it is derived per relay, never configured on its own.
+		WSCEdgeGame:    {Name: WSCEdgeGame, GameServerID: "1012F100", Port: 60114, AccessKey: "4d324052", NEXMajor: 3, NEXMinor: 4, NEXPatch: 0, BuildName: "Pretendo WSC"},
 		"badge-arcade": {Name: "badge-arcade", GameServerID: "00134600", Port: 60018, AccessKey: "82d5962d", NEXMajor: 3, NEXMinor: 7, NEXPatch: 16, BuildName: "Badge Arcade Auth"},
 	}
 }

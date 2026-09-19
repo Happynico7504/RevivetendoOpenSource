@@ -226,3 +226,77 @@ func TestStoppingTheSupervisorStopsTheChild(t *testing.T) {
 		t.Fatal("child was not stopped")
 	}
 }
+
+func TestComponentWaitsUntilReadyAndGetsFreshEnvEachLaunch(t *testing.T) {
+	// A child that reports the secret it was given, then runs.
+	script := []byte("#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then echo \"wscedge 1\"; exit 0; fi\necho \"SECRET=$WSC_KERBEROS_PASSWORD\"\nexec sleep 300\n")
+	r := newCompRig(t, 0, script)
+	var mu sync.Mutex
+	secret := ""
+	r.sup.Ready = func() bool { mu.Lock(); defer mu.Unlock(); return secret != "" }
+	r.sup.EnvFunc = func() []string { mu.Lock(); defer mu.Unlock(); return []string{"WSC_KERBEROS_PASSWORD=" + secret} }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go r.sup.Run(ctx)
+
+	time.Sleep(200 * time.Millisecond)
+	if r.sup.Launches() != 0 {
+		t.Fatal("launched before its secret arrived")
+	}
+	mu.Lock()
+	secret = "first"
+	mu.Unlock()
+	r.sup.Restart() // what OnGames does when the secret arrives
+	waitFor(t, "start with the first secret", func() bool { return r.logged("SECRET=first") })
+
+	// The main restarted and rotated the secret: the relaunch must carry the new one.
+	mu.Lock()
+	secret = "second"
+	mu.Unlock()
+	r.sup.Restart()
+	waitFor(t, "relaunch with the rotated secret", func() bool { return r.logged("SECRET=second") })
+	if r.sup.Launches() != 2 {
+		t.Fatalf("%d launches, want 2", r.sup.Launches())
+	}
+}
+
+func TestComponentReportsHealthOnlyAfterItStaysUp(t *testing.T) {
+	r := newCompRig(t, 0, compScript("wscedge", "1", false))
+	var mu sync.Mutex
+	var events []bool
+	r.sup.OnHealthy = func(h bool) { mu.Lock(); events = append(events, h); mu.Unlock() }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.sup.Run(ctx); close(done) }()
+	waitFor(t, "started", func() bool { return r.sup.Launches() == 1 })
+	mu.Lock()
+	early := len(events)
+	mu.Unlock()
+	if early != 0 {
+		t.Fatalf("reported health before GoodAfter: %v", events)
+	}
+	waitFor(t, "healthy", func() bool { mu.Lock(); defer mu.Unlock(); return len(events) == 1 && events[0] })
+	cancel()
+	<-done
+	mu.Lock()
+	defer mu.Unlock()
+	if len(events) != 2 || events[1] {
+		t.Fatalf("events after stopping: %v (want [true false])", events)
+	}
+}
+
+func TestComponentThatCrashesBeforeGoodAfterIsNeverReportedHealthy(t *testing.T) {
+	r := newCompRig(t, 0, compScript("wscedge", "1", true)) // exits at once
+	healthy := false
+	var mu sync.Mutex
+	r.sup.OnHealthy = func(h bool) { mu.Lock(); healthy = healthy || h; mu.Unlock() }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go r.sup.Run(ctx)
+	waitFor(t, "several crash-restarts", func() bool { return r.sup.Launches() >= 3 })
+	mu.Lock()
+	defer mu.Unlock()
+	if healthy {
+		t.Fatal("a crash-looping edge was reported healthy (the relay would offer it to consoles)")
+	}
+}

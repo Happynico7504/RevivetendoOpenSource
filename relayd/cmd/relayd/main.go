@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -132,6 +133,11 @@ func main() {
 
 	// The WSC edge child talks to the main through the stream, so its bridge exists only
 	// when the edge component is configured and the stream is on.
+	// edgeHealthy is true while the WSC edge child is up and proven; only then does this relay
+	// offer the wsc-edge auth variant to the main, so a console is never sent to a dead edge.
+	var edgeHealthy atomic.Bool
+	var rehello func() // sends the hello again (set once the stream exists)
+	var nexSup *relayd.NexSupervisor
 	var wscBridge *relayd.WSCBridge
 	for _, c := range cfg.Components {
 		if c.Name == "wscedge" && !c.Disabled && !cfg.StreamDisabled {
@@ -150,7 +156,6 @@ func main() {
 		// NEX authentication servers (a supervised child process): the hub tells us
 		// the games' configuration whenever the stream connects, pushes each
 		// console's credential before sending it here, and answers our pulls.
-		var nexSup *relayd.NexSupervisor
 		var stream *relayd.StreamClient
 		handlers := relaylink.StreamHandlers{
 			Event: func(_ *relaylink.StreamConn, topic string, body []byte) {
@@ -202,6 +207,29 @@ func main() {
 			go nexSup.Run(ctx)
 			log.Printf("NEX authentication enabled for %v", cfg.NexAuth)
 		}
+		// sendHello tells the main which auth games this relay hosts and applies the
+		// configuration it answers with. The edge variant is offered only while the edge is healthy.
+		sendHello := func(c *relaylink.StreamConn) {
+			hctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			names := append([]string(nil), cfg.NexAuth...)
+			if edgeHealthy.Load() {
+				names = append(names, relaylink.WSCEdgeGame)
+			}
+			body, _ := json.Marshal(relaylink.NexHelloRequest{Games: names})
+			out, err := c.Call(hctx, relaylink.MethodNexHello, body)
+			if err != nil {
+				log.Printf("nex: hello failed: %v", err)
+				return
+			}
+			var resp relaylink.NexHelloResponse
+			if json.Unmarshal(out, &resp) != nil {
+				log.Printf("nex: malformed hello answer")
+				return
+			}
+			log.Printf("nex: the main configured %d of %d requested games", len(resp.Games), len(names))
+			nexSup.SetGames(resp.Games)
+		}
 		if wscBridge != nil {
 			wscBridge.Call = func(cctx context.Context, method string, body []byte) ([]byte, error) {
 				return stream.Call(cctx, method, body)
@@ -221,24 +249,15 @@ func main() {
 				if nexSup == nil {
 					return
 				}
-				go func() {
-					hctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-					defer cancel()
-					body, _ := json.Marshal(relaylink.NexHelloRequest{Games: cfg.NexAuth})
-					out, err := c.Call(hctx, relaylink.MethodNexHello, body)
-					if err != nil {
-						log.Printf("nex: hello failed: %v", err)
-						return
-					}
-					var resp relaylink.NexHelloResponse
-					if json.Unmarshal(out, &resp) != nil {
-						log.Printf("nex: malformed hello answer")
-						return
-					}
-					log.Printf("nex: the main configured %d of %d requested games", len(resp.Games), len(cfg.NexAuth))
-					nexSup.SetGames(resp.Games)
-				}()
+				go sendHello(c)
 			},
+		}
+		if nexSup != nil {
+			rehello = func() {
+				if c := stream.Conn(); c != nil {
+					go sendHello(c)
+				}
+			}
 		}
 		go stream.Run(ctx)
 		log.Printf("real-time stream to %s enabled", addr)
@@ -272,7 +291,14 @@ func main() {
 		}
 		go upd.Run(ctx, every, first)
 	}
-	startComponents(ctx, cfg, client, bundle, wscBridge)
+	startComponents(ctx, cfg, client, bundle, wscBridge, edgeCoupling{
+		nex: nexSup, healthy: func(h bool) {
+			edgeHealthy.Store(h)
+			if rehello != nil {
+				rehello()
+			}
+		},
+	})
 	select {
 	case err := <-errc:
 		log.Fatalf("listener stopped: %v", err)
