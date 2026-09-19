@@ -22,22 +22,27 @@ import (
 // result over), in which case even a fully compromised main cannot push code to
 // the relays; it can only withhold updates.
 
+// ComponentRelayd is the relay daemon itself, the default component. Other binaries
+// (for example the WSC edge) ship separately, each with its own version line.
+const ComponentRelayd = "relayd"
+
 const (
-	UpdateManifestPath = "/relay/v1/update/manifest" // GET ?os=&arch=
-	UpdateChunkPath    = "/relay/v1/update/chunk"    // GET ?os=&arch=&version=&offset=
+	UpdateManifestPath = "/relay/v1/update/manifest" // GET ?[component=&]os=&arch=
+	UpdateChunkPath    = "/relay/v1/update/chunk"    // GET ?[component=&]os=&arch=&version=&offset=
 	UpdateChunkSize    = 1 << 20
 	MaxUpdateSize      = 64 << 20
 )
 
 // UpdateManifest describes one release binary for one platform.
 type UpdateManifest struct {
-	Version uint64 `json:"version"` // strictly increasing
-	Label   string `json:"label,omitempty"`
-	OS      string `json:"os"`
-	Arch    string `json:"arch"`
-	SHA256  string `json:"sha256"` // hex, of the binary
-	Size    int64  `json:"size"`
-	Sig     []byte `json:"sig"` // Ed25519 over SigningBytes()
+	Component string `json:"component,omitempty"` // "" means ComponentRelayd
+	Version   uint64 `json:"version"`             // strictly increasing
+	Label     string `json:"label,omitempty"`
+	OS        string `json:"os"`
+	Arch      string `json:"arch"`
+	SHA256    string `json:"sha256"` // hex, of the binary
+	Size      int64  `json:"size"`
+	Sig       []byte `json:"sig"` // Ed25519 over SigningBytes()
 }
 
 // UpdateChunk is one slice of the binary.
@@ -50,9 +55,23 @@ type UpdateChunk struct {
 // SigningBytes is the canonical, unambiguous byte string that gets signed:
 // every field is length- or width-delimited, and a fixed prefix separates this
 // use of the key from any other.
+//
+// relayd releases keep the original v1 encoding byte for byte, so everything signed
+// before components existed still verifies. Any other component uses a v2 encoding
+// that also covers the component name: a build of one component can never be
+// accepted as another, whatever the hub serves.
 func (m *UpdateManifest) SigningBytes() []byte {
 	var b bytes.Buffer
-	b.WriteString("relayd-release-v1\x00")
+	comp := m.ComponentName()
+	if comp == ComponentRelayd {
+		b.WriteString("relayd-release-v1\x00")
+	} else {
+		b.WriteString("relayd-release-v2\x00")
+		var l [4]byte
+		binary.BigEndian.PutUint32(l[:], uint32(len(comp)))
+		b.Write(l[:])
+		b.WriteString(comp)
+	}
 	var n [8]byte
 	binary.BigEndian.PutUint64(n[:], m.Version)
 	b.Write(n[:])
@@ -66,6 +85,14 @@ func (m *UpdateManifest) SigningBytes() []byte {
 	return b.Bytes()
 }
 
+// ComponentName is the component, with the empty default resolved.
+func (m *UpdateManifest) ComponentName() string {
+	if m.Component == "" {
+		return ComponentRelayd
+	}
+	return m.Component
+}
+
 // Sign fills in Sig.
 func (m *UpdateManifest) Sign(priv ed25519.PrivateKey) {
 	m.Sig = ed25519.Sign(priv, m.SigningBytes())
@@ -76,16 +103,25 @@ var (
 	ErrUpdatePlatform  = errors.New("relaylink: release is for a different platform")
 	ErrUpdateNotNewer  = errors.New("relaylink: release is not newer than the running version")
 	ErrUpdateBad       = errors.New("relaylink: malformed release manifest")
+	ErrUpdateComponent = errors.New("relaylink: release is for a different component")
 )
 
 // Verify checks a manifest against the pinned key and the relay's platform and
 // current version. It does not look at the binary itself (see VerifyBinary).
 func (m *UpdateManifest) Verify(pub ed25519.PublicKey, goos, goarch string, current uint64) error {
+	return m.VerifyComponent(pub, ComponentRelayd, goos, goarch, current)
+}
+
+// VerifyComponent is Verify for a specific component.
+func (m *UpdateManifest) VerifyComponent(pub ed25519.PublicKey, component, goos, goarch string, current uint64) error {
 	if len(pub) != ed25519.PublicKeySize {
 		return ErrUpdateSignature
 	}
 	if !ed25519.Verify(pub, m.SigningBytes(), m.Sig) {
 		return ErrUpdateSignature
+	}
+	if m.ComponentName() != component {
+		return ErrUpdateComponent
 	}
 	if m.OS != goos || m.Arch != goarch {
 		return ErrUpdatePlatform

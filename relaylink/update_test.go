@@ -1,10 +1,14 @@
 package relaylink
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
+	"errors"
+	"strings"
 	"testing"
 )
 
@@ -120,5 +124,64 @@ func TestReleaseKeyEncoding(t *testing.T) {
 		if _, err := ParseReleasePublicKey(bad); err == nil {
 			t.Errorf("%q accepted", bad)
 		}
+	}
+}
+
+// Releases signed before components existed must still verify: the relayd encoding is
+// the original v1 byte string. Built here independently of SigningBytes so a change to
+// that function cannot silently pass its own test.
+func TestRelaydSigningBytesAreTheOriginalV1Encoding(t *testing.T) {
+	m := &UpdateManifest{Version: 7, Label: "hello", OS: "linux", Arch: "amd64", SHA256: strings.Repeat("ab", 32), Size: 1234}
+	var want bytes.Buffer
+	want.WriteString("relayd-release-v1\x00")
+	var n [8]byte
+	binary.BigEndian.PutUint64(n[:], 7)
+	want.Write(n[:])
+	binary.BigEndian.PutUint64(n[:], 1234)
+	want.Write(n[:])
+	for _, s := range []string{"linux", "amd64", strings.Repeat("ab", 32), "hello"} {
+		binary.BigEndian.PutUint32(n[:4], uint32(len(s)))
+		want.Write(n[:4])
+		want.WriteString(s)
+	}
+	if !bytes.Equal(m.SigningBytes(), want.Bytes()) {
+		t.Fatal("relayd signing bytes changed: every release signed so far would stop verifying")
+	}
+	m.Component = "relayd" // explicit is the same as default
+	if !bytes.Equal(m.SigningBytes(), want.Bytes()) {
+		t.Fatal(`Component "relayd" must encode like the empty default`)
+	}
+}
+
+func TestComponentsCannotBeSwapped(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	bin := []byte("edge binary")
+	sum := sha256.Sum256(bin)
+	edge := &UpdateManifest{Component: "wscedge", Version: 3, OS: "linux", Arch: "amd64", SHA256: hex.EncodeToString(sum[:]), Size: int64(len(bin))}
+	edge.Sign(priv)
+
+	if err := edge.VerifyComponent(pub, "wscedge", "linux", "amd64", 2); err != nil {
+		t.Fatalf("valid component release refused: %v", err)
+	}
+	// Asked for as the relay daemon: refused by the component check.
+	if err := edge.Verify(pub, "linux", "amd64", 2); !errors.Is(err, ErrUpdateComponent) {
+		t.Fatalf("edge build accepted as relayd: %v", err)
+	}
+	// A hub that relabels the manifest breaks the signature: the name is signed.
+	relabelled := *edge
+	relabelled.Component = ""
+	if err := relabelled.Verify(pub, "linux", "amd64", 2); !errors.Is(err, ErrUpdateSignature) {
+		t.Fatalf("relabelled manifest accepted: %v", err)
+	}
+	other := *edge
+	other.Component = "other"
+	if err := other.VerifyComponent(pub, "other", "linux", "amd64", 2); !errors.Is(err, ErrUpdateSignature) {
+		t.Fatalf("component name is not covered by the signature: %v", err)
+	}
+	// A relayd manifest is likewise refused when a component is expected.
+	rd := &UpdateManifest{Version: 9, OS: "linux", Arch: "amd64", SHA256: hex.EncodeToString(sum[:]), Size: int64(len(bin))}
+	rd.Sign(priv)
+	if err := rd.VerifyComponent(pub, "wscedge", "linux", "amd64", 0); !errors.Is(err, ErrUpdateComponent) {
+		t.Fatalf("relayd build accepted as wscedge: %v", err)
 	}
 }

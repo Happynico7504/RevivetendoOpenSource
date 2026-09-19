@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Happynico7504/relaylink"
@@ -60,19 +61,59 @@ type updateState struct {
 // match the signed size and SHA-256. It is then executed once with -version as
 // a pre-flight check before it replaces anything.
 type Updater struct {
-	Client  *relaylink.Client
-	PubKey  ed25519.PublicKey
-	Dir     string
-	Current uint64
-	GOOS    string // default runtime.GOOS
-	GOARCH  string // default runtime.GOARCH
-	Window  string // "HH:MM-HH:MM" local time in which updates may be applied; "" = any time
-	Exit    func() // called after a successful install so the supervisor restarts us (default os.Exit(0))
-	Logf    func(string, ...any)
-	Now     func() time.Time
+	// Component is what this updater keeps current. Empty means the relay daemon itself.
+	// Any other component (say "wscedge") is a separately shipped binary: give it its
+	// own Dir, so its files, state and rollback markers never mix with relayd's.
+	Component string
+	Client    *relaylink.Client
+	mu        sync.Mutex // guards Current when a supervisor changes it while checks run
+	PubKey    ed25519.PublicKey
+	Dir       string
+	Current   uint64
+	GOOS      string // default runtime.GOOS
+	GOARCH    string // default runtime.GOARCH
+	Window    string // "HH:MM-HH:MM" local time in which updates may be applied; "" = any time
+	Exit      func() // called after a successful install so the supervisor restarts us (default os.Exit(0))
+	// KeepRunning makes Run continue checking after an install instead of returning:
+	// for a component whose Exit restarts a child process rather than ending this one.
+	KeepRunning bool
+	Logf        func(string, ...any)
+	Now         func() time.Time
 	// Preflight runs the downloaded binary before installing it. Default: run
-	// `<path> -version` and require "relayd <version>".
+	// `<path> -version` and require "<component> <version>".
 	Preflight func(path string, want uint64) error
+}
+
+// Name is the component name ("relayd" for the daemon itself): the binary's file name
+// and the first word its -version output must print.
+func (u *Updater) Name() string {
+	if u.Component == "" {
+		return relaylink.ComponentRelayd
+	}
+	return u.Component
+}
+
+// query is the component part of an update request. The daemon sends none, so requests
+// from relays and hubs of any age still match.
+func (u *Updater) query() string {
+	if u.Name() == relaylink.ComponentRelayd {
+		return ""
+	}
+	return "component=" + u.Name() + "&"
+}
+
+// SetCurrent records the version of the binary that is now running (a supervisor calls
+// this each time it launches the component).
+func (u *Updater) SetCurrent(v uint64) {
+	u.mu.Lock()
+	u.Current = v
+	u.mu.Unlock()
+}
+
+func (u *Updater) cur() uint64 {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.Current
 }
 
 func (u *Updater) logf(f string, a ...any) {
@@ -150,7 +191,7 @@ func (u *Updater) OnStart() (rolledBack bool, err error) {
 	if s.Pending == 0 {
 		return false, nil
 	}
-	if s.Pending != u.Current {
+	if s.Pending != u.cur() {
 		// The running binary is not the pending one (e.g. the launcher fell back
 		// to the system binary): nothing to prove or roll back.
 		s.Pending, s.Boots = 0, 0
@@ -160,13 +201,20 @@ func (u *Updater) OnStart() (rolledBack bool, err error) {
 	if s.Boots <= MaxBoots {
 		return false, u.save(s)
 	}
-	active, prev := filepath.Join(u.binDir(), "relayd"), filepath.Join(u.binDir(), "relayd.prev")
-	if _, err := os.Stat(prev); err == nil {
+	return true, u.rollback(s, "failed to become healthy in %d starts", MaxBoots)
+}
+
+// rollback restores the previous binary (or removes the OTA one so the fallback runs),
+// and remembers the bad version so it is never installed again.
+func (u *Updater) rollback(s updateState, why string, args ...any) error {
+	active, prev := filepath.Join(u.binDir(), u.Name()), filepath.Join(u.binDir(), u.Name()+".prev")
+	var err error
+	if _, serr := os.Stat(prev); serr == nil {
 		err = os.Rename(prev, active)
 	} else {
 		err = os.Remove(active) // no previous OTA binary: fall back to the installed one
 	}
-	u.logf("version %d failed to become healthy in %d starts: rolled back", s.Pending, MaxBoots)
+	u.logf("%s version %d "+why+": rolled back", append([]any{u.Name(), s.Pending}, args...)...)
 	if s.Pending > s.Rejected {
 		s.Rejected = s.Pending
 	}
@@ -174,7 +222,17 @@ func (u *Updater) OnStart() (rolledBack bool, err error) {
 	if serr := u.save(s); err == nil {
 		err = serr
 	}
-	return true, err
+	return err
+}
+
+// ForceRollback rolls back a pending (not yet proven) install right now, for a binary
+// that cannot even report its version. It reports whether there was anything to roll back.
+func (u *Updater) ForceRollback(reason string) (bool, error) {
+	s := u.load()
+	if s.Pending == 0 {
+		return false, nil
+	}
+	return true, u.rollback(s, "%s", reason)
 }
 
 // Commit marks the running version healthy (call after it has served for a
@@ -186,8 +244,8 @@ func (u *Updater) Commit() {
 	if s.Pending == 0 {
 		return
 	}
-	if s.Pending == u.Current {
-		u.logf("version %d is healthy", u.Current)
+	if s.Pending == u.cur() {
+		u.logf("version %d is healthy", u.cur())
 	}
 	s.Pending, s.Boots = 0, 0
 	u.save(s)
@@ -221,14 +279,14 @@ func (u *Updater) inWindow() bool {
 	return cur >= from || cur < to // window crossing midnight
 }
 
-func defaultPreflight(path string, want uint64) error {
+func (u *Updater) defaultPreflight(path string, want uint64) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, path, "-version").Output()
 	if err != nil {
 		return fmt.Errorf("pre-flight run failed: %w", err)
 	}
-	if got := strings.TrimSpace(string(out)); got != "relayd "+strconv.FormatUint(want, 10) {
+	if got := strings.TrimSpace(string(out)); got != u.Name()+" "+strconv.FormatUint(want, 10) {
 		return fmt.Errorf("pre-flight: binary reports %q, expected version %d", got, want)
 	}
 	return nil
@@ -240,7 +298,7 @@ func (u *Updater) CheckOnce(ctx context.Context) (installed bool, err error) {
 		return false, nil
 	}
 	goos, goarch := u.platform()
-	resp, err := u.Client.Call(ctx, http.MethodGet, fmt.Sprintf("%s?os=%s&arch=%s", relaylink.UpdateManifestPath, goos, goarch), nil)
+	resp, err := u.Client.Call(ctx, http.MethodGet, fmt.Sprintf("%s?%sos=%s&arch=%s", relaylink.UpdateManifestPath, u.query(), goos, goarch), nil)
 	if err != nil {
 		return false, err
 	}
@@ -255,22 +313,22 @@ func (u *Updater) CheckOnce(ctx context.Context) (installed bool, err error) {
 		return false, err
 	}
 	state := u.load()
-	floor := u.Current
+	floor := u.cur()
 	if r := u.rejectedFloor(state); r > floor {
 		floor = r
 	}
-	if err := m.Verify(u.PubKey, goos, goarch, floor); err != nil {
+	if err := m.VerifyComponent(u.PubKey, u.Name(), goos, goarch, floor); err != nil {
 		if errors.Is(err, relaylink.ErrUpdateNotNewer) {
 			return false, nil // up to date
 		}
 		return false, fmt.Errorf("refusing release: %w", err)
 	}
 
-	u.logf("update %d available (running %d, %d bytes): downloading", m.Version, u.Current, m.Size)
+	u.logf("%s update %d available (running %d, %d bytes): downloading", u.Name(), m.Version, u.cur(), m.Size)
 	if err := os.MkdirAll(u.binDir(), 0o755); err != nil {
 		return false, err
 	}
-	tmp := filepath.Join(u.binDir(), "relayd.download")
+	tmp := filepath.Join(u.binDir(), u.Name()+".download")
 	os.Remove(tmp)
 	if err := u.download(ctx, &m, tmp); err != nil {
 		os.Remove(tmp)
@@ -282,14 +340,14 @@ func (u *Updater) CheckOnce(ctx context.Context) (installed bool, err error) {
 	}
 	pre := u.Preflight
 	if pre == nil {
-		pre = defaultPreflight
+		pre = u.defaultPreflight
 	}
 	if err := pre(tmp, m.Version); err != nil {
 		os.Remove(tmp)
 		return false, err
 	}
 
-	active, prev := filepath.Join(u.binDir(), "relayd"), filepath.Join(u.binDir(), "relayd.prev")
+	active, prev := filepath.Join(u.binDir(), u.Name()), filepath.Join(u.binDir(), u.Name()+".prev")
 	if _, err := os.Stat(active); err == nil {
 		if err := os.Rename(active, prev); err != nil {
 			os.Remove(tmp)
@@ -300,7 +358,7 @@ func (u *Updater) CheckOnce(ctx context.Context) (installed bool, err error) {
 		os.Rename(prev, active) // put the old one back
 		return false, err
 	}
-	state.Pending, state.Prev, state.Boots = m.Version, u.Current, 0
+	state.Pending, state.Prev, state.Boots = m.Version, u.cur(), 0
 	if err := u.save(state); err != nil {
 		return false, err
 	}
@@ -308,7 +366,7 @@ func (u *Updater) CheckOnce(ctx context.Context) (installed bool, err error) {
 	if err := os.WriteFile(u.markerPath("pending"), []byte(strconv.FormatUint(m.Version, 10)+"\n"), 0o644); err != nil {
 		return false, err
 	}
-	u.logf("update %d installed: restarting", m.Version)
+	u.logf("%s update %d installed: restarting", u.Name(), m.Version)
 	return true, nil
 }
 
@@ -322,7 +380,7 @@ func (u *Updater) download(ctx context.Context, m *relaylink.UpdateManifest, des
 	h := sha256.New()
 	var off int64
 	for {
-		path := fmt.Sprintf("%s?os=%s&arch=%s&version=%d&offset=%d", relaylink.UpdateChunkPath, goos, goarch, m.Version, off)
+		path := fmt.Sprintf("%s?%sos=%s&arch=%s&version=%d&offset=%d", relaylink.UpdateChunkPath, u.query(), goos, goarch, m.Version, off)
 		resp, err := u.Client.Call(ctx, http.MethodGet, path, nil)
 		if err != nil {
 			return err
@@ -378,7 +436,9 @@ func (u *Updater) Run(ctx context.Context, every time.Duration, firstDelay time.
 		}
 		if installed {
 			exit()
-			return
+			if !u.KeepRunning {
+				return
+			}
 		}
 		wait = every + time.Duration(rand.Int63n(int64(every)/5+1)) // +0..20%
 	}

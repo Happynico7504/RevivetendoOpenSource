@@ -30,12 +30,14 @@ type fakeHub struct {
 	tamper   func(c *relaylink.UpdateChunk) // corrupt what a hostile hub sends
 	calls    int32
 	down     bool
+	paths    []string // every manifest/chunk request path seen
 }
 
 func (h *fakeHub) dispatch(_ context.Context, req *relaylink.Request) *relaylink.Response {
 	atomic.AddInt32(&h.calls, 1)
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.paths = append(h.paths, req.Path)
 	if h.down {
 		return &relaylink.Response{Status: 503}
 	}

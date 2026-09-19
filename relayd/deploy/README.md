@@ -59,6 +59,38 @@ launches, the launcher restores the previous binary (or the one from
 publish a higher version to try again. This works even when the new binary
 crashes before running any of its own code.
 
+### Separately shipped components
+
+Other binaries ship the same way, each with **its own version line** (relayd 8 and
+wscedge 1 are unrelated numbers), its own directory and its own rollback, so updating one
+never touches another. Today the only one is `wscedge` (the WSC edge prototype, see
+`WSC-EDGE.md`; it is its own Go module because it needs a patched nex-go).
+
+    relayd/deploy/release.sh -c wscedge 2 "what changed"
+    relayhub release list                       # every component and platform
+
+A relay runs a component only if its config lists it:
+
+    "components": [
+      {"name": "wscedge", "args": ["-port", "60115"], "env": ["WSC_KERBEROS_PASSWORD=..."]}
+    ]
+
+`relayd` downloads it (same signature, platform, no-downgrade, size/hash and pre-flight
+`wscedge -version` checks as its own updates), runs it as a child process under
+`<data_dir>/components/wscedge/` and, when a new version lands, restarts **only that
+child**. The relay and its NEX auth servers keep running; players connected to the
+component reconnect. A `fallback` path can name a binary to run until the first release
+arrives; without one nothing runs until a release is published.
+
+The manifest of a non-relayd component signs the component name too (a `wscedge` build
+can never be accepted as `relayd`, whatever the hub serves), while relayd's own signing
+format is unchanged so every earlier release still verifies.
+
+Rollback for a component is done by relayd's supervisor (the launcher script only
+protects relayd itself): a freshly installed version that does not stay up for 30 seconds
+within 3 launches, or cannot print its version, is replaced by the previous binary and
+never offered again. Components need `-version` printing exactly `<name> <number>`.
+
 Limits: OTA replaces `relayd` only, not the OS, the unit file or `relayd-run`
 (those come from `install.sh`); a manual `install.sh` always wins over an earlier
 OTA binary. A restart takes about two seconds during which connections reset.

@@ -556,7 +556,8 @@ func cmdRelease(args []string) {
 		fmt.Printf("wrote %s (0600) and %s.pub\nrelease public key (new relay bundles pin this): %s\nBest practice: move the private key off this machine and sign releases elsewhere.\n", *out, *out, pubB64)
 	case "sign":
 		fs := flag.NewFlagSet("release sign", flag.ExitOnError)
-		binPath := fs.String("binary", "", "relayd binary to publish")
+		component := fs.String("component", relaylink.ComponentRelayd, "what is being published: relayd, or a separately shipped binary such as wscedge")
+		binPath := fs.String("binary", "", "binary to publish")
 		version := fs.Uint64("version", 0, "release version (strictly increasing)")
 		goos := fs.String("os", "linux", "target OS")
 		goarch := fs.String("arch", "amd64", "target architecture")
@@ -569,21 +570,23 @@ func cmdRelease(args []string) {
 		if err != nil {
 			log.Fatal(err)
 		}
-		m, err := relayhub.PublishRelease(*out, bin, *version, *label, *goos, *goarch, loadReleaseKey(*keyPath), *force)
+		m, err := relayhub.PublishComponent(*out, *component, bin, *version, *label, *goos, *goarch, loadReleaseKey(*keyPath), *force)
 		if err != nil {
 			log.Fatal(err)
 		}
-		fmt.Printf("published %s/%s version %d (%d bytes, sha256 %s) to %s\n", m.OS, m.Arch, m.Version, m.Size, m.SHA256[:16], *out)
+		fmt.Printf("published %s %s/%s version %d (%d bytes, sha256 %s) to %s\n", m.ComponentName(), m.OS, m.Arch, m.Version, m.Size, m.SHA256[:16], *out)
 	case "list":
 		fs := flag.NewFlagSet("release list", flag.ExitOnError)
 		dir := fs.String("dir", defaultReleasesDir(), "releases directory")
 		fs.Parse(rest)
 		store := &relayhub.ReleaseStore{Dir: *dir}
 		found := false
-		for _, plat := range [][2]string{{"linux", "amd64"}, {"linux", "arm64"}, {"linux", "arm"}} {
-			if m, err := store.Manifest(plat[0], plat[1]); err == nil {
-				fmt.Printf("%s/%s  version %d  %d bytes  sha256 %s  %s\n", m.OS, m.Arch, m.Version, m.Size, m.SHA256[:16], m.Label)
-				found = true
+		for _, comp := range store.Components() {
+			for _, plat := range [][2]string{{"linux", "amd64"}, {"linux", "arm64"}, {"linux", "arm"}} {
+				if m, err := store.ManifestFor(comp, plat[0], plat[1]); err == nil {
+					fmt.Printf("%-8s %s/%s  version %d  %d bytes  sha256 %s  %s\n", comp, m.OS, m.Arch, m.Version, m.Size, m.SHA256[:16], m.Label)
+					found = true
+				}
 			}
 		}
 		if !found {

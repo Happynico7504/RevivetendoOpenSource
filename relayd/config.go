@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/Happynico7504/relaylink"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -21,18 +22,30 @@ import (
 //	  ]
 //	}
 type Config struct {
-	Bundle          string         `json:"bundle"`
-	DataDir         string         `json:"data_dir"`
-	CertSyncSeconds int            `json:"cert_sync_seconds"` // default 300
-	PollSeconds     int            `json:"poll_seconds"`      // invalidation poll, default 5
-	Listeners       []Listener     `json:"listeners"`
-	Update          UpdateConfig   `json:"update"`
-	NexAuth         []string       `json:"nex_auth"`      // NEX auth servers to host: "wsc", "mk8", "badge-arcade" (needs the stream)
-	ContentCache    *ContentConfig `json:"content_cache"` // console-content cache for the OLV hosts (off unless enabled)
-	StreamAddr      string         `json:"stream_addr"`   // default: the bundle host, port 7778
-	StreamDisabled  bool           `json:"stream_disabled"`
-	StaggerHosts    []string       `json:"stagger_hosts"` // SNI names that get the per-IP handshake stagger (sni mode)
-	StaggerEmptySNI *bool          `json:"stagger_empty_sni"`
+	Bundle          string            `json:"bundle"`
+	DataDir         string            `json:"data_dir"`
+	CertSyncSeconds int               `json:"cert_sync_seconds"` // default 300
+	PollSeconds     int               `json:"poll_seconds"`      // invalidation poll, default 5
+	Listeners       []Listener        `json:"listeners"`
+	Update          UpdateConfig      `json:"update"`
+	Components      []ComponentConfig `json:"components"`    // separately shipped binaries this relay runs and keeps current
+	NexAuth         []string          `json:"nex_auth"`      // NEX auth servers to host: "wsc", "mk8", "badge-arcade" (needs the stream)
+	ContentCache    *ContentConfig    `json:"content_cache"` // console-content cache for the OLV hosts (off unless enabled)
+	StreamAddr      string            `json:"stream_addr"`   // default: the bundle host, port 7778
+	StreamDisabled  bool              `json:"stream_disabled"`
+	StaggerHosts    []string          `json:"stagger_hosts"` // SNI names that get the per-IP handshake stagger (sni mode)
+	StaggerEmptySNI *bool             `json:"stagger_empty_sni"`
+}
+
+// ComponentConfig is one separately shipped binary (for example the WSC edge). relayd
+// downloads it from the main like its own updates, runs it as a child process and restarts
+// just that child when a new version arrives. Nothing runs until a release is published.
+type ComponentConfig struct {
+	Name     string   `json:"name"`     // component name, e.g. "wscedge"
+	Args     []string `json:"args"`     // command-line arguments
+	Env      []string `json:"env"`      // extra environment, "KEY=value"
+	Fallback string   `json:"fallback"` // binary to run until the first release arrives; "" = wait
+	Disabled bool     `json:"disabled"`
 }
 
 // UpdateConfig controls over-the-air updates. They only happen if the relay's
@@ -76,6 +89,8 @@ func LoadConfig(path string) (*Config, error) {
 	return &c, c.validate()
 }
 
+var componentNameRe = regexp.MustCompile(`^[a-z][a-z0-9]{0,31}$`)
+
 func (c *Config) validate() error {
 	if c.Bundle == "" || c.DataDir == "" {
 		return fmt.Errorf("bundle and data_dir are required")
@@ -115,6 +130,16 @@ func (c *Config) validate() error {
 	}
 	if len(c.NexAuth) > 0 && c.StreamDisabled {
 		return fmt.Errorf("nex_auth needs the real-time stream (stream_disabled must be false)")
+	}
+	seen := map[string]bool{}
+	for i, comp := range c.Components {
+		if !componentNameRe.MatchString(comp.Name) || comp.Name == relaylink.ComponentRelayd {
+			return fmt.Errorf("components[%d]: name must be lowercase letters and digits, and not %q", i, relaylink.ComponentRelayd)
+		}
+		if seen[comp.Name] {
+			return fmt.Errorf("components[%d]: %q is listed twice", i, comp.Name)
+		}
+		seen[comp.Name] = true
 	}
 	if c.CertSyncSeconds == 0 {
 		c.CertSyncSeconds = 300

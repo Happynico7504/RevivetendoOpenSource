@@ -249,6 +249,7 @@ func main() {
 		}
 		go upd.Run(ctx, every, first)
 	}
+	startComponents(ctx, cfg, client, bundle)
 	select {
 	case err := <-errc:
 		log.Fatalf("listener stopped: %v", err)
