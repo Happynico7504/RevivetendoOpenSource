@@ -14,7 +14,7 @@ mkdir -p "$BUILD"
 # "rebuild + restart" requests handled by restartd both use it.
 BUILD_ORDER=(account-grpc friends-nex wiiu-chat relay-admin account-proxy mk8-authentication mk8-secure
 	angry-birds-star-wars wsc-authentication wsc-secure mc-authentication mc-secure swapdoodle
-	badge-arcade-authentication badge-arcade-secure)
+	badge-arcade-authentication badge-arcade-secure relayhub)
 declare -A SRC_DIR=(
 	[account-grpc]=grpc-stubs [friends-nex]=friends-nex [wiiu-chat]=wiiu-chat-secure
 	[relay-admin]=relay-admin [account-proxy]=account-proxy
@@ -22,17 +22,18 @@ declare -A SRC_DIR=(
 	[angry-birds-star-wars]=angry-birds-star-wars [wsc-authentication]=wsc-authentication
 	[wsc-secure]=wsc-secure [mc-authentication]=minecraft-authentication [mc-secure]=minecraft-secure
 	[swapdoodle]=swapdoodle [badge-arcade-authentication]=badge-arcade-authentication
-	[badge-arcade-secure]=badge-arcade-secure
+	[badge-arcade-secure]=badge-arcade-secure [relayhub]=relayhub
 )
 declare -A BIN_NAME=(
 	[account-grpc]=account-grpc [friends-nex]=friends-nex [wiiu-chat]=wiiu-chat [relay-admin]=relay-admin
 	[account-proxy]=account-proxy [mk8-authentication]=mk8-auth [mk8-secure]=mk8-secure
 	[angry-birds-star-wars]=absw [wsc-authentication]=wsc-auth [wsc-secure]=wsc-secure
 	[mc-authentication]=mc-auth [mc-secure]=mc-secure [swapdoodle]=swapdoodle
-	[badge-arcade-authentication]=badge-arcade-auth [badge-arcade-secure]=badge-arcade-secure
+	[badge-arcade-authentication]=badge-arcade-auth [badge-arcade-secure]=badge-arcade-secure [relayhub]=relayhub
 )
-declare -A BUILD_PKG=([account-grpc]=./cmd/account)
-declare -A SRC_EXTRA=([account-proxy]="assets")
+declare -A BUILD_PKG=([account-grpc]=./cmd/account [relayhub]=./cmd/relayhub)
+# relayhub also depends on the sibling relaylink module (go.mod replace directive).
+declare -A SRC_EXTRA=([account-proxy]="assets" [relayhub]="../relaylink")
 
 # The command that rebuilds one service (run in a subshell via eval).
 declare -A BUILD_CMD=()
@@ -281,6 +282,19 @@ BA_AUTH_PID=$!
 	env $(cat .env | xargs) KERBEROS_PASSWORD="$BA_KERBEROS_PASSWORD" "$BUILD/badge-arcade-secure") &
 BA_SECURE_PID=$!
 
+# relayhub: the relay API for regional relays (port 7777) and the relay registry.
+# Needs the main RSA key, created ONCE with:  build/relayhub keygen
+# Without it the hub is simply not started (instead of crash-looping).
+RELAYHUB_PID=""
+RELAYHUB_KEY="${RELAYHUB_KEY:-$HOME/.relayhub/main-key.pem}"
+if [ -f "$RELAYHUB_KEY" ]; then
+	(cd "$ROOT/relayhub" && autostart relayhub "$LOG/relayhub.log" "$BUILD/relayhub" serve \
+		-key "$RELAYHUB_KEY" -env "$ROOT/wiiu-chat-secure/.env") &
+	RELAYHUB_PID=$!
+else
+	echo "==> relayhub not started: no main key at $RELAYHUB_KEY (create it once with: $BUILD/relayhub keygen)"
+fi
+
 (autostart discord-bot "$LOG/discord-bot.log" python3 "$ROOT/discord-bot/bot.py") &
 BOT_PID=$!
 
@@ -299,6 +313,9 @@ SERVICES=(account-grpc friends-nex relay-admin account-proxy mk8-authentication 
 	swapdoodle badge-arcade-authentication badge-arcade-secure discord-bot)
 if [ -n "$MII_BOT_PID" ]; then
 	SERVICES+=(mii-bot)
+fi
+if [ -n "$RELAYHUB_PID" ]; then
+	SERVICES+=(relayhub)
 fi
 {
 	printf '{"services":['
@@ -321,7 +338,7 @@ RESTARTD_PID=$!
 
 cleanup() {
 	echo "==> shutting down..."
-	kill ${RESTARTD_PID:-} $ACCOUNT_PID $FRIENDS_PID $ADMIN_PID $PROXY_PID $MK8_AUTH_PID $MK8_SECURE_PID $ABSW_PID $WSC_AUTH_PID $WSC_SECURE_PID $MC_AUTH_PID $MC_SECURE_PID $SWAPDOODLE_PID $BA_AUTH_PID $BA_SECURE_PID $BOT_PID ${MII_BOT_PID:-} 2>/dev/null || true
+	kill ${RESTARTD_PID:-} $ACCOUNT_PID $FRIENDS_PID $ADMIN_PID $PROXY_PID $MK8_AUTH_PID $MK8_SECURE_PID $ABSW_PID $WSC_AUTH_PID $WSC_SECURE_PID $MC_AUTH_PID $MC_SECURE_PID $SWAPDOODLE_PID $BA_AUTH_PID $BA_SECURE_PID $BOT_PID ${MII_BOT_PID:-} ${RELAYHUB_PID:-} 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
