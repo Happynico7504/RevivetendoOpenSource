@@ -498,6 +498,7 @@ func main() {
 	if _, err = db.Exec(dbSchema); err != nil {
 		log.Fatalf("schema: %v", err)
 	}
+	db.Exec(relaysSchema)
 	db.Exec(`ALTER TABLE redirects ADD COLUMN IF NOT EXISTS game_server_id TEXT`)
 	db.Exec(`ALTER TABLE redirects ADD COLUMN IF NOT EXISTS port INTEGER`)
 	db.Exec(`ALTER TABLE redirects ADD COLUMN IF NOT EXISTS access_mode TEXT NOT NULL DEFAULT 'open'`)
@@ -566,6 +567,10 @@ func main() {
 	http.HandleFunc("/admin/delete", requireClientCert(adminDelete))
 	http.HandleFunc("/admin/toggle", requireClientCert(adminToggle))
 
+	http.HandleFunc("/admin/relays/", requireClientCert(adminRelays))
+	http.HandleFunc("/admin/relays/add", requireClientCert(adminRelaysAdd))
+	http.HandleFunc("/admin/relays/toggle", requireClientCert(adminRelaysToggle))
+	http.HandleFunc("/admin/relays/delete", requireClientCert(adminRelaysDelete))
 	http.HandleFunc("/admin/bans/", requireClientCert(adminBans))
 	http.HandleFunc("/admin/bans/add", requireClientCert(adminBanAdd))
 	http.HandleFunc("/admin/bans/remove", requireClientCert(adminBanRemove))
@@ -1985,6 +1990,7 @@ input[type=text],select{border:1px solid #d1d5db;border-radius:4px;padding:.4rem
   <a href="/inkay/stats/" target="_blank">← Public stats</a> &nbsp;|&nbsp;
   <a class="dl" href="/inkay/admin/client-cert.p12" download="inkay-admin.p12">⬇ Download client cert</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/bans/">🚫 Banned users</a> &nbsp;|&nbsp;
+  <a href="/inkay/admin/relays/">🌍 Relays</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/access/">🔑 Access levels</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/spotpass-wiiu/">📢 Wii U SpotPass</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/spotpass-3ds/">📮 3DS Swapdoodle</a> &nbsp;|&nbsp;
