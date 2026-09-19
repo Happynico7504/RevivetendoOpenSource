@@ -1,0 +1,40 @@
+#!/bin/sh
+# relayd launcher (systemd's ExecStart). It picks the binary to run and is the
+# AUTHORITY for rolling back a bad over-the-air update, independent of the new
+# binary's own code:
+#
+#   * A binary installed by OTA lives in $STATE/bin/relayd and is preferred over
+#     the one install.sh put in /usr/local/bin.
+#   * relayd writes $STATE/bin/pending when it installs an update and removes it
+#     once the new version has served healthily for a while.
+#   * While pending, every launch is counted. After MAX_BOOTS launches without
+#     the marker disappearing, the update is rolled back: the previous binary is
+#     restored (or the OTA binary removed, falling back to /usr/local/bin/relayd)
+#     and the version is recorded in $STATE/bin/rejected so it is never reinstalled.
+STATE="${STATE_DIRECTORY:-/var/lib/relayd}"
+SYSTEM_BIN="${RELAYD_SYSTEM_BIN:-/usr/local/bin/relayd}"
+MAX_BOOTS="${RELAYD_MAX_BOOTS:-3}"
+BIN="$STATE/bin/relayd"
+
+if [ -f "$STATE/bin/pending" ]; then
+	n=$(cat "$STATE/bin/boots" 2>/dev/null || echo 0)
+	n=$((n + 1))
+	if [ "$n" -gt "$MAX_BOOTS" ]; then
+		v=$(cat "$STATE/bin/pending" 2>/dev/null)
+		echo "relayd-run: version $v did not become healthy in $MAX_BOOTS launches: rolling back" >&2
+		[ -n "$v" ] && echo "$v" > "$STATE/bin/rejected"
+		if [ -x "$STATE/bin/relayd.prev" ]; then
+			mv -f "$STATE/bin/relayd.prev" "$BIN"
+		else
+			rm -f "$BIN"
+		fi
+		rm -f "$STATE/bin/pending" "$STATE/bin/boots"
+	else
+		echo "$n" > "$STATE/bin/boots"
+	fi
+fi
+
+if [ -x "$BIN" ]; then
+	exec "$BIN" "$@"
+fi
+exec "$SYSTEM_BIN" "$@"

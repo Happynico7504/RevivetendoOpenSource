@@ -4,6 +4,7 @@
   "listeners": [
     {"listen": ":443",  "backend": "olv",     "mode": "sni",    "stagger": "sni"},
     {"listen": ":6666", "backend": "account", "mode": "single", "cert": "nicochristmann-nn-cert", "min_tls": "1.0", "stagger": "all"},
-    {"listen": ":9013", "backend": "hpp",     "mode": "single", "cert": "wildcard-nicoch-net"}
+    {"listen": ":9013", "backend": "hpp",     "mode": "single", "cert": "wildcard-nicoch-net"},
+    {"listen": ":80",   "backend": "web",     "mode": "plain"}
   ]
 }

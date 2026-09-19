@@ -258,6 +258,20 @@ func (f *Front) Serve(l Listener) error {
 }
 
 func (f *Front) ServeListener(l Listener, ln net.Listener) error {
+	if l.Mode == "plain" {
+		srv := &http.Server{
+			Handler:           f.Handler(l),
+			ReadHeaderTimeout: 20 * time.Second,
+			ReadTimeout:       60 * time.Second,
+			WriteTimeout:      90 * time.Second,
+			IdleTimeout:       120 * time.Second,
+			ErrorLog:          nilLogger(),
+		}
+		if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
+	}
 	srv := &http.Server{
 		Handler:           f.Handler(l),
 		TLSConfig:         f.TLSConfig(l),

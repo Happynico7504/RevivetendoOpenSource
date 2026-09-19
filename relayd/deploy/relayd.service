@@ -1,0 +1,56 @@
+[Unit]
+Description=Revivetendo regional relay (relayd)
+Documentation=file:///nico-pretendo-bridge/relayd/deploy/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The launcher picks the OTA-installed binary (if any) and rolls back a bad update.
+ExecStart=/usr/local/bin/relayd-run -config /etc/relayd/relayd.json
+Restart=always
+RestartSec=2
+
+# Throwaway unprivileged user; the only privilege is binding ports below 1024.
+DynamicUser=yes
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+
+# The bundle holds the relay's private signing key: keep it root-only (0600) and
+# hand it to the service through systemd's credential mechanism. In relayd.json
+# use  "bundle": "/run/credentials/relayd.service/bundle".
+LoadCredential=bundle:/etc/relayd/bundle.json
+
+# Synced certificates (and their private keys) live here, owner-only.
+StateDirectory=relayd
+StateDirectoryMode=0700
+# With DynamicUser, systemd mounts the state directory noexec, which would stop
+# over-the-air updates from ever running the binary they download (found on the
+# first real relay: "fork/exec .../relayd.download: permission denied").
+ExecPaths=/var/lib/relayd
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+UMask=0077
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

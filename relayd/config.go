@@ -20,20 +20,33 @@ import (
 //	  ]
 //	}
 type Config struct {
-	Bundle          string     `json:"bundle"`
-	DataDir         string     `json:"data_dir"`
-	CertSyncSeconds int        `json:"cert_sync_seconds"` // default 300
-	PollSeconds     int        `json:"poll_seconds"`      // invalidation poll, default 5
-	Listeners       []Listener `json:"listeners"`
-	StaggerHosts    []string   `json:"stagger_hosts"` // SNI names that get the per-IP handshake stagger (sni mode)
-	StaggerEmptySNI *bool      `json:"stagger_empty_sni"`
+	Bundle          string       `json:"bundle"`
+	DataDir         string       `json:"data_dir"`
+	CertSyncSeconds int          `json:"cert_sync_seconds"` // default 300
+	PollSeconds     int          `json:"poll_seconds"`      // invalidation poll, default 5
+	Listeners       []Listener   `json:"listeners"`
+	Update          UpdateConfig `json:"update"`
+	StreamAddr      string       `json:"stream_addr"` // default: the bundle host, port 7778
+	StreamDisabled  bool         `json:"stream_disabled"`
+	StaggerHosts    []string     `json:"stagger_hosts"` // SNI names that get the per-IP handshake stagger (sni mode)
+	StaggerEmptySNI *bool        `json:"stagger_empty_sni"`
+}
+
+// UpdateConfig controls over-the-air updates. They only happen if the relay's
+// bundle carries a release public key (relays registered before one existed
+// never auto-update).
+type UpdateConfig struct {
+	Disabled          bool   `json:"disabled"`
+	CheckMinutes      int    `json:"check_minutes"`       // default 30
+	FirstCheckSeconds int    `json:"first_check_seconds"` // default 120
+	Window            string `json:"window"`              // "HH:MM-HH:MM" local time; "" = any time
 }
 
 // Listener is one console-facing TLS endpoint.
 type Listener struct {
 	Listen  string `json:"listen"`
 	Backend string `json:"backend"` // name of a backend configured on the main
-	Mode    string `json:"mode"`    // "sni": certificate chosen by the main's route table; "single": fixed Cert
+	Mode    string `json:"mode"`    // "sni": certificate chosen by the main's route table; "single": fixed Cert; "plain": no TLS
 	Cert    string `json:"cert"`    // single mode: certificate name from the manifest
 	MinTLS  string `json:"min_tls"` // "1.0" | "1.2" (default 1.2 for sni, 1.0 for single)
 	Stagger string `json:"stagger"` // "" | "sni" (hosts in stagger_hosts) | "all"
@@ -72,13 +85,13 @@ func (c *Config) validate() error {
 			return fmt.Errorf("listener %d: listen and backend are required", i)
 		}
 		switch l.Mode {
-		case "sni":
+		case "sni", "plain": // plain = no TLS at all (port 80: the consoles' connection test)
 		case "single":
 			if l.Cert == "" {
 				return fmt.Errorf("listener %d: single mode needs cert", i)
 			}
 		default:
-			return fmt.Errorf("listener %d: mode must be sni or single", i)
+			return fmt.Errorf("listener %d: mode must be sni, single or plain", i)
 		}
 		switch l.MinTLS {
 		case "", "1.0", "1.2":
