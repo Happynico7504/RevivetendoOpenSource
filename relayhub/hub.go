@@ -2,6 +2,7 @@ package relayhub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/url"
@@ -63,7 +64,32 @@ func (h *Hub) Dispatch(ctx context.Context, req *relaylink.Request) *relaylink.R
 		if !ok {
 			return fail(http.StatusBadRequest)
 		}
-		return h.Fwd.Do(ctx, fr)
+		return h.Fwd.Do(ctx, req.RelayID, fr)
+	}
+	if p == relaylink.ForwardChunkPath || p == relaylink.ForwardClosePath {
+		if req.Method != http.MethodPost || h.Fwd == nil {
+			return fail(http.StatusMethodNotAllowed)
+		}
+		var cr relaylink.ForwardChunkRequest
+		if json.Unmarshal(req.Body, &cr) != nil {
+			return fail(http.StatusBadRequest)
+		}
+		if p == relaylink.ForwardClosePath {
+			h.Fwd.CloseStream(req.RelayID, cr.ID)
+			return relaylink.JSON(200, map[string]bool{"ok": true}, 0)
+		}
+		cctx, cancel := context.WithTimeout(ctx, 40*time.Second)
+		defer cancel()
+		chunk, err := h.Fwd.Chunk(cctx, req.RelayID, cr)
+		switch {
+		case errors.Is(err, errFwdGone):
+			return fail(http.StatusNotFound)
+		case errors.Is(err, context.DeadlineExceeded):
+			return fail(http.StatusGatewayTimeout)
+		case err != nil:
+			return fail(http.StatusBadGateway)
+		}
+		return relaylink.JSON(200, chunk, 0)
 	}
 	if req.Method != http.MethodGet {
 		return fail(http.StatusMethodNotAllowed)
@@ -128,7 +154,7 @@ func (h *Hub) Dispatch(ctx context.Context, req *relaylink.Request) *relaylink.R
 		if h.Rel == nil {
 			return fail(http.StatusNotFound)
 		}
-		m, err := h.Rel.Manifest(u.Query().Get("os"), u.Query().Get("arch"))
+		m, err := h.Rel.ManifestFor(u.Query().Get("component"), u.Query().Get("os"), u.Query().Get("arch"))
 		if err != nil {
 			return fail(http.StatusNotFound)
 		}
@@ -143,7 +169,7 @@ func (h *Hub) Dispatch(ctx context.Context, req *relaylink.Request) *relaylink.R
 		if e1 != nil || e2 != nil {
 			return fail(http.StatusBadRequest)
 		}
-		c, err := h.Rel.Chunk(u.Query().Get("os"), u.Query().Get("arch"), ver, off)
+		c, err := h.Rel.ChunkFor(u.Query().Get("component"), u.Query().Get("os"), u.Query().Get("arch"), ver, off)
 		if err != nil {
 			return fail(http.StatusNotFound)
 		}

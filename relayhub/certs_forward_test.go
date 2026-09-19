@@ -166,7 +166,7 @@ func TestCertAPIIsNeverCacheable(t *testing.T) {
 
 func fwd(t *testing.T, f *Forwarder, fr relaylink.ForwardRequest) (*relaylink.ForwardResponse, int) {
 	t.Helper()
-	resp := f.Do(context.Background(), &fr)
+	resp := f.Do(context.Background(), "us-1", &fr)
 	if resp.Status != 200 {
 		return nil, resp.Status
 	}

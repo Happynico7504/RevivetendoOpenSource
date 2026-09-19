@@ -68,6 +68,16 @@ func (b *contentBackend) handler(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/cookie":
 		w.Header().Set("Set-Cookie", "sid=abc")
 		w.Write([]byte("cookie"))
+	case r.URL.Path == "/big":
+		w.Header().Set("Content-Length", fmt.Sprint(bigSize))
+		if r.Method != http.MethodHead {
+			writeBig(w)
+		}
+	case r.URL.Path == "/bigexact": // exactly on a chunk boundary
+		w.Header().Set("Content-Length", fmt.Sprint(3<<20))
+		if r.Method != http.MethodHead {
+			w.Write(bigByte(0, 3<<20))
+		}
 	case r.URL.Path == "/missing":
 		http.NotFound(w, r)
 	default:

@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -241,11 +242,116 @@ func (f *Front) Handler(l Listener) http.Handler {
 			return
 		}
 		endWrite() // a write has completed: flush before the console sees the result
+		if out.StreamID != "" {
+			f.serveStreamed(w, r, &out)
+			return
+		}
 		if cacheable {
 			f.Content.Save(cacheKey, cacheGen, &out)
 		}
 		writeForwarded(w, r, &out)
 	})
+}
+
+// streamWindow is how many chunks are fetched from the main at once.
+const streamWindow = 4
+
+// serveStreamed sends a large answer to the console as it arrives from the main:
+// headers and the first part immediately, then the chunks in order, with several
+// requested ahead so the ocean's round trip is not paid per chunk. If the main
+// fails part-way the connection is aborted, so the console sees a failed download
+// and never a silently truncated one.
+func (f *Front) serveStreamed(w http.ResponseWriter, r *http.Request, out *relaylink.ForwardResponse) {
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
+	defer cancel()
+	closeStream := func() {
+		b, _ := json.Marshal(relaylink.ForwardChunkRequest{ID: out.StreamID})
+		cctx, ccancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer ccancel()
+		f.Client.Call(cctx, http.MethodPost, relaylink.ForwardClosePath, b)
+	}
+	defer closeStream()
+
+	for k, vs := range out.Headers {
+		if hopHeaders[http.CanonicalHeaderKey(k)] {
+			continue
+		}
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	if out.Close {
+		w.Header().Set("Connection", "close")
+	}
+	if out.Size >= 0 { // the backend's own length: the console needs it to size the download
+		w.Header().Set("Content-Length", itoa64(out.Size))
+	}
+	w.WriteHeader(out.Status)
+	flusher, _ := w.(http.Flusher)
+	if _, err := w.Write(out.Body); err != nil {
+		return
+	}
+	if flusher != nil {
+		flusher.Flush()
+	}
+
+	type result struct {
+		index int
+		chunk *relaylink.ForwardChunk
+		err   error
+	}
+	results := make(chan result, streamWindow*2)
+	issue := func(i int) {
+		go func() {
+			b, _ := json.Marshal(relaylink.ForwardChunkRequest{ID: out.StreamID, Index: i})
+			resp, err := f.Client.Call(ctx, http.MethodPost, relaylink.ForwardChunkPath, b)
+			if err == nil && resp.Status != http.StatusOK {
+				err = fmt.Errorf("chunk %d: status %d", i, resp.Status)
+			}
+			var c relaylink.ForwardChunk
+			if err == nil {
+				err = json.Unmarshal(resp.Body, &c)
+			}
+			results <- result{index: i, chunk: &c, err: err}
+		}()
+	}
+	next, issued := 0, 0
+	for issued < streamWindow {
+		issue(issued)
+		issued++
+	}
+	pending := map[int]*relaylink.ForwardChunk{}
+	var written int64 = int64(len(out.Body))
+	for {
+		res := <-results
+		if res.err != nil {
+			f.logf("streamed forward %s failed at chunk %d: %v", r.URL.Path, res.index, res.err)
+			panic(http.ErrAbortHandler) // truncated: make the console see a failure
+		}
+		pending[res.index] = res.chunk
+		for c, ok := pending[next]; ok; c, ok = pending[next] {
+			delete(pending, next)
+			if len(c.Data) > 0 {
+				if _, err := w.Write(c.Data); err != nil {
+					return // the console went away
+				}
+				written += int64(len(c.Data))
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
+			if c.EOF {
+				if out.Size >= 0 && written != out.Size {
+					f.logf("streamed forward %s ended at %d bytes, expected %d", r.URL.Path, written, out.Size)
+					panic(http.ErrAbortHandler)
+				}
+				return
+			}
+			next++
+			issue(issued)
+			issued++
+		}
+	}
 }
 
 // writeForwarded replays a (forwarded or cached) response to the console.
@@ -263,23 +369,41 @@ func writeForwarded(w http.ResponseWriter, r *http.Request, out *relaylink.Forwa
 	if out.Close {
 		w.Header().Set("Connection", "close")
 	}
-	w.Header().Set("Content-Length", itoa(len(out.Body)))
+	if r.Method == http.MethodHead {
+		// No body, so report the backend's own length, and none at all if it sent
+		// none (inventing "0" would tell the console the file is empty).
+		if out.Size >= 0 {
+			w.Header().Set("Content-Length", itoa64(out.Size))
+		}
+	} else {
+		w.Header().Set("Content-Length", itoa(len(out.Body)))
+	}
 	w.WriteHeader(out.Status)
 	if r.Method != http.MethodHead {
 		w.Write(out.Body)
 	}
 }
 
-func itoa(n int) string {
+func itoa(n int) string { return itoa64(int64(n)) }
+
+func itoa64(n int64) string {
 	if n == 0 {
 		return "0"
 	}
-	var b [20]byte
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	var b [21]byte
 	i := len(b)
 	for n > 0 {
 		i--
 		b[i] = byte('0' + n%10)
 		n /= 10
+	}
+	if neg {
+		i--
+		b[i] = '-'
 	}
 	return string(b[i:])
 }

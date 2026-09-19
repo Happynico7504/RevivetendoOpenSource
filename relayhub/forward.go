@@ -48,9 +48,14 @@ type Forwarder struct {
 	// content caches must be flushed (the main appends relaylink.ContentTag to the
 	// invalidation log, which is pushed to every relay).
 	OnWrite func()
+	// IdleTimeout ends a streamed forward the relay stopped reading (default 60s).
+	IdleTimeout time.Duration
 
 	mu         sync.Mutex
 	transports map[string]*http.Transport
+
+	smu      sync.Mutex
+	sessions map[string]*fwdSession
 }
 
 var hopByHop = map[string]bool{
@@ -74,10 +79,11 @@ func (f *Forwarder) transport(name string, be Backend, sni string) *http.Transpo
 			d := net.Dialer{Timeout: 5 * time.Second}
 			return d.DialContext(ctx, "tcp", be.Addr)
 		},
-		MaxIdleConnsPerHost: 8,
-		IdleConnTimeout:     90 * time.Second,
-		DisableCompression:  true,
-		ForceAttemptHTTP2:   false,
+		MaxIdleConnsPerHost:   8,
+		IdleConnTimeout:       90 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		DisableCompression:    true,
+		ForceAttemptHTTP2:     false,
 	}
 	if be.TLS {
 		t.TLSClientConfig = &tls.Config{ServerName: sni, InsecureSkipVerify: true}
@@ -87,8 +93,11 @@ func (f *Forwarder) transport(name string, be Backend, sni string) *http.Transpo
 	return t
 }
 
-// Do performs one forwarded request.
-func (f *Forwarder) Do(ctx context.Context, fr *relaylink.ForwardRequest) *relaylink.Response {
+// Do performs one forwarded request for the relay `relayID`. Small answers come
+// back inline; a large one (more than ForwardInlineMax) is streamed: the answer
+// carries the first part and a StreamID, and the relay fetches the rest with
+// Chunk.
+func (f *Forwarder) Do(ctx context.Context, relayID string, fr *relaylink.ForwardRequest) *relaylink.Response {
 	be, ok := f.Backends[fr.Backend]
 	if !ok {
 		return &relaylink.Response{Status: http.StatusBadRequest}
@@ -100,8 +109,17 @@ func (f *Forwarder) Do(ctx context.Context, fr *relaylink.ForwardRequest) *relay
 	if be.TLS {
 		scheme = "https"
 	}
-	req, err := http.NewRequestWithContext(ctx, fr.Method, scheme+"://"+be.Addr+fr.Path, bytes.NewReader(fr.Body))
+	// The backend request must outlive this call when the answer is streamed, so it
+	// gets its own context (not the relay call's): bounded to 45s for an inline
+	// answer, and owned by the streaming session otherwise.
+	bctx, bcancel := context.WithCancel(context.Background())
+	deadline := time.AfterFunc(45*time.Second, bcancel)
+	stopWatch := context.AfterFunc(ctx, bcancel) // the relay gave up: stop the backend request
+	release := func() { deadline.Stop(); stopWatch(); bcancel() }
+
+	req, err := http.NewRequestWithContext(bctx, fr.Method, scheme+"://"+be.Addr+fr.Path, bytes.NewReader(fr.Body))
 	if err != nil {
+		release()
 		return &relaylink.Response{Status: http.StatusBadRequest}
 	}
 	for k, vs := range fr.Headers {
@@ -125,27 +143,46 @@ func (f *Forwarder) Do(ctx context.Context, fr *relaylink.ForwardRequest) *relay
 	}
 	client := &http.Client{
 		Transport: f.transport(fr.Backend, be, fr.SNI),
-		Timeout:   45 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse // redirects belong to the console, not us
 		},
 	}
 	resp, err := client.Do(req)
 	if err != nil {
+		release()
 		return &relaylink.Response{Status: http.StatusBadGateway}
 	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxForwardBody+1))
-	if err != nil || len(body) > maxForwardBody {
-		return &relaylink.Response{Status: http.StatusBadGateway}
-	}
-	out := relaylink.ForwardResponse{Status: resp.StatusCode, Body: body, Close: resp.Close, Headers: map[string][]string{}}
+	out := relaylink.ForwardResponse{Status: resp.StatusCode, Close: resp.Close, Size: resp.ContentLength, Headers: map[string][]string{}}
 	for k, vs := range resp.Header {
 		if !hopByHop[http.CanonicalHeaderKey(k)] {
 			out.Headers[k] = vs
 		}
 	}
-	return relaylink.JSON(200, out, 0) // never cacheable
+	first, err := io.ReadAll(io.LimitReader(resp.Body, relaylink.ForwardInlineMax+1))
+	if err != nil {
+		resp.Body.Close()
+		release()
+		return &relaylink.Response{Status: http.StatusBadGateway}
+	}
+	if len(first) <= relaylink.ForwardInlineMax {
+		resp.Body.Close()
+		release()
+		out.Body = first
+		return relaylink.JSON(200, out, 0) // never cacheable
+	}
+	// Too large to send at once: stream the rest.
+	out.Body = first[:relaylink.ForwardInlineMax]
+	rest := io.MultiReader(bytes.NewReader(first[relaylink.ForwardInlineMax:]), resp.Body)
+	deadline.Stop()
+	stopWatch() // the streaming session, not the relay's call, now owns the backend request
+	id, err := f.startFwdStream(relayID, rest, func() { resp.Body.Close(); bcancel() })
+	if err != nil {
+		resp.Body.Close()
+		bcancel()
+		return &relaylink.Response{Status: http.StatusServiceUnavailable}
+	}
+	out.StreamID = id
+	return relaylink.JSON(200, out, 0)
 }
 
 func firstValue(h map[string][]string, key string) string {

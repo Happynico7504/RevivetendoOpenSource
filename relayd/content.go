@@ -221,7 +221,7 @@ func (c *ContentCache) Lookup(r *http.Request) (resp *relaylink.ForwardResponse,
 }
 
 func storableResponse(fr *relaylink.ForwardResponse, maxBody int) bool {
-	if fr.Status != http.StatusOK || fr.Close || len(fr.Body) > maxBody {
+	if fr.Status != http.StatusOK || fr.Close || fr.StreamID != "" || len(fr.Body) > maxBody {
 		return false
 	}
 	for k, vs := range fr.Headers {

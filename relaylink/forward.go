@@ -21,10 +21,39 @@ type ForwardRequest struct {
 
 // ForwardResponse is the backend's answer, replayed to the console verbatim.
 type ForwardResponse struct {
-	Close   bool                `json:"close,omitempty"` // backend answered "Connection: close": the relay must too (WSC BOSS depends on it)
-	Status  int                 `json:"status"`
-	Headers map[string][]string `json:"headers,omitempty"`
-	Body    []byte              `json:"body,omitempty"`
+	Close bool `json:"close,omitempty"` // backend answered "Connection: close": the relay must too (WSC BOSS depends on it)
+	// Size is the backend's advertised Content-Length (-1/absent if unknown). It is
+	// what a HEAD answer must report (its body is empty) and what a streamed
+	// answer's total length is.
+	Size int64 `json:"size,omitempty"`
+	// StreamID is set when the body is too large to send inline: Body then holds
+	// only the first part and the rest is fetched with ForwardChunkPath.
+	StreamID string              `json:"stream,omitempty"`
+	Status   int                 `json:"status"`
+	Headers  map[string][]string `json:"headers,omitempty"`
+	Body     []byte              `json:"body,omitempty"`
+}
+
+// Large answers are streamed: the hub keeps the backend response open and the
+// relay pulls it in chunks (several in flight at once), writing each to the
+// console as it arrives. Nothing is ever buffered whole on either side.
+const (
+	ForwardChunkPath = "/relay/v1/forward/chunk" // POST ForwardChunkRequest -> ForwardChunk
+	ForwardClosePath = "/relay/v1/forward/close" // POST ForwardChunkRequest (index ignored)
+	// ForwardInlineMax is the largest body sent inline in a ForwardResponse.
+	ForwardInlineMax = 2 << 20
+	// ForwardChunkSize is the size of each streamed chunk.
+	ForwardChunkSize = 1 << 20
+)
+
+type ForwardChunkRequest struct {
+	ID    string `json:"id"`
+	Index int    `json:"index"` // chunk 0 is the first ForwardChunkSize bytes AFTER the inline Body
+}
+
+type ForwardChunk struct {
+	Data []byte `json:"data"`
+	EOF  bool   `json:"eof"` // this is the last chunk
 }
 
 // ContentTag is the invalidation tag of the relays' console-content cache: a
