@@ -2415,10 +2415,31 @@ func cachePNIDMapping(pid uint32, pnid string) {
 	}
 	p := strconv.FormatUint(uint64(pid), 10)
 	ctx := context.Background()
+	// Only a NEW or CHANGED mapping is announced to relays (this runs on every
+	// profile capture; re-announcing an unchanged permanent mapping would just
+	// churn every relay's cache).
+	if prev, ok := runtimeCacheGet(ctx, "pnid:"+p); !ok || prev != pnid {
+		announceInvalidation("pid:"+p, "pnid:"+strings.ToLower(pnid))
+	}
 	runtimeCacheSet(ctx, "pnid:"+p, pnid, pnidMappingTTL)
 	runtimeCacheSet(ctx, "pidof:"+pnid, p, pnidMappingTTL)
 	// A new PNID for this PID changes what /internal/lookup would answer.
 	invalidateLookupCache(pid)
+}
+
+
+// announceInvalidation tells relayhub (local, fire-and-forget) that data the
+// relays may have cached has changed. Tag names must match relayhub's:
+// "pid:<n>", "pnid:<lowercase>", "config:redirects", "bans". A hub that is
+// down or absent is not an error: relays also expire entries by TTL.
+func announceInvalidation(tags ...string) {
+	go func() {
+		body, _ := json.Marshal(map[string][]string{"tags": tags})
+		c := &http.Client{Timeout: time.Second}
+		if resp, err := c.Post("http://127.0.0.1:9401/invalidate", "application/json", bytes.NewReader(body)); err == nil {
+			resp.Body.Close()
+		}
+	}()
 }
 
 // invalidateLookupCache drops the cached /internal/lookup response, which also

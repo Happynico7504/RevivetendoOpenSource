@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -112,6 +113,21 @@ const redirectsAPICacheKey = "relay-admin:api-redirects"
 // table (all writers live in this file).
 func invalidateRedirectsCache() {
 	runtimeCacheClient.Del(context.Background(), redirectsAPICacheKey)
+	announceInvalidation("config:redirects")
+}
+
+// announceInvalidation tells relayhub (local, fire-and-forget) that data the
+// relays may have cached has changed. Tag names must match relayhub's:
+// "pid:<n>", "pnid:<lowercase>", "config:redirects", "bans". A hub that is
+// down or absent is not an error: relays also expire entries by TTL.
+func announceInvalidation(tags ...string) {
+	go func() {
+		body, _ := json.Marshal(map[string][]string{"tags": tags})
+		c := &http.Client{Timeout: time.Second}
+		if resp, err := c.Post("http://127.0.0.1:9401/invalidate", "application/json", bytes.NewReader(body)); err == nil {
+			resp.Body.Close()
+		}
+	}()
 }
 
 var gameServerTitles = map[string]string{
@@ -3188,6 +3204,7 @@ func adminBanAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	_, err = db.Exec(`INSERT INTO banned_users (pid, reason) VALUES ($1, $2) ON CONFLICT (pid) DO UPDATE SET reason = EXCLUDED.reason, created_at = NOW()`,
 		pid, reasonVal)
+	announceInvalidation("bans")
 	if err != nil {
 		log.Printf("ban insert: %v", err)
 		http.Redirect(w, r, "/inkay/admin/bans/?msg=DB+error", http.StatusSeeOther)
@@ -3208,6 +3225,7 @@ func adminBanRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	db.Exec(`DELETE FROM banned_users WHERE pid = $1`, pid)
+	announceInvalidation("bans")
 	http.Redirect(w, r, "/inkay/admin/bans/?msg=User+unbanned", http.StatusSeeOther)
 }
 
@@ -3600,6 +3618,7 @@ func apiV1BansAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	_, err := db.Exec(`INSERT INTO banned_users (pid, reason) VALUES ($1, $2) ON CONFLICT (pid) DO UPDATE SET reason = EXCLUDED.reason, created_at = NOW()`,
 		body.PID, reasonVal)
+	announceInvalidation("bans")
 	if err != nil {
 		log.Printf("api bans add: %v", err)
 		writeJSONError(w, http.StatusInternalServerError, "database error")
@@ -3620,6 +3639,7 @@ func apiV1BansRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	db.Exec(`DELETE FROM banned_users WHERE pid = $1`, body.PID)
+	announceInvalidation("bans")
 	writeJSONOKNoData(w)
 }
 

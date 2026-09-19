@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -228,6 +229,20 @@ func (s *accountServer) lookupPID(ctx context.Context, pid uint32) (username, mi
 	return username, miiName, err
 }
 
+// announceInvalidation tells relayhub (local, fire-and-forget) that data the
+// relays may have cached has changed. Tag names must match relayhub's:
+// "pid:<n>", "pnid:<lowercase>", "config:redirects", "bans". A hub that is
+// down or absent is not an error: relays also expire entries by TTL.
+func announceInvalidation(tags ...string) {
+	go func() {
+		body, _ := json.Marshal(map[string][]string{"tags": tags})
+		c := &http.Client{Timeout: time.Second}
+		if resp, err := c.Post("http://127.0.0.1:9401/invalidate", "application/json", bytes.NewReader(body)); err == nil {
+			resp.Body.Close()
+		}
+	}()
+}
+
 // runtimeCacheClient points at the local Redis shared by every service.
 var runtimeCacheClient = redis.NewClient(&redis.Options{Addr: "127.0.0.1:6379"})
 
@@ -262,6 +277,7 @@ func (s *accountServer) lookupPIDUncached(ctx context.Context, pid uint32) (user
 				`INSERT INTO pnid_cache (pid, pnid) VALUES ($1, $2)
 				 ON CONFLICT (pid) DO UPDATE SET pnid = EXCLUDED.pnid, updated_at = NOW()`,
 				pid, username)
+			announceInvalidation("pid:"+strconv.FormatUint(uint64(pid), 10), "pnid:"+strings.ToLower(username))
 		}
 	}
 
