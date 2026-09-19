@@ -274,6 +274,9 @@ MC_SECURE_PID=$!
 SWAPDOODLE_PID=$!
 
 BA_KERBEROS_PASSWORD="$(openssl rand -hex 16)"
+# Exported like the other games' secrets: relayhub hands it to regional relays so their
+# NEX auth servers issue tickets the main's secure server accepts.
+export BA_KERBEROS_PASSWORD
 (cd "$ROOT/badge-arcade-authentication" && autostart badge-arcade-authentication "$LOG/badge-arcade-authentication.log" \
 	env $(cat .env | xargs) KERBEROS_PASSWORD="$BA_KERBEROS_PASSWORD" "$BUILD/badge-arcade-auth") &
 BA_AUTH_PID=$!

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"regexp"
 	"testing"
@@ -16,7 +17,7 @@ func TestFixPolicylistUpdateTimeRealSample(t *testing.T) {
 		t.Fatalf("read sample: %v", err)
 	}
 
-	fixed, changed, err := fixPolicylistUpdateTime(body, "br")
+	fixed, changed, err := fixPolicylistUpdateTime(body, "br", policyTestKey(t))
 	if err != nil {
 		t.Fatalf("fixPolicylistUpdateTime: %v", err)
 	}
@@ -36,11 +37,19 @@ func TestFixPolicylistUpdateTimeRealSample(t *testing.T) {
 }
 
 func TestFixPolicylistUpdateTimeNoOp(t *testing.T) {
-	_, changed, err := fixPolicylistUpdateTime([]byte("<PolicyList></PolicyList>"), "")
+	_, changed, err := fixPolicylistUpdateTime([]byte("<PolicyList></PolicyList>"), "", policyTestKey(t))
 	if err != nil {
 		t.Fatalf("fixPolicylistUpdateTime: %v", err)
 	}
 	if changed {
 		t.Fatal("expected no change when there's no UpdateTime tag present")
 	}
+}
+
+// policyTestKey returns a per-test cache key and removes its Redis entry afterwards
+// (the function persists the last issued UpdateTime in Redis for 7 days).
+func policyTestKey(t *testing.T) string {
+	key := "test-" + t.Name()
+	t.Cleanup(func() { runtimeCacheClient.Del(context.Background(), "policylist:"+key) })
+	return key
 }

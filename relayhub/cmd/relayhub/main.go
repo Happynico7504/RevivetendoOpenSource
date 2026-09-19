@@ -19,7 +19,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"text/tabwriter"
 	"time"
 
@@ -174,6 +176,8 @@ func cmdServe(args []string) {
 	defCert := fs.String("default-cert", "olv-nicochristmann-net", "certificate relays serve when the SNI matches nothing")
 	releasesDir := fs.String("releases", defaultReleasesDir(), "directory of signed relayd releases (\"\" disables OTA)")
 	streamListen := fs.String("stream-listen", "0.0.0.0:7778", "real-time relay stream listen address (\"\" disables)")
+	geoPath := fs.String("geoip", "/usr/local/share/revivetendo-dns/dbip-country-lite.mmdb", "GeoIP database used to choose a relay for a console (\"\" disables regional NEX routing)")
+	nexRoot := fs.String("nex-root", "/nico-pretendo-bridge", "repository root holding the *-authentication/.env files")
 	fs.Parse(args)
 
 	db := openDB(*envFile)
@@ -207,6 +211,39 @@ func cmdServe(args []string) {
 		log.Printf("stream: relay %q disconnected (%d players were connected through it)", id, len(pids))
 	}
 	invlog.OnAppend = streams.PushInvalidation
+	// Regional NEX authentication: choose a relay for a console, hand it the
+	// credential, and answer its pulls only for consoles sent to it.
+	var assigner *relayhub.NexAssigner
+	if *geoPath != "" {
+		geo, gerr := relayhub.OpenMMDBGeo(*geoPath)
+		if gerr != nil {
+			log.Printf("relayhub: regional NEX routing OFF (geoip: %v)", gerr)
+		} else {
+			var (
+				gmu    sync.Mutex
+				gcache map[string]relaylink.NexGame
+				gtime  time.Time
+			)
+			assigner = &relayhub.NexAssigner{
+				Streams: streams, Registry: reg, Geo: geo,
+				Games: func() map[string]relaylink.NexGame {
+					gmu.Lock()
+					defer gmu.Unlock()
+					if gcache == nil || time.Since(gtime) > 30*time.Second {
+						gcache, gtime = relayhub.LoadNexGames(*nexRoot, os.Getenv), time.Now()
+					}
+					return gcache
+				},
+			}
+			assigner.Register()
+			names := []string{}
+			for n := range assigner.Games() {
+				names = append(names, n)
+			}
+			sort.Strings(names)
+			log.Printf("relayhub: regional NEX routing ON for %v", names)
+		}
+	}
 	if *streamListen != "" {
 		sln, err := net.Listen("tcp", *streamListen)
 		if err != nil {
@@ -219,6 +256,28 @@ func cmdServe(args []string) {
 	// Local-only: the other services tell the hub that data changed.
 	go func() {
 		mux := http.NewServeMux()
+		mux.HandleFunc("/assign", func(w http.ResponseWriter, r *http.Request) {
+			// Called by account-proxy while it answers a console's nex_token request.
+			// 204 (or any error) means: authenticate at the main as usual.
+			if r.Method != http.MethodPost || assigner == nil {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			var req relayhub.AssignRequest
+			if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<14)).Decode(&req); err != nil {
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			ctx, cancel := context.WithTimeout(r.Context(), 900*time.Millisecond)
+			defer cancel()
+			res, err := assigner.Assign(ctx, req)
+			if err != nil {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			log.Printf("nex: %s pid=%d -> relay %s", req.Game, req.PID, res.Relay)
+			json.NewEncoder(w).Encode(res)
+		})
 		mux.HandleFunc("/invalidate", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
 				http.Error(w, "POST only", http.StatusMethodNotAllowed)

@@ -37,6 +37,10 @@ type StreamHub struct {
 	// reported here: the relay itself said so).
 	OnPlayersGone func(relayID string, pids []uint32)
 
+	// Methods lets other components (e.g. the NEX assigner) serve extra calls from
+	// relays. The relay id is the authenticated caller.
+	Methods map[string]func(ctx context.Context, relayID string, body []byte) ([]byte, error)
+
 	mu       sync.Mutex
 	conns    map[string]*relaylink.StreamConn
 	since    map[string]time.Time
@@ -56,7 +60,7 @@ func NewStreamHub() *StreamHub {
 // Handlers returns the per-relay handlers passed to Server.ServeStream.
 func (h *StreamHub) Handlers(relayID string) relaylink.StreamHandlers {
 	return relaylink.StreamHandlers{
-		Call: func(_ context.Context, c *relaylink.StreamConn, method string, body []byte) ([]byte, error) {
+		Call: func(ctx context.Context, c *relaylink.StreamConn, method string, body []byte) ([]byte, error) {
 			switch method {
 			case MethodEcho:
 				return body, nil
@@ -73,6 +77,12 @@ func (h *StreamHub) Handlers(relayID string) relaylink.StreamHandlers {
 					h.setPresence(c, req.PIDs, method == MethodPresAdd)
 				}
 				return []byte("ok"), nil
+			}
+			h.mu.Lock()
+			fn := h.Methods[method]
+			h.mu.Unlock()
+			if fn != nil {
+				return fn(ctx, c.RelayID, body)
 			}
 			return nil, errors.New("unknown method")
 		},
@@ -241,6 +251,16 @@ func (h *StreamHub) Broadcast(p relaylink.Priority, topic string, body []byte) i
 		}
 	}
 	return n
+}
+
+// HandleMethod registers a call handler that relays can invoke over the stream.
+func (h *StreamHub) HandleMethod(name string, fn func(ctx context.Context, relayID string, body []byte) ([]byte, error)) {
+	h.mu.Lock()
+	if h.Methods == nil {
+		h.Methods = map[string]func(context.Context, string, []byte) ([]byte, error){}
+	}
+	h.Methods[name] = fn
+	h.mu.Unlock()
 }
 
 // Subscribe registers a handler for events relays send on a topic.

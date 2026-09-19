@@ -29,7 +29,7 @@ func newStreamStack(t *testing.T, opt relaylink.StreamOptions) *streamStack {
 	priv, _ := rsa.GenerateKey(rand.Reader, 2048)
 	pub, sk, _ := ed25519.GenerateKey(rand.Reader)
 	srv := &relaylink.Server{Priv: priv, Replay: &relaylink.MemoryReplay{},
-		RelayKey: func(id string) (ed25519.PublicKey, bool) { return pub, id == "us-1" || id == "jp-1" }}
+		RelayKey: func(id string) (ed25519.PublicKey, bool) { return pub, id == "us-1" || id == "jp-1" || id == "us-2" }}
 	hub := NewStreamHub()
 	log := NewInvalidationLog(100)
 	log.OnAppend = hub.PushInvalidation

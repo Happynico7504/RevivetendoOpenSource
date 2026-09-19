@@ -1,0 +1,378 @@
+package relayhub
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"errors"
+	"net"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/oschwald/maxminddb-golang"
+
+	"github.com/Happynico7504/relaylink"
+)
+
+// ---- configuration ----------------------------------------------------------------
+
+// nexAuthDirs maps a game to the directory whose .env says where its secure
+// server is (SECURE_SERVER_LOCATION / SECURE_SERVER_PORT): the single source of
+// truth the auth servers on the main use themselves.
+var nexAuthDirs = map[string]string{
+	"wsc":          "wsc-authentication",
+	"mk8":          "mk8-authentication",
+	"badge-arcade": "badge-arcade-authentication",
+}
+
+// nexKerberosEnv names the environment variable holding each game's Kerberos
+// password (start.sh generates them at every bridge start).
+var nexKerberosEnv = map[string]string{
+	"wsc": "WSC_KERBEROS_PASSWORD", "mk8": "MK8_KERBEROS_PASSWORD", "badge-arcade": "BA_KERBEROS_PASSWORD",
+}
+
+func readDotEnv(path string) map[string]string {
+	out := map[string]string{}
+	f, err := os.Open(path)
+	if err != nil {
+		return out
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if i := strings.IndexByte(line, '='); i > 0 {
+			out[strings.TrimSpace(line[:i])] = strings.Trim(strings.TrimSpace(line[i+1:]), `"'`)
+		}
+	}
+	return out
+}
+
+// LoadNexGames builds the complete configuration of every game the main can
+// authenticate for a relay. A game whose Kerberos password or secure server
+// address is unknown is left out: relays are never told to host something the
+// main cannot vouch for.
+func LoadNexGames(root string, getenv func(string) string) map[string]relaylink.NexGame {
+	out := map[string]relaylink.NexGame{}
+	for name, g := range relaylink.NexGameDefaults() {
+		env := readDotEnv(filepath.Join(root, nexAuthDirs[name], ".env"))
+		g.SecureHost, g.SecurePort = env["SECURE_SERVER_LOCATION"], env["SECURE_SERVER_PORT"]
+		g.KerberosPassword = getenv(nexKerberosEnv[name])
+		if g.SecureHost == "" || g.SecurePort == "" || g.KerberosPassword == "" {
+			continue
+		}
+		out[name] = g
+	}
+	return out
+}
+
+// ---- geography ------------------------------------------------------------------------
+
+// Geo maps a client address to a country and continent code.
+type Geo interface {
+	Lookup(ip net.IP) (country, continent string)
+}
+
+type MMDBGeo struct{ r *maxminddb.Reader }
+
+func OpenMMDBGeo(path string) (*MMDBGeo, error) {
+	r, err := maxminddb.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	return &MMDBGeo{r: r}, nil
+}
+
+func (g *MMDBGeo) Lookup(ip net.IP) (string, string) {
+	var rec struct {
+		Country struct {
+			ISOCode string `maxminddb:"iso_code"`
+		} `maxminddb:"country"`
+		Continent struct {
+			Code string `maxminddb:"code"`
+		} `maxminddb:"continent"`
+	}
+	if g.r.Lookup(ip, &rec) != nil {
+		return "", ""
+	}
+	return rec.Country.ISOCode, rec.Continent.Code
+}
+
+// RegionForClient applies the same rules as the DNS server: an exact country
+// match first (country-specific regions such as jp beat continent ones), then a
+// continent match. "" means the main serves this client.
+func RegionForClient(country, continent string) string {
+	contains := func(list []string, v string) bool {
+		for _, x := range list {
+			if x == v {
+				return true
+			}
+		}
+		return false
+	}
+	for _, name := range regionOrder {
+		if country != "" && contains(RegionCatalog[name].Countries, country) {
+			return name
+		}
+	}
+	for _, name := range regionOrder {
+		if continent != "" && contains(RegionCatalog[name].Continents, continent) {
+			return name
+		}
+	}
+	return ""
+}
+
+// ---- the assigner -------------------------------------------------------------------------
+
+var (
+	ErrNoRelay     = errors.New("relayhub: no suitable relay for this client")
+	ErrUnknownGame = errors.New("relayhub: unknown or unconfigured game")
+)
+
+// AssignTTL is how long a credential pushed to a relay (and the right of that
+// relay to pull it) stays valid: enough for a console to connect, no more.
+const AssignTTL = 10 * time.Minute
+
+type assignment struct {
+	relayID  string
+	password string
+	expires  time.Time
+}
+
+type AssignRequest struct {
+	Game     string `json:"game"`
+	PID      uint32 `json:"pid"`
+	Password string `json:"password"`
+	ClientIP string `json:"client_ip"`
+}
+
+type AssignResult struct {
+	Relay string `json:"relay"`
+	Host  string `json:"host"` // IP address the console should use
+	Port  int    `json:"port"`
+}
+
+// NexAssigner decides which relay (if any) a console should authenticate at,
+// gives that relay the credential BEFORE the console is told to go there, and
+// answers a relay's later pull only for consoles it sent there.
+type NexAssigner struct {
+	Streams  *StreamHub
+	Registry Registry
+	Geo      Geo
+	Games    func() map[string]relaylink.NexGame // current configuration (secrets included)
+	Now      func() time.Time
+	// PutTimeout bounds the wait for the relay's acknowledgement (default 600ms).
+	PutTimeout time.Duration
+	// ResolveIP turns a relay's configured host into an IPv4 address (default: DNS).
+	ResolveIP func(host string) (string, error)
+	// RTT returns the stream round trip to a relay (default: from the stream hub).
+	RTT func(relayID string) time.Duration
+
+	mu       sync.Mutex
+	hello    map[string]map[string]bool // relay id -> games it hosts
+	assigned map[string]assignment      // "game/pid"
+	ipCache  map[string]ipEntry
+}
+
+type ipEntry struct {
+	ip      string
+	expires time.Time
+}
+
+func (a *NexAssigner) now() time.Time {
+	if a.Now != nil {
+		return a.Now()
+	}
+	return time.Now()
+}
+
+func asKey(game string, pid uint32) string {
+	b, _ := json.Marshal([]any{game, pid})
+	return string(b)
+}
+
+// Register hooks the assigner's calls into the stream hub and forgets a relay's
+// announced games when it disconnects.
+func (a *NexAssigner) Register() {
+	a.Streams.HandleMethod(relaylink.MethodNexHello, a.handleHello)
+	a.Streams.HandleMethod(relaylink.MethodCredGet, a.handleCredGet)
+}
+
+func (a *NexAssigner) handleHello(_ context.Context, relayID string, body []byte) ([]byte, error) {
+	var req relaylink.NexHelloRequest
+	if json.Unmarshal(body, &req) != nil {
+		return nil, errors.New("bad request")
+	}
+	cfg := a.Games()
+	resp := relaylink.NexHelloResponse{}
+	hosted := map[string]bool{}
+	for _, name := range req.Games {
+		if g, ok := cfg[name]; ok {
+			resp.Games = append(resp.Games, g)
+			hosted[name] = true
+		}
+	}
+	sort.Slice(resp.Games, func(i, j int) bool { return resp.Games[i].Name < resp.Games[j].Name })
+	a.mu.Lock()
+	if a.hello == nil {
+		a.hello = map[string]map[string]bool{}
+	}
+	a.hello[relayID] = hosted
+	a.mu.Unlock()
+	return json.Marshal(resp)
+}
+
+func (a *NexAssigner) handleCredGet(_ context.Context, relayID string, body []byte) ([]byte, error) {
+	var req relaylink.NexCredGet
+	if json.Unmarshal(body, &req) != nil {
+		return nil, errors.New("bad request")
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	as, ok := a.assigned[asKey(req.Game, req.PID)]
+	// A relay may only ever read credentials of consoles the hub sent to IT, and
+	// only while the assignment lives. Everything else looks like "unknown".
+	if !ok || as.relayID != relayID || !a.now().Before(as.expires) {
+		return nil, errors.New("unknown")
+	}
+	return json.Marshal(relaylink.NexCredAnswer{Password: as.password})
+}
+
+func (a *NexAssigner) hostsGame(relayID, game string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.hello[relayID][game]
+}
+
+func (a *NexAssigner) rtt(id string) time.Duration {
+	if a.RTT != nil {
+		return a.RTT(id)
+	}
+	for _, s := range a.Streams.Status() {
+		if s.ID == id {
+			return s.RTT
+		}
+	}
+	return 0
+}
+
+func (a *NexAssigner) resolve(host string) (string, error) {
+	if net.ParseIP(host) != nil {
+		return host, nil
+	}
+	a.mu.Lock()
+	if e, ok := a.ipCache[host]; ok && a.now().Before(e.expires) {
+		a.mu.Unlock()
+		return e.ip, nil
+	}
+	a.mu.Unlock()
+	lookup := a.ResolveIP
+	if lookup == nil {
+		lookup = func(h string) (string, error) {
+			ips, err := net.LookupIP(h)
+			if err != nil {
+				return "", err
+			}
+			for _, ip := range ips {
+				if v4 := ip.To4(); v4 != nil {
+					return v4.String(), nil
+				}
+			}
+			return "", errors.New("no IPv4 address")
+		}
+	}
+	ip, err := lookup(host)
+	if err != nil {
+		return "", err
+	}
+	a.mu.Lock()
+	if a.ipCache == nil {
+		a.ipCache = map[string]ipEntry{}
+	}
+	a.ipCache[host] = ipEntry{ip: ip, expires: a.now().Add(5 * time.Minute)}
+	a.mu.Unlock()
+	return ip, nil
+}
+
+// Assign picks the best relay for a client and gives it the credential. Any
+// error means "authenticate at the main as usual".
+func (a *NexAssigner) Assign(ctx context.Context, req AssignRequest) (*AssignResult, error) {
+	games := a.Games()
+	game, ok := games[req.Game]
+	if !ok || req.PID == 0 || req.Password == "" {
+		return nil, ErrUnknownGame
+	}
+	ip := net.ParseIP(req.ClientIP)
+	if ip == nil || a.Geo == nil {
+		return nil, ErrNoRelay
+	}
+	country, continent := a.Geo.Lookup(ip)
+	region := RegionForClient(country, continent)
+	if region == "" {
+		return nil, ErrNoRelay
+	}
+	relays, err := a.Registry.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	connected := map[string]bool{}
+	for _, s := range a.Streams.Status() {
+		connected[s.ID] = true
+	}
+	var cands []*Relay
+	for _, r := range relays {
+		if r.Enabled && r.Region == region && connected[r.ID] && a.hostsGame(r.ID, req.Game) {
+			cands = append(cands, r)
+		}
+	}
+	if len(cands) == 0 {
+		return nil, ErrNoRelay
+	}
+	sort.Slice(cands, func(i, j int) bool {
+		ri, rj := a.rtt(cands[i].ID), a.rtt(cands[j].ID)
+		if ri != rj {
+			return ri < rj
+		}
+		return cands[i].ID < cands[j].ID
+	})
+	best := cands[0]
+	host, err := a.resolve(best.Host)
+	if err != nil {
+		return nil, err
+	}
+
+	// The relay must hold the credential before the console is sent there.
+	timeout := a.PutTimeout
+	if timeout <= 0 {
+		timeout = 600 * time.Millisecond
+	}
+	pctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	body, _ := json.Marshal(relaylink.NexCredPut{Game: req.Game, PID: req.PID, Password: req.Password, TTLSeconds: int(AssignTTL / time.Second)})
+	if _, err := a.Streams.CallRelay(pctx, best.ID, relaylink.MethodCredPut, body); err != nil {
+		return nil, err
+	}
+	a.mu.Lock()
+	if a.assigned == nil {
+		a.assigned = map[string]assignment{}
+	}
+	now := a.now()
+	if len(a.assigned) > 4096 {
+		for k, v := range a.assigned {
+			if !now.Before(v.expires) {
+				delete(a.assigned, k)
+			}
+		}
+	}
+	a.assigned[asKey(req.Game, req.PID)] = assignment{relayID: best.ID, password: req.Password, expires: now.Add(AssignTTL)}
+	a.mu.Unlock()
+	return &AssignResult{Relay: best.ID, Host: host, Port: game.Port}, nil
+}

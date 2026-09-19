@@ -3,6 +3,7 @@ package relayd
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/Happynico7504/relaylink"
 	"os"
 	"strings"
 	"time"
@@ -26,6 +27,7 @@ type Config struct {
 	PollSeconds     int          `json:"poll_seconds"`      // invalidation poll, default 5
 	Listeners       []Listener   `json:"listeners"`
 	Update          UpdateConfig `json:"update"`
+	NexAuth         []string     `json:"nex_auth"`    // NEX auth servers to host: "wsc", "mk8", "badge-arcade" (needs the stream)
 	StreamAddr      string       `json:"stream_addr"` // default: the bundle host, port 7778
 	StreamDisabled  bool         `json:"stream_disabled"`
 	StaggerHosts    []string     `json:"stagger_hosts"` // SNI names that get the per-IP handshake stagger (sni mode)
@@ -103,6 +105,15 @@ func (c *Config) validate() error {
 		default:
 			return fmt.Errorf("listener %d: stagger must be sni or all", i)
 		}
+	}
+	known := relaylink.NexGameDefaults()
+	for _, g := range c.NexAuth {
+		if _, ok := known[g]; !ok {
+			return fmt.Errorf("nex_auth: unknown game %q", g)
+		}
+	}
+	if len(c.NexAuth) > 0 && c.StreamDisabled {
+		return fmt.Errorf("nex_auth needs the real-time stream (stream_disabled must be false)")
 	}
 	if c.CertSyncSeconds == 0 {
 		c.CertSyncSeconds = 300

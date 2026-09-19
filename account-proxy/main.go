@@ -874,6 +874,11 @@ func handleMK8NexToken(w http.ResponseWriter, r *http.Request, host string, port
 		upsertMK8Account(pid, sessionToken)
 		db.Exec(`INSERT INTO relay_requests (pid, game_server_id) VALUES ($1, $2)`, pid, "1010EB00")
 	}
+	if pid != 0 {
+		if rh, rp, ok := relayAssign("mk8", pid, sessionToken, ip); ok {
+			host, port = rh, rp
+		}
+	}
 	log.Printf("mk8_token for %s: PID=%d token=%s…", ip, pid, sessionToken[:8])
 
 	tkn := nexToken{
@@ -933,6 +938,11 @@ func handleWSCNexToken(w http.ResponseWriter, r *http.Request, host string, port
 	if pid != 0 {
 		upsertWSCAccount(pid, sessionToken)
 		db.Exec(`INSERT INTO relay_requests (pid, game_server_id) VALUES ($1, $2)`, pid, "1012F100")
+	}
+	if pid != 0 {
+		if rh, rp, ok := relayAssign("wsc", pid, sessionToken, ip); ok {
+			host, port = rh, rp
+		}
 	}
 	log.Printf("wsc_token for %s: PID=%d token=%s…", ip, pid, sessionToken[:8])
 
@@ -1023,6 +1033,11 @@ func handleBadgeArcadeNexToken(w http.ResponseWriter, r *http.Request, host stri
 	if pid != 0 {
 		upsertBadgeArcadeAccount(pid, sessionToken)
 		db.Exec(`INSERT INTO relay_requests (pid, game_server_id) VALUES ($1, $2)`, pid, "00134600")
+	}
+	if pid != 0 {
+		if rh, rp, ok := relayAssign("badge-arcade", pid, sessionToken, ip); ok {
+			host, port = rh, rp
+		}
 	}
 	log.Printf("badge_arcade_token for %s: PID=%d token=%s…", ip, pid, sessionToken[:8])
 
@@ -2427,6 +2442,42 @@ func cachePNIDMapping(pid uint32, pnid string) {
 	invalidateLookupCache(pid)
 }
 
+
+// relayAssignURL is relayhub's local endpoint (see relayhub's /assign).
+var relayAssignURL = "http://127.0.0.1:9401/assign"
+
+// relayAssign asks relayhub whether this console should authenticate its NEX
+// login at a regional relay near it. relayhub pushes the console's credential to
+// that relay (and waits for its acknowledgement) BEFORE answering, so the console
+// is only ever sent somewhere that can already authenticate it. Any failure at
+// all (hub down, no relay in the console's region, relay unable to store the
+// credential, a bad answer) returns ok=false and the caller keeps using the
+// main's own address, exactly as before relays existed.
+func relayAssign(game string, pid uint32, password, clientIP string) (host string, port uint16, ok bool) {
+	body, _ := json.Marshal(map[string]any{"game": game, "pid": pid, "password": password, "client_ip": clientIP})
+	c := &http.Client{Timeout: 1200 * time.Millisecond}
+	resp, err := c.Post(relayAssignURL, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return "", 0, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", 0, false
+	}
+	var res struct {
+		Relay string `json:"relay"`
+		Host  string `json:"host"`
+		Port  int    `json:"port"`
+	}
+	if json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&res) != nil {
+		return "", 0, false
+	}
+	if v4 := net.ParseIP(res.Host); v4 == nil || v4.To4() == nil || res.Port < 1 || res.Port > 65535 {
+		return "", 0, false // only ever hand consoles a plain IPv4 address and a valid port
+	}
+	log.Printf("nex_token %s pid=%d: authenticating at relay %s (%s:%d)", game, pid, res.Relay, res.Host, res.Port)
+	return res.Host, uint16(res.Port), true
+}
 
 // announceInvalidation tells relayhub (local, fire-and-forget) that data the
 // relays may have cached has changed. Tag names must match relayhub's:

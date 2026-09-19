@@ -9,6 +9,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -109,15 +111,70 @@ func main() {
 				log.Fatalf("stream: %v", err)
 			}
 		}
-		stream := &relayd.StreamClient{
-			Client: client, Addr: addr, Logf: log.Printf,
-			Handlers: relaylink.StreamHandlers{
-				Event: func(_ *relaylink.StreamConn, topic string, _ []byte) { log.Printf("stream: event %q", topic) },
-			},
+		// NEX authentication servers (a supervised child process): the hub tells us
+		// the games' configuration whenever the stream connects, pushes each
+		// console's credential before sending it here, and answers our pulls.
+		var nexSup *relayd.NexSupervisor
+		var stream *relayd.StreamClient
+		handlers := relaylink.StreamHandlers{
+			Event: func(_ *relaylink.StreamConn, topic string, _ []byte) { log.Printf("stream: event %q", topic) },
+		}
+		if len(cfg.NexAuth) > 0 {
+			nexSup = &relayd.NexSupervisor{Logf: log.Printf}
+			nexSup.Pull = func(pctx context.Context, game string, pid uint32) (string, error) {
+				body, _ := json.Marshal(relaylink.NexCredGet{Game: game, PID: pid})
+				out, err := stream.Call(pctx, relaylink.MethodCredGet, body)
+				if err != nil {
+					return "", err
+				}
+				var a relaylink.NexCredAnswer
+				if err := json.Unmarshal(out, &a); err != nil {
+					return "", err
+				}
+				return a.Password, nil
+			}
+			handlers.Call = func(cctx context.Context, _ *relaylink.StreamConn, method string, body []byte) ([]byte, error) {
+				if method != relaylink.MethodCredPut {
+					return nil, errors.New("unknown method")
+				}
+				var p relaylink.NexCredPut
+				if err := json.Unmarshal(body, &p); err != nil {
+					return nil, err
+				}
+				if err := nexSup.PutCred(cctx, p); err != nil {
+					return nil, err
+				}
+				return []byte("ok"), nil
+			}
+			go nexSup.Run(ctx)
+			log.Printf("NEX authentication enabled for %v", cfg.NexAuth)
+		}
+		stream = &relayd.StreamClient{
+			Client: client, Addr: addr, Logf: log.Printf, Handlers: handlers,
 			OnUp: func(c *relaylink.StreamConn) {
 				// No players are connected through this relay yet; announcing the
 				// (empty) set after every reconnect keeps the main's table exact.
 				go c.Call(ctx, "presence.set", []byte(`{"pids":[]}`))
+				if nexSup == nil {
+					return
+				}
+				go func() {
+					hctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+					defer cancel()
+					body, _ := json.Marshal(relaylink.NexHelloRequest{Games: cfg.NexAuth})
+					out, err := c.Call(hctx, relaylink.MethodNexHello, body)
+					if err != nil {
+						log.Printf("nex: hello failed: %v", err)
+						return
+					}
+					var resp relaylink.NexHelloResponse
+					if json.Unmarshal(out, &resp) != nil {
+						log.Printf("nex: malformed hello answer")
+						return
+					}
+					log.Printf("nex: the main configured %d of %d requested games", len(resp.Games), len(cfg.NexAuth))
+					nexSup.SetGames(resp.Games)
+				}()
 			},
 		}
 		go stream.Run(ctx)
