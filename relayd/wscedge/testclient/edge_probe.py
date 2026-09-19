@@ -6,6 +6,7 @@ connects, optionally sends RMC calls, and reports latency. Used to test the WSC 
 relay (relayd wscedge) and to compare it against the direct secure server.
 
   WSC_KERBEROS_PASSWORD=... edge_probe.py HOST PORT [--pid N] [--calls K]
+  (Wii U Chat: --access-key e7a47214 --nex-version 30302 --pw-env PN_WUC_KERBEROS_PASSWORD)
 """
 import argparse, asyncio, datetime, os, secrets, time
 
@@ -19,15 +20,18 @@ ap.add_argument("--calls", type=int, default=3)
 ap.add_argument("--proto", type=lambda x: int(x, 0), default=0x70)
 ap.add_argument("--method", type=lambda x: int(x, 0), default=0x1)
 ap.add_argument("--hold", type=float, default=0, help="stay connected this many seconds after the calls")
+ap.add_argument("--access-key", default="4d324052", help="4d324052 = WSC, e7a47214 = Wii U Chat")
+ap.add_argument("--nex-version", type=int, default=30400, help="30400 = WSC (3.4.0), 30302 = Wii U Chat (3.3.2)")
+ap.add_argument("--pw-env", default="WSC_KERBEROS_PASSWORD", help="env var holding the Kerberos password")
 a = ap.parse_args()
 
-pw = os.environ["WSC_KERBEROS_PASSWORD"].encode()
+pw = os.environ[a.pw_env].encode()
 
 s = nex_settings.default()
-s["prudp.access_key"] = "4d324052"
+s["prudp.access_key"] = a.access_key
 s["prudp.version"] = 1
 s["prudp.minor_version"] = 3
-s["nex.version"] = 30400
+s["nex.version"] = a.nex_version
 s["kerberos.key_size"] = 32  # wsc-secure / nex-go default
 s["kerberos.ticket_version"] = 0  # nex-go v1.0.16 expects the plain ticket format
 s["kerberos.key_derivation"] = 0
