@@ -228,9 +228,16 @@ func (f *Front) Handler(l Listener) http.Handler {
 		payload, _ := json.Marshal(fr)
 		ctx, cancel := context.WithTimeout(r.Context(), 50*time.Second)
 		defer cancel()
+		started := time.Now()
 		resp, err := f.Client.Call(ctx, http.MethodPost, relaylink.ForwardPath, payload)
 		if err != nil || resp.Status != http.StatusOK {
-			f.logf("forward %s %s failed: %v", r.Method, r.URL.Path, err)
+			status := 0
+			if resp != nil {
+				status = resp.Status
+			}
+			f.logf("forward %s %s failed after %v from %s: %s", r.Method, r.URL.Path,
+				time.Since(started).Round(time.Millisecond), clientHost(r),
+				describeForwardFailure(r.Context().Err() != nil, ctx.Err(), err, status))
 			endWrite()
 			http.Error(w, "bad gateway", http.StatusBadGateway)
 			return
@@ -453,3 +460,28 @@ func nilLogger() *log.Logger { return log.New(discard{}, "", 0) }
 type discard struct{}
 
 func (discard) Write(p []byte) (int, error) { return len(p), nil }
+
+// clientHost is the console's address without the port.
+func clientHost(r *http.Request) string {
+	if h, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return h
+	}
+	return r.RemoteAddr
+}
+
+// describeForwardFailure says who gave up, so a log line can tell a console that hung up after
+// two seconds (harmless, and common: consoles abort requests when they change state) from a
+// relay that waited its full 50 seconds, or a main that answered with an error. clientGone is
+// whether the console's own request was cancelled; waitErr is the relay's own wait context.
+func describeForwardFailure(clientGone bool, waitErr, callErr error, status int) string {
+	switch {
+	case clientGone:
+		return "the console hung up before the answer arrived"
+	case errors.Is(waitErr, context.DeadlineExceeded):
+		return "gave up waiting for the main (50s)"
+	case callErr != nil:
+		return "could not reach the main: " + callErr.Error()
+	default:
+		return fmt.Sprintf("the main answered with status %d", status)
+	}
+}

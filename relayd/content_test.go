@@ -1,6 +1,8 @@
 package relayd
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -298,5 +300,42 @@ func TestMemoryBudgetIsEnforced(t *testing.T) {
 	}
 	if store.Len() == 0 {
 		t.Fatal("nothing kept at all")
+	}
+}
+
+func TestForwardFailureSaysWhoGaveUp(t *testing.T) {
+	timeout := context.DeadlineExceeded
+	cases := []struct {
+		name       string
+		clientGone bool
+		wait, err  error
+		status     int
+		want       string
+	}{
+		{"console hung up", true, context.Canceled, context.Canceled, 0, "console hung up"},
+		// A hang-up wins even if the wait context also expired at the same moment.
+		{"console hung up as well as a timeout", true, timeout, timeout, 0, "console hung up"},
+		{"relay waited its full time", false, timeout, timeout, 0, "gave up waiting for the main"},
+		{"transport error", false, nil, errors.New("dial tcp: connection refused"), 0, "could not reach the main: dial tcp: connection refused"},
+		// The line that used to read "<nil>": no transport error, but a non-200 answer.
+		{"main answered with an error status", false, nil, nil, 502, "status 502"},
+	}
+	for _, c := range cases {
+		if got := describeForwardFailure(c.clientGone, c.wait, c.err, c.status); !strings.Contains(got, c.want) {
+			t.Errorf("%s: %q does not contain %q", c.name, got, c.want)
+		}
+	}
+	if strings.Contains(describeForwardFailure(false, nil, nil, 502), "<nil>") {
+		t.Error("the description still mentions <nil>")
+	}
+}
+
+func TestClientHostStripsThePort(t *testing.T) {
+	r := &http.Request{RemoteAddr: "203.0.113.7:51234"}
+	if got := clientHost(r); got != "203.0.113.7" {
+		t.Fatalf("got %q", got)
+	}
+	if got := clientHost(&http.Request{RemoteAddr: "weird"}); got != "weird" {
+		t.Fatalf("got %q", got)
 	}
 }
