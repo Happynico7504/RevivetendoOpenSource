@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/PretendoNetwork/nex-protocols-common-go/authentication"
 	"io"
 	"strings"
 	"sync"
@@ -359,5 +360,44 @@ func TestEngineRefusesSeveralGamesInOneProcess(t *testing.T) {
 	err := (&Engine{}).Start([]relaylink.NexGame{a, b}, &Store{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "own process") {
 		t.Fatalf("two games in one process were accepted: %v", err)
+	}
+}
+
+// nex-go v2 secure servers (Wii U Chat) accept a Kerberos ticket for only two minutes after it was
+// issued. The upstream v1 auth library stamped every ticket with DateTime 0, so a relay's ticket was
+// always "Kerberos ticket expired" there (found with a real console: the relay's login succeeded and
+// the secure server then rejected the connect every two seconds). The patched copy in
+// third_party/nex-protocols-common-go stamps the real time; this decrypts a ticket the way a secure
+// server does and checks it.
+func TestIssuedTicketsCarryTheCurrentTime(t *testing.T) {
+	srv := nex.NewServer()
+	srv.SetKerberosPassword("server-secret")
+	auth := authentication.NewCommonAuthenticationProtocol(srv)
+	auth.SetPasswordFromPIDFunction(func(pid uint32) (string, uint32) { return "user-pw", 0 })
+
+	const userPID, serverPID = 1435853600, 2
+	raw, code := authentication.TicketForTests(userPID, serverPID)
+	if code != 0 || len(raw) == 0 {
+		t.Fatalf("no ticket: code %d", code)
+	}
+	// Outer layer: encrypted for the user (what the console decrypts with its password).
+	outer := nex.NewStreamIn(nex.NewKerberosEncryption(nex.DeriveKerberosKey(userPID, []byte("user-pw"))).Decrypt(raw), srv)
+	outer.ReadBytesNext(int64(srv.KerberosKeySize())) // session key
+	if target := outer.ReadUInt32LE(); target != serverPID {
+		t.Fatalf("ticket is for pid %d, want the secure server (%d)", target, serverPID)
+	}
+	internal, err := outer.ReadBuffer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Inner layer: encrypted for the secure server (what it decrypts with its Kerberos password).
+	in := nex.NewStreamIn(nex.NewKerberosEncryption(nex.DeriveKerberosKey(serverPID, []byte("server-secret"))).Decrypt(internal), srv)
+	issued := in.ReadDateTime().Value()
+	// A DateTime packs year, month, day, hour, minute, second most-significant first, so packed
+	// values order like the times they stand for.
+	now := time.Now().UTC()
+	dt := nex.NewDateTime(0)
+	if lo, hi := dt.FromTimestamp(now.Add(-10*time.Second)), dt.FromTimestamp(now.Add(5*time.Second)); issued == 0 || issued < lo || issued > hi {
+		t.Fatalf("the ticket is stamped %d, want about now (%d..%d): a nex-go v2 server allows two minutes", issued, lo, hi)
 	}
 }

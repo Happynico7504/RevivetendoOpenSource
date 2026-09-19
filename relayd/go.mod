@@ -2,11 +2,13 @@ module github.com/Happynico7504/relayd
 
 go 1.23
 
-require github.com/Happynico7504/relaylink v0.0.0
+require (
+	github.com/Happynico7504/relaylink v0.0.0
+	github.com/PretendoNetwork/nex-go v1.0.16
+	github.com/PretendoNetwork/nex-protocols-common-go v1.0.17
+)
 
 require (
-	github.com/PretendoNetwork/nex-go v1.0.16 // indirect
-	github.com/PretendoNetwork/nex-protocols-common-go v1.0.17 // indirect
 	github.com/PretendoNetwork/nex-protocols-go v1.0.23 // indirect
 	github.com/PretendoNetwork/plogger-go v1.0.2 // indirect
 	github.com/fatih/color v1.15.0 // indirect
@@ -19,3 +21,6 @@ require (
 )
 
 replace github.com/Happynico7504/relaylink => ../relaylink
+
+// Patched copy: tickets carry the real issue time (see third_party/nex-protocols-common-go/PATCHED.md).
+replace github.com/PretendoNetwork/nex-protocols-common-go => ./third_party/nex-protocols-common-go
