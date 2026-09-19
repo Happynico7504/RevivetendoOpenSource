@@ -32,7 +32,9 @@ type NexSupervisor struct {
 	Pull func(ctx context.Context, game string, pid uint32) (string, error)
 	Logf func(string, ...any)
 	// OnGames, if set, is called after the configuration changed (not for an identical one).
+	// AddOnGames registers further listeners (each edge component listens for its own secret).
 	OnGames func(games []relaylink.NexGame)
+	extra   []func(games []relaylink.NexGame)
 
 	MinBackoff time.Duration // default 1s
 	MaxBackoff time.Duration // default 15s
@@ -148,6 +150,19 @@ func (s *NexSupervisor) SetGames(games []relaylink.NexGame) {
 	if s.OnGames != nil {
 		s.OnGames(games)
 	}
+	s.mu.Lock()
+	listeners := append([]func(games []relaylink.NexGame){}, s.extra...)
+	s.mu.Unlock()
+	for _, f := range listeners {
+		f(games)
+	}
+}
+
+// AddOnGames registers a listener called after the configuration changed, alongside OnGames.
+func (s *NexSupervisor) AddOnGames(f func(games []relaylink.NexGame)) {
+	s.mu.Lock()
+	s.extra = append(s.extra, f)
+	s.mu.Unlock()
 }
 
 // Game returns the current configuration of one game (ok is false until the main has sent it).

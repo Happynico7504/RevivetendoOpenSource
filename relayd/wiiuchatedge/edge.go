@@ -13,10 +13,13 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"time"
 
 	nex "github.com/PretendoNetwork/nex-go/v2"
 	"github.com/PretendoNetwork/nex-go/v2/constants"
 	"github.com/PretendoNetwork/nex-go/v2/types"
+
+	"github.com/Happynico7504/relaylink"
 )
 
 // Config mirrors wiiu-chat-secure's secure server settings (nex/secure.go).
@@ -44,6 +47,10 @@ type Backend interface {
 	Open(pid uint32, ip string, port int) error
 	Close(pid uint32)
 	Handle(c Call) error
+	// Stats reports what the edge measured toward a player (see probe.go).
+	Stats(s relaylink.WSCStats)
+	// Trace reports a traceroute run toward a player.
+	Trace(t relaylink.WSCTrace)
 }
 
 // Edge is one running terminator.
@@ -53,9 +60,11 @@ type Edge struct {
 	server  *nex.PRUDPServer
 	ep      *nex.PRUDPEndPoint
 
-	mu     sync.Mutex
-	conns  map[uint32]*nex.PRUDPConnection // pid -> live connection
-	opened map[*nex.PRUDPConnection]bool
+	mu        sync.Mutex
+	conns     map[uint32]*nex.PRUDPConnection // pid -> live connection
+	opened    map[*nex.PRUDPConnection]bool
+	lastTrace map[uint32]time.Time // last loss-triggered traceroute per player
+	resetting bool                 // Reset is dropping sessions the main has already closed
 }
 
 func New(cfg Config, b Backend) *Edge {
@@ -105,6 +114,7 @@ func (e *Edge) Serve() {
 
 	e.ep.OnData(e.onData)
 	e.ep.OnConnectionEnded(e.onEnded)
+	go e.probeLoop()
 
 	e.logf("wiiuchatedge: listening on :%d", e.cfg.Port)
 	e.server.Listen(e.cfg.Port)
@@ -147,6 +157,10 @@ func (e *Edge) onData(packet nex.PacketInterface) {
 			return
 		}
 		e.logf("wiiuchatedge: PID=%d connected from %s:%d", pid, ip, port)
+		// A path snapshot from the moment they connect, to compare a later degradation with.
+		if ip != "" {
+			e.traceAsync(pid, ip, "connect")
+		}
 	}
 
 	call := Call{PID: pid, IP: ip, Port: port, CallID: msg.CallID, Protocol: uint16(msg.ProtocolID), Method: msg.MethodID, Params: msg.Parameters}
@@ -165,8 +179,9 @@ func (e *Edge) onEnded(conn *nex.PRUDPConnection) {
 	if e.conns[pid] == conn {
 		delete(e.conns, pid)
 	}
+	quiet := e.resetting // the main already closed these sessions
 	e.mu.Unlock()
-	if was && pid != 0 {
+	if was && pid != 0 && !quiet {
 		e.backend.Close(pid)
 		e.logf("wiiuchatedge: PID=%d disconnected", pid)
 	}
@@ -183,6 +198,39 @@ func addrOf(conn *nex.PRUDPConnection) (string, int) {
 		}
 	}
 	return "", 0
+}
+
+// Out delivers an RMC message from the main (a response or a notification) to a player.
+func (e *Edge) Out(pid uint32, payload []byte) {
+	e.mu.Lock()
+	conn := e.conns[pid]
+	e.mu.Unlock()
+	if conn == nil {
+		e.logf("wiiuchatedge: message for PID=%d, who is not connected here", pid)
+		return
+	}
+	if err := e.send(conn, payload); err != nil {
+		e.logf("wiiuchatedge: PID=%d: %v", pid, err)
+	}
+}
+
+// Reset drops every session without telling the backend: the main has already closed them (its
+// stream to this relay was lost), and the consoles reconnect and handshake again.
+func (e *Edge) Reset() {
+	e.mu.Lock()
+	old := make([]*nex.PRUDPConnection, 0, len(e.conns))
+	for _, c := range e.conns {
+		old = append(old, c)
+	}
+	e.resetting = true
+	e.mu.Unlock()
+	for _, c := range old {
+		e.ep.CleanupConnection(c)
+	}
+	e.mu.Lock()
+	e.resetting = false
+	e.mu.Unlock()
+	e.logf("wiiuchatedge: reset: dropped %d sessions", len(old))
 }
 
 // Send puts a complete RMC message into a reliable data packet for the connection, the way the
@@ -230,6 +278,8 @@ type EchoBackend struct{ Edge *Edge }
 
 func (b *EchoBackend) Open(pid uint32, ip string, port int) error { return nil }
 func (b *EchoBackend) Close(pid uint32)                           {}
+func (b *EchoBackend) Stats(s relaylink.WSCStats)                 {}
+func (b *EchoBackend) Trace(t relaylink.WSCTrace)                 {}
 func (b *EchoBackend) Handle(c Call) error {
 	b.Edge.mu.Lock()
 	conn := b.Edge.conns[c.PID]

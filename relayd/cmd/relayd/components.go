@@ -15,13 +15,13 @@ import (
 // relay offers the wsc-edge auth variant.
 type edgeCoupling struct {
 	nex     *relayd.NexSupervisor // nil if this relay hosts no NEX auth servers
-	healthy func(bool)
+	healthy func(variant string, healthy bool)
 }
 
 // startComponents runs every configured separately shipped binary under its own
 // supervisor, each kept current by its own updater. A component never affects relayd: it
 // has its own directory, version line, rollback and restarts.
-func startComponents(ctx context.Context, cfg *relayd.Config, client *relaylink.Client, bundle *relaylink.RelayBundle, wsc *relayd.WSCBridge, edge edgeCoupling) {
+func startComponents(ctx context.Context, cfg *relayd.Config, client *relaylink.Client, bundle *relaylink.RelayBundle, bridges map[string]*relayd.WSCBridge, edge edgeCoupling) {
 	for _, cc := range cfg.Components {
 		cc := cc
 		if cc.Disabled {
@@ -32,33 +32,31 @@ func startComponents(ctx context.Context, cfg *relayd.Config, client *relaylink.
 			Window: cfg.Update.Window, KeepRunning: true, Logf: log.Printf,
 		}
 		sup := &relayd.ComponentSupervisor{Updater: upd, Fallback: cc.Fallback, Args: cc.Args, Env: cc.Env, Logf: log.Printf}
-		if cc.Name == "wscedge" && wsc != nil {
+		if spec, isEdge := relayd.KnownEdges[cc.Name]; isEdge && bridges[cc.Name] != nil {
 			// Connected to the main through the stream: the child runs in pipe mode.
 			sup.Args = append(append([]string(nil), cc.Args...), "-pipe")
-			sup.Pipe = wsc.Attach
-			sup.OnHealthy = edge.healthy
+			sup.Pipe = bridges[cc.Name].Attach
+			variant := spec.Variant.Name
+			sup.OnHealthy = func(h bool) { edge.healthy(variant, h) }
 			if edge.nex != nil {
-				// The edge decrypts the tickets WSC's auth server issues, so it needs WSC's
-				// current secret. That secret changes whenever the bridge restarts, so it is
+				// The edge decrypts the tickets its game's auth server issues, so it needs that
+				// game's current secret. The secret changes whenever the bridge restarts, so it is
 				// read at each launch, and the edge is relaunched when it changes.
 				secret := func() string {
-					g, _ := edge.nex.Game(relaylink.WSCEdgeBase)
+					g, _ := edge.nex.Game(spec.Variant.Base)
 					return g.KerberosPassword
 				}
 				sup.Ready = func() bool { return secret() != "" }
-				sup.EnvFunc = func() []string { return []string{"WSC_KERBEROS_PASSWORD=" + secret()} }
+				sup.EnvFunc = func() []string { return []string{spec.SecretEnv + "=" + secret()} }
 				last := secret()
-				edge.nex.OnGames = func([]relaylink.NexGame) {
+				edge.nex.AddOnGames(func([]relaylink.NexGame) {
 					if now := secret(); now != last {
 						last = now
 						sup.Restart()
 					}
-				}
+				})
 			}
 		}
-		upd.Exit = sup.Restart
-		go sup.Run(ctx)
-
 		if bundle.ReleasePublicKey == "" || cfg.Update.Disabled {
 			log.Printf("component %s: over-the-air updates are off; it runs only from its fallback binary", cc.Name)
 			continue

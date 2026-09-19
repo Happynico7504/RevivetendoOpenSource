@@ -31,3 +31,37 @@ func TestEdgeGameMatchesWSCWhereTheEdgeMustAndDiffersWhereItShould(t *testing.T)
 		seen[g.Port] = name
 	}
 }
+
+func TestChatEdgeGameMatchesWiiUChatWhereTheEdgeMustAndDiffersWhereItShould(t *testing.T) {
+	chat := NexGameDefaults()["wiiu-chat"]
+	chat.KerberosPassword = "shared"
+	e := DeriveEdgeGame(EdgeVariants[WUCEdgeBase], chat, "107.173.31.124")
+	if e.KerberosPassword != "shared" || e.AccessKey != chat.AccessKey || e.GameServerID != chat.GameServerID ||
+		e.NEXMajor != chat.NEXMajor || e.NEXMinor != chat.NEXMinor || e.NEXPatch != chat.NEXPatch || e.BuildName != chat.BuildName {
+		t.Fatalf("chat edge game diverges from wiiu-chat: %+v vs %+v", e, chat)
+	}
+	if e.Name != WUCEdgeGame || e.Port == chat.Port || e.SecureHost != "107.173.31.124" || e.SecurePort != "60005" {
+		t.Fatalf("chat edge routing: %+v", e)
+	}
+	// Both edge variants exist and none collides with another game (auth ports are checked elsewhere).
+	if len(EdgeVariants) != 2 || EdgeVariants["wsc"].Name != WSCEdgeGame || EdgeVariants["wiiu-chat"].Name != WUCEdgeGame {
+		t.Fatalf("edge variants: %+v", EdgeVariants)
+	}
+}
+
+func TestEdgeNamesDoNotCollide(t *testing.T) {
+	seen := map[string]string{}
+	for who, n := range map[string]EdgeNames{"wsc": WSCEdgeNames, "wuc": WUCEdgeNames} {
+		for _, name := range []string{n.Open, n.RMC, n.Alive, n.Close, n.Stats, n.Trace, n.Out} {
+			if other, dup := seen[name]; dup {
+				t.Fatalf("%q used by both %s and %s", name, who, other)
+			}
+			seen[name] = who
+		}
+	}
+	// WSC keeps the names relays and hubs already speak.
+	if WSCEdgeNames.Open != MethodWSCOpen || WSCEdgeNames.RMC != MethodWSCRMC || WSCEdgeNames.Out != TopicWSCOut ||
+		WSCEdgeNames.Stats != MethodWSCStats || WSCEdgeNames.Trace != MethodWSCTrace || WSCEdgeNames.Close != MethodWSCClose || WSCEdgeNames.Alive != MethodWSCAlive {
+		t.Fatalf("WSC names changed: %+v", WSCEdgeNames)
+	}
+}

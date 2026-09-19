@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/Happynico7504/relaylink"
@@ -20,9 +21,43 @@ import (
 // whose stream drops has all its players closed on the main.
 type EdgeBridge struct {
 	Streams *StreamHub
-	Main    string // wsc-secure's edge endpoint, e.g. "http://127.0.0.1:9451"
+	Main    string // the game server's edge endpoint, e.g. "http://127.0.0.1:9451"
 	HTTP    *http.Client
 	Logf    func(string, ...any)
+	// Names are the stream methods and topic this bridge serves (default: WSC's). Wii U Chat's
+	// bridge uses relaylink.WUCEdgeNames, so both edges share one hub.
+	Names relaylink.EdgeNames
+
+	mu       sync.Mutex
+	sessions map[uint32]string // pid -> relay holding the session. Per bridge, not the hub's shared presence table: the same player can be in WSC and Wii U Chat at once.
+}
+
+func (b *EdgeBridge) names() relaylink.EdgeNames {
+	if b.Names.Open == "" {
+		return relaylink.WSCEdgeNames
+	}
+	return b.Names
+}
+
+// RelayFor returns the relay holding a player's session on this bridge.
+func (b *EdgeBridge) RelayFor(pid uint32) (string, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	id, ok := b.sessions[pid]
+	return id, ok
+}
+
+func (b *EdgeBridge) setSession(pid uint32, relay string, present bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.sessions == nil {
+		b.sessions = map[uint32]string{}
+	}
+	if present {
+		b.sessions[pid] = relay
+	} else if b.sessions[pid] == relay {
+		delete(b.sessions, pid)
+	}
 }
 
 func (b *EdgeBridge) logf(f string, a ...any) {
@@ -40,20 +75,30 @@ func (b *EdgeBridge) client() *http.Client {
 
 // Register installs the stream methods and the relay-down cleanup.
 func (b *EdgeBridge) Register() {
-	b.Streams.HandleMethod(relaylink.MethodWSCOpen, b.method("open", true))
-	b.Streams.HandleMethod(relaylink.MethodWSCRMC, b.method("rmc", false))
-	b.Streams.HandleMethod(relaylink.MethodWSCAlive, b.method("alive", false))
-	b.Streams.HandleMethod(relaylink.MethodWSCClose, b.method("close", false))
-	b.Streams.HandleMethod(relaylink.MethodWSCStats, b.method("stats", false))
-	b.Streams.HandleMethod(relaylink.MethodWSCTrace, b.method("trace", false))
+	n := b.names()
+	b.Streams.HandleMethod(n.Open, b.method("open", true))
+	b.Streams.HandleMethod(n.RMC, b.method("rmc", false))
+	b.Streams.HandleMethod(n.Alive, b.method("alive", false))
+	b.Streams.HandleMethod(n.Close, b.method("close", false))
+	b.Streams.HandleMethod(n.Stats, b.method("stats", false))
+	b.Streams.HandleMethod(n.Trace, b.method("trace", false))
 
 	prev := b.Streams.OnRelayDown
 	b.Streams.OnRelayDown = func(relayID string, pids []uint32) {
 		if prev != nil {
 			prev(relayID, pids)
 		}
-		for _, pid := range pids {
-			// Best effort: the relay is gone, so its players are too.
+		// Best effort: the relay is gone, so its players are too. Only this bridge's own players.
+		b.mu.Lock()
+		var mine []uint32
+		for pid, id := range b.sessions {
+			if id == relayID {
+				mine = append(mine, pid)
+				delete(b.sessions, pid)
+			}
+		}
+		b.mu.Unlock()
+		for _, pid := range mine {
 			b.post(context.Background(), "close", relayID, map[string]any{"pid": pid})
 		}
 	}
@@ -78,9 +123,9 @@ func (b *EdgeBridge) method(op string, open bool) func(context.Context, string, 
 		}
 		switch {
 		case open:
-			b.Streams.SetPlayer(relayID, uint32(m["pid"].(float64)), true)
+			b.setSession(uint32(m["pid"].(float64)), relayID, true)
 		case op == "close":
-			b.Streams.SetPlayer(relayID, uint32(m["pid"].(float64)), false)
+			b.setSession(uint32(m["pid"].(float64)), relayID, false)
 		}
 		return nil, nil
 	}
@@ -125,8 +170,14 @@ func (b *EdgeBridge) Out(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body, _ := json.Marshal(relaylink.WSCOut{PID: m.PID, Payload: m.Payload})
-	// Route by the presence table: it is what the hub trusts about who holds the session.
-	if err := b.Streams.Route(m.PID, relaylink.High, relaylink.TopicWSCOut, body); err != nil {
+	// Route to the relay this bridge recorded for the player: it is what the hub trusts about who
+	// holds the session (the game server's own idea of the relay is not).
+	relay, ok := b.RelayFor(m.PID)
+	if !ok {
+		http.Error(w, "no relay holds that player", http.StatusNotFound)
+		return
+	}
+	if err := b.Streams.SendToRelay(relay, relaylink.High, b.names().Out, body); err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}

@@ -23,6 +23,9 @@ type WSCBridge struct {
 	// CallTimeout bounds an open or rmc call (default 5s).
 	CallTimeout time.Duration
 
+	// Names are the stream methods this bridge calls and the topic it delivers (default: WSC's).
+	Names relaylink.EdgeNames
+
 	mu  sync.Mutex
 	enc *json.Encoder // the current child's input; nil while no child runs
 }
@@ -31,6 +34,14 @@ func (b *WSCBridge) logf(f string, a ...any) {
 	if b.Logf != nil {
 		b.Logf(f, a...)
 	}
+}
+
+// EdgeNames returns the bridge's stream names, WSC's by default.
+func (b *WSCBridge) EdgeNames() relaylink.EdgeNames {
+	if b.Names.Open == "" {
+		return relaylink.WSCEdgeNames
+	}
+	return b.Names
 }
 
 func (b *WSCBridge) timeout() time.Duration {
@@ -76,25 +87,26 @@ func (b *WSCBridge) Attach(fromChild io.Reader, toChild io.Writer) {
 func (b *WSCBridge) handle(m relaylink.EdgePipeMsg) {
 	var method string
 	var body any
+	n := b.EdgeNames()
 	switch m.T {
 	case relaylink.EdgeOpen:
-		method, body = relaylink.MethodWSCOpen, relaylink.WSCOpen{PID: m.PID, IP: m.IP, Port: m.Port}
+		method, body = n.Open, relaylink.WSCOpen{PID: m.PID, IP: m.IP, Port: m.Port}
 	case relaylink.EdgeRMC:
-		method, body = relaylink.MethodWSCRMC, relaylink.WSCRMC{PID: m.PID, Call: m.Call, Proto: m.Proto, Custom: m.Custom, Method: m.Method, Params: m.Params}
+		method, body = n.RMC, relaylink.WSCRMC{PID: m.PID, Call: m.Call, Proto: m.Proto, Custom: m.Custom, Method: m.Method, Params: m.Params}
 	case relaylink.EdgeAlive:
-		method, body = relaylink.MethodWSCAlive, relaylink.WSCAlive{PIDs: m.PIDs}
+		method, body = n.Alive, relaylink.WSCAlive{PIDs: m.PIDs}
 	case relaylink.EdgeClose:
-		method, body = relaylink.MethodWSCClose, relaylink.WSCClose{PID: m.PID}
+		method, body = n.Close, relaylink.WSCClose{PID: m.PID}
 	case relaylink.EdgeTrace:
 		if m.Trace == nil {
 			return
 		}
-		method, body = relaylink.MethodWSCTrace, *m.Trace
+		method, body = n.Trace, *m.Trace
 	case relaylink.EdgeStats:
 		if m.Stats == nil {
 			return
 		}
-		method, body = relaylink.MethodWSCStats, *m.Stats
+		method, body = n.Stats, *m.Stats
 	default:
 		b.logf("wsc bridge: unknown message %q from the edge", m.T)
 		return

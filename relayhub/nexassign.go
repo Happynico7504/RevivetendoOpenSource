@@ -72,8 +72,8 @@ func readDotEnv(path string) map[string]string {
 func LoadNexGames(root string, getenv func(string) string) map[string]relaylink.NexGame {
 	out := map[string]relaylink.NexGame{}
 	for name, g := range relaylink.NexGameDefaults() {
-		if name == relaylink.WSCEdgeGame {
-			continue // derived per relay from wsc (see edgeGame), never configured on its own
+		if isEdgeVariant(name) {
+			continue // derived per relay from its base game (see edgeGame), never configured on its own
 		}
 		env := readDotEnv(filepath.Join(root, nexAuthDirs[name], ".env"))
 		hostKey, portKey := "SECURE_SERVER_LOCATION", "SECURE_SERVER_PORT"
@@ -222,9 +222,10 @@ type NexAssigner struct {
 	// Logf receives the hub's own diagnostics (why a relay's credential pull was refused).
 	Logf      func(string, ...any)
 	ForcePIDs func() map[uint32]bool
-	// EdgePIDs, if set, returns the WSC consoles (or ForceAll) whose session should be
-	// terminated on the relay by the WSC edge instead of going to the main's secure server.
-	EdgePIDs func() map[uint32]bool
+	// EdgeLists maps a game with an edge (relaylink.EdgeVariants: "wsc", "wiiu-chat") to a function
+	// returning the consoles (or ForceAll) whose session should be terminated on the relay by that
+	// game's edge instead of going to the main's secure server.
+	EdgeLists map[string]func() map[uint32]bool
 
 	mu       sync.Mutex
 	hello    map[string]map[string]bool // relay id -> games it hosts
@@ -258,8 +259,8 @@ func (a *NexAssigner) Register() {
 
 // edgeGame builds the wsc-edge configuration for one relay: its own IPv4 address is the
 // secure server. Not available until WSC itself is configured.
-func (a *NexAssigner) edgeGame(ctx context.Context, cfg map[string]relaylink.NexGame, relayID string) (relaylink.NexGame, bool) {
-	wsc, ok := cfg[relaylink.WSCEdgeBase]
+func (a *NexAssigner) edgeGame(ctx context.Context, cfg map[string]relaylink.NexGame, relayID string, v relaylink.EdgeVariant) (relaylink.NexGame, bool) {
+	base, ok := cfg[v.Base]
 	if !ok {
 		return relaylink.NexGame{}, false
 	}
@@ -273,7 +274,7 @@ func (a *NexAssigner) edgeGame(ctx context.Context, cfg map[string]relaylink.Nex
 			if err != nil {
 				return relaylink.NexGame{}, false
 			}
-			return relaylink.EdgeGame(wsc, host), true
+			return relaylink.DeriveEdgeGame(v, base, host), true
 		}
 	}
 	return relaylink.NexGame{}, false
@@ -291,11 +292,16 @@ func (a *NexAssigner) handleHello(ctx context.Context, relayID string, body []by
 		if g, ok := cfg[name]; ok {
 			resp.Games = append(resp.Games, g)
 			hosted[name] = true
-		} else if name == relaylink.WSCEdgeGame {
-			// Derived per relay: WSC's configuration with the relay itself as secure server.
-			if g, ok := a.edgeGame(ctx, cfg, relayID); ok {
-				resp.Games = append(resp.Games, g)
-				hosted[name] = true
+		} else if isEdgeVariant(name) {
+			// Derived per relay: the base game's configuration with the relay itself as secure server.
+			for _, v := range relaylink.EdgeVariants {
+				if v.Name != name {
+					continue
+				}
+				if g, ok := a.edgeGame(ctx, cfg, relayID, v); ok {
+					resp.Games = append(resp.Games, g)
+					hosted[name] = true
+				}
 			}
 		}
 	}
@@ -447,10 +453,12 @@ func (a *NexAssigner) Assign(ctx context.Context, req AssignRequest) (*AssignRes
 	// is healthy, so this falls back to plain WSC auth whenever no edge is available.
 	name, port := req.Game, game.Port
 	var cands []*Relay
-	if req.Game == relaylink.WSCEdgeBase && a.EdgePIDs != nil {
-		if m := a.EdgePIDs(); m[req.PID] || m[ForceAll] {
-			if c := pick(relaylink.WSCEdgeGame); len(c) > 0 {
-				cands, name, port = c, relaylink.WSCEdgeGame, relaylink.NexGameDefaults()[relaylink.WSCEdgeGame].Port
+	if v, ok := relaylink.EdgeVariants[req.Game]; ok {
+		if list := a.EdgeLists[req.Game]; list != nil {
+			if m := list(); m[req.PID] || m[ForceAll] {
+				if c := pick(v.Name); len(c) > 0 {
+					cands, name, port = c, v.Name, relaylink.NexGameDefaults()[v.Name].Port
+				}
 			}
 		}
 	}
@@ -492,4 +500,14 @@ func (a *NexAssigner) Assign(ctx context.Context, req AssignRequest) (*AssignRes
 	a.assigned[asKey(name, req.PID)] = assignment{relayID: best.ID, password: req.Password, expires: now.Add(AssignTTL)}
 	a.mu.Unlock()
 	return &AssignResult{Relay: best.ID, Host: host, Port: port, Game: name}, nil
+}
+
+// isEdgeVariant reports whether a game name is a derived edge auth variant (wsc-edge, wiiu-chat-edge).
+func isEdgeVariant(name string) bool {
+	for _, v := range relaylink.EdgeVariants {
+		if v.Name == name {
+			return true
+		}
+	}
+	return false
 }

@@ -170,6 +170,7 @@ func cmdServe(args []string) {
 	listen := fs.String("listen", "0.0.0.0:7777", "relay API listen address")
 	internal := fs.String("internal", "127.0.0.1:9401", "local-only invalidation endpoint")
 	wscEdge := fs.String("wsc-edge", "http://127.0.0.1:9451", "wsc-secure's edge endpoint for relay-terminated WSC sessions (empty = off)")
+	wucEdge := fs.String("wuc-edge", "http://127.0.0.1:9452", "wiiu-chat's edge endpoint for relay-terminated Wii U Chat sessions (empty = off)")
 	keyPath := fs.String("key", defaultKeyPath(), "main RSA private key")
 	envFile := fs.String("env", "../wiiu-chat-secure/.env", "env file with PN_WUC_POSTGRES_URI")
 	redisAddr := fs.String("redis", "127.0.0.1:6379", "Redis for replay protection")
@@ -235,24 +236,11 @@ func cmdServe(args []string) {
 				ftime  time.Time
 			)
 			forcePath := filepath.Join(filepath.Dir(*keyPath), "nex-force-pids")
-			// ~/.relayhub/wsc-edge-pids: WSC consoles whose session is terminated on the relay
-			// (the WSC edge). Same format and reload behaviour; empty or missing = nobody.
-			var (
-				emu    sync.Mutex
-				ecache map[uint32]bool
-				etime  time.Time
-			)
-			edgePath := filepath.Join(filepath.Dir(*keyPath), "wsc-edge-pids")
 			assigner = &relayhub.NexAssigner{
 				Streams: streams, Registry: reg, Geo: geo, Logf: log.Printf,
-				EdgePIDs: func() map[uint32]bool {
-					emu.Lock()
-					defer emu.Unlock()
-					if ecache == nil || time.Since(etime) > 5*time.Second {
-						raw, _ := os.ReadFile(edgePath)
-						ecache, etime = relayhub.ParseForcePIDs(string(raw)), time.Now()
-					}
-					return ecache
+				EdgeLists: map[string]func() map[uint32]bool{
+					relaylink.WSCEdgeBase: edgeList(filepath.Join(filepath.Dir(*keyPath), "wsc-edge-pids")),
+					relaylink.WUCEdgeBase: edgeList(filepath.Join(filepath.Dir(*keyPath), "wuc-edge-pids")),
 				},
 				ForcePIDs: func() map[uint32]bool {
 					fmu.Lock()
@@ -287,6 +275,12 @@ func cmdServe(args []string) {
 	if *wscEdge != "" {
 		edge = &relayhub.EdgeBridge{Streams: streams, Main: *wscEdge, Logf: log.Printf}
 		edge.Register()
+	}
+	// The same for Wii U Chat: its own stream methods (wuc.*) and its own session table.
+	var chatEdge *relayhub.EdgeBridge
+	if *wucEdge != "" {
+		chatEdge = &relayhub.EdgeBridge{Streams: streams, Main: *wucEdge, Names: relaylink.WUCEdgeNames, Logf: log.Printf}
+		chatEdge.Register()
 	}
 	if *streamListen != "" {
 		sln, err := net.Listen("tcp", *streamListen)
@@ -324,6 +318,9 @@ func cmdServe(args []string) {
 		})
 		if edge != nil {
 			mux.HandleFunc("/edge/out", edge.Out)
+		}
+		if chatEdge != nil {
+			mux.HandleFunc("/wuc-edge/out", chatEdge.Out)
 		}
 		mux.HandleFunc("/invalidate", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
@@ -721,4 +718,24 @@ func cmdStreamPing(args []string) {
 	}
 	time.Sleep(1500 * time.Millisecond)
 	fmt.Printf("heartbeat RTT (smoothed): %v   best: %v\n", sc.RTT().Round(10*time.Microsecond), sc.RTTMin().Round(10*time.Microsecond))
+}
+
+// edgeList returns a function reading a file of consoles (PIDs or "*", "#" comments) whose sessions
+// are terminated on a relay by a game's edge. Re-read every few seconds, so it can be changed or
+// deleted without restarting the hub; a missing or empty file means nobody.
+func edgeList(path string) func() map[uint32]bool {
+	var (
+		mu    sync.Mutex
+		cache map[uint32]bool
+		at    time.Time
+	)
+	return func() map[uint32]bool {
+		mu.Lock()
+		defer mu.Unlock()
+		if cache == nil || time.Since(at) > 5*time.Second {
+			raw, _ := os.ReadFile(path)
+			cache, at = relayhub.ParseForcePIDs(string(raw)), time.Now()
+		}
+		return cache
+	}
 }

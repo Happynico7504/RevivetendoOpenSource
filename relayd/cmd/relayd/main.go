@@ -17,7 +17,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sync/atomic"
+	"sort"
+	"sync"
 	"syscall"
 	"time"
 
@@ -133,15 +134,16 @@ func main() {
 
 	// The WSC edge child talks to the main through the stream, so its bridge exists only
 	// when the edge component is configured and the stream is on.
-	// edgeHealthy is true while the WSC edge child is up and proven; only then does this relay
+	// healthyEdges[variant] is true while that edge child is up and proven; only then does this relay
 	// offer the wsc-edge auth variant to the main, so a console is never sent to a dead edge.
-	var edgeHealthy atomic.Bool
-	var rehello func() // sends the hello again (set once the stream exists)
+	var healthyMu sync.Mutex
+	healthyEdges := map[string]bool{} // variant name -> its edge is up and proven
+	var rehello func()                // sends the hello again (set once the stream exists)
 	var nexSup *relayd.NexSupervisor
-	var wscBridge *relayd.WSCBridge
+	bridges := map[string]*relayd.WSCBridge{} // one per edge component, keyed by component name
 	for _, c := range cfg.Components {
-		if c.Name == "wscedge" && !c.Disabled && !cfg.StreamDisabled {
-			wscBridge = &relayd.WSCBridge{Logf: log.Printf}
+		if spec, ok := relayd.KnownEdges[c.Name]; ok && !c.Disabled && !cfg.StreamDisabled {
+			bridges[c.Name] = &relayd.WSCBridge{Logf: log.Printf, Names: spec.Names}
 		}
 	}
 
@@ -159,9 +161,11 @@ func main() {
 		var stream *relayd.StreamClient
 		handlers := relaylink.StreamHandlers{
 			Event: func(_ *relaylink.StreamConn, topic string, body []byte) {
-				if topic == relaylink.TopicWSCOut && wscBridge != nil { // an RMC message for an edge player
-					wscBridge.DeliverOut(body)
-					return
+				for _, b := range bridges { // an RMC message for an edge player
+					if topic == b.EdgeNames().Out {
+						b.DeliverOut(body)
+						return
+					}
 				}
 				if topic == "invalidate" && fetcher != nil { // instant cache invalidation from the main
 					var m struct {
@@ -213,9 +217,14 @@ func main() {
 			hctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
 			names := append([]string(nil), cfg.NexAuth...)
-			if edgeHealthy.Load() {
-				names = append(names, relaylink.WSCEdgeGame)
+			healthyMu.Lock()
+			for _, v := range relaylink.EdgeVariants {
+				if healthyEdges[v.Name] {
+					names = append(names, v.Name)
+				}
 			}
+			healthyMu.Unlock()
+			sort.Strings(names[len(cfg.NexAuth):]) // stable order for the hub's logs
 			body, _ := json.Marshal(relaylink.NexHelloRequest{Games: names})
 			out, err := c.Call(hctx, relaylink.MethodNexHello, body)
 			if err != nil {
@@ -230,16 +239,16 @@ func main() {
 			log.Printf("nex: the main configured %d of %d requested games", len(resp.Games), len(names))
 			nexSup.SetGames(resp.Games)
 		}
-		if wscBridge != nil {
-			wscBridge.Call = func(cctx context.Context, method string, body []byte) ([]byte, error) {
+		for _, b := range bridges {
+			b.Call = func(cctx context.Context, method string, body []byte) ([]byte, error) {
 				return stream.Call(cctx, method, body)
 			}
 		}
 		stream = &relayd.StreamClient{
 			Client: client, Addr: addr, Logf: log.Printf, Handlers: handlers,
 			OnDown: func(error) {
-				if wscBridge != nil {
-					wscBridge.StreamDown() // the main closes our players when the stream drops
+				for _, b := range bridges {
+					b.StreamDown() // the main closes our players when the stream drops
 				}
 			},
 			OnUp: func(c *relaylink.StreamConn) {
@@ -291,9 +300,11 @@ func main() {
 		}
 		go upd.Run(ctx, every, first)
 	}
-	startComponents(ctx, cfg, client, bundle, wscBridge, edgeCoupling{
-		nex: nexSup, healthy: func(h bool) {
-			edgeHealthy.Store(h)
+	startComponents(ctx, cfg, client, bundle, bridges, edgeCoupling{
+		nex: nexSup, healthy: func(variant string, h bool) {
+			healthyMu.Lock()
+			healthyEdges[variant] = h
+			healthyMu.Unlock()
 			if rehello != nil {
 				rehello()
 			}

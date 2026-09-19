@@ -110,7 +110,7 @@ func (b *PipeBackend) Open(pid uint32, ip string, port int) error {
 }
 
 func (b *PipeBackend) Handle(c Call) error {
-	return b.request(relaylink.EdgePipeMsg{T: relaylink.EdgeRMC, PID: c.PID, Call: c.CallID, Proto: c.Protocol, Custom: c.Custom, Method: c.Method, Params: c.Params})
+	return b.request(relaylink.EdgePipeMsg{T: relaylink.EdgeRMC, PID: c.PID, Call: c.CallID, Proto: uint16(c.Protocol), Custom: c.Custom, Method: c.Method, Params: c.Params})
 }
 
 func (b *PipeBackend) Close(pid uint32) {

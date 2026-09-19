@@ -413,7 +413,7 @@ func TestListedConsolesAreSentToTheEdgeAuthAndOthersAreNot(t *testing.T) {
 	r := newNexRig(t)
 	us := r.connectRelay(t, "us-1", "wsc", relaylink.WSCEdgeGame)
 	edgeList := map[uint32]bool{1435853600: true}
-	r.assigner.EdgePIDs = func() map[uint32]bool { return edgeList }
+	r.assigner.EdgeLists = map[string]func() map[uint32]bool{"wsc": func() map[uint32]bool { return edgeList }}
 	r.assigner.ForcePIDs = func() map[uint32]bool { return map[uint32]bool{ForceAll: true} } // relay for every region
 
 	res, err := assign(r, "wsc", 1435853600, ipDE)
@@ -442,7 +442,7 @@ func TestListedConsolesAreSentToTheEdgeAuthAndOthersAreNot(t *testing.T) {
 func TestEdgeListedConsoleFallsBackToPlainAuthWhenNoRelayOffersTheEdge(t *testing.T) {
 	r := newNexRig(t)
 	r.connectRelay(t, "us-1", "wsc") // hosts wsc but has NOT announced the edge (its edge is down)
-	r.assigner.EdgePIDs = func() map[uint32]bool { return map[uint32]bool{ForceAll: true} }
+	r.assigner.EdgeLists = map[string]func() map[uint32]bool{"wsc": func() map[uint32]bool { return map[uint32]bool{ForceAll: true} }}
 	res, err := assign(r, "wsc", 5, ipUS)
 	if err != nil || res.Game != "wsc" || res.Port != 60014 {
 		t.Fatalf("no edge offered: %+v %v", res, err)
@@ -452,7 +452,7 @@ func TestEdgeListedConsoleFallsBackToPlainAuthWhenNoRelayOffersTheEdge(t *testin
 func TestEdgeCredentialIsScopedToTheEdgeGame(t *testing.T) {
 	r := newNexRig(t)
 	r.connectRelay(t, "us-1", "wsc", relaylink.WSCEdgeGame)
-	r.assigner.EdgePIDs = func() map[uint32]bool { return map[uint32]bool{100: true} }
+	r.assigner.EdgeLists = map[string]func() map[uint32]bool{"wsc": func() map[uint32]bool { return map[uint32]bool{100: true} }}
 	if res, err := assign(r, "wsc", 100, ipUS); err != nil || res.Game != relaylink.WSCEdgeGame {
 		t.Fatalf("%+v %v", res, err)
 	}
@@ -539,5 +539,71 @@ func TestWiiUChatIsOfferedOnlyOnceTheMainSharesItsKerberosPassword(t *testing.T)
 	if g.SecureHost != "45.157.178.35" || g.SecurePort != "60005" || g.KerberosPassword != "shared-secret" ||
 		g.Port != 60004 || g.AccessKey != "e7a47214" || g.NEXMajor != 3 || g.NEXMinor != 3 || g.NEXPatch != 2 || g.GameServerID != "1005A000" {
 		t.Fatalf("wiiu-chat configuration: %+v", g)
+	}
+}
+
+func testChatGames() map[string]relaylink.NexGame {
+	out := testGames()
+	x := relaylink.NexGameDefaults()["wiiu-chat"]
+	x.SecureHost, x.SecurePort, x.KerberosPassword = "45.157.178.35", "60005", "kerb-wuc"
+	out["wiiu-chat"] = x
+	return out
+}
+
+func TestChatEdgeVariantIsDerivedAndRoutedIndependentlyOfWSC(t *testing.T) {
+	r := newNexRig(t)
+	r.assigner.Games = testChatGames
+	us := r.connectRelay(t, "us-1", "wsc", "wiiu-chat", relaylink.WUCEdgeGame) // announces the chat edge but NOT the wsc edge
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// hello: the chat edge is derived from wiiu-chat's own configuration, with the relay as secure server.
+	out, err := us.conn.Call(ctx, relaylink.MethodNexHello, mustJSON(relaylink.NexHelloRequest{Games: []string{"wsc", "wiiu-chat", relaylink.WUCEdgeGame}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var resp relaylink.NexHelloResponse
+	json.Unmarshal(out, &resp)
+	if len(resp.Games) != 3 || resp.Games[0].Name != "wiiu-chat" || resp.Games[1].Name != relaylink.WUCEdgeGame || resp.Games[2].Name != "wsc" {
+		t.Fatalf("hello games: %+v", resp.Games)
+	}
+	e := resp.Games[1]
+	if e.KerberosPassword != "kerb-wuc" || e.SecureHost != "203.0.113.5" || e.SecurePort != "60005" || e.Port != 60104 || e.AccessKey != "e7a47214" {
+		t.Fatalf("derived chat edge: %+v", e)
+	}
+
+	// Lists are per game: listing a console for the chat edge does not route its WSC login there.
+	r.assigner.EdgeLists = map[string]func() map[uint32]bool{"wiiu-chat": func() map[uint32]bool { return map[uint32]bool{77: true} }}
+	res, err := assign(r, "wiiu-chat", 77, ipUS)
+	if err != nil || res.Game != relaylink.WUCEdgeGame || res.Port != 60104 || res.Host != "203.0.113.5" {
+		t.Fatalf("listed for the chat edge: %+v %v", res, err)
+	}
+	if res, err := assign(r, "wsc", 77, ipUS); err != nil || res.Game != "wsc" || res.Port != 60014 {
+		t.Fatalf("a chat-edge PID's WSC login moved: %+v %v", res, err)
+	}
+	if res, err := assign(r, "wiiu-chat", 78, ipUS); err != nil || res.Game != "wiiu-chat" || res.Port != 60004 {
+		t.Fatalf("an unlisted chat console: %+v %v", res, err)
+	}
+}
+
+func TestChatEdgeFallsBackToPlainAuthWhenTheEdgeIsNotOffered(t *testing.T) {
+	r := newNexRig(t)
+	r.assigner.Games = testChatGames
+	r.connectRelay(t, "us-1", "wiiu-chat") // its chat edge is down: it did not announce the variant
+	r.assigner.EdgeLists = map[string]func() map[uint32]bool{"wiiu-chat": func() map[uint32]bool { return map[uint32]bool{ForceAll: true} }}
+	if res, err := assign(r, "wiiu-chat", 5, ipUS); err != nil || res.Game != "wiiu-chat" || res.Port != 60004 {
+		t.Fatalf("no edge offered: %+v %v", res, err)
+	}
+}
+
+func TestEdgeVariantsAreNeverLoadedAsStandaloneGames(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, "wiiu-chat-secure"), 0o755)
+	os.WriteFile(filepath.Join(root, "wiiu-chat-secure", ".env"), []byte("PN_WUC_SECURE_SERVER_HOST=45.157.178.35\nPN_WUC_SECURE_SERVER_PORT=60005\n"), 0o600)
+	games := LoadNexGames(root, func(string) string { return "x" })
+	for name := range games {
+		if isEdgeVariant(name) {
+			t.Fatalf("edge variant %q loaded as a standalone game", name)
+		}
 	}
 }

@@ -399,3 +399,17 @@ func TestCredentialsGoToTheRightGamesChild(t *testing.T) {
 		t.Fatalf("%d children stored the credential, want exactly the mk8 one", n)
 	}
 }
+
+func TestSeveralListenersAreEachToldWhenTheConfigurationChanges(t *testing.T) {
+	s := &NexSupervisor{}
+	var first, second int
+	s.OnGames = func([]relaylink.NexGame) { first++ }
+	s.AddOnGames(func([]relaylink.NexGame) { second++ })
+	s.AddOnGames(func([]relaylink.NexGame) { second += 10 })
+	a := []relaylink.NexGame{{Name: "wsc", KerberosPassword: "one"}}
+	s.SetGames(a)
+	s.SetGames(append([]relaylink.NexGame(nil), a...)) // identical: nobody is told
+	if first != 1 || second != 11 {
+		t.Fatalf("listeners called: first %d, others %d (want 1 and 11)", first, second)
+	}
+}

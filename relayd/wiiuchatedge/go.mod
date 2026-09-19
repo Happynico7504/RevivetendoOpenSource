@@ -4,7 +4,10 @@ go 1.23.0
 
 toolchain go1.23.4
 
-require github.com/PretendoNetwork/nex-go/v2 v2.3.1
+require (
+	github.com/Happynico7504/relaylink v0.0.0
+	github.com/PretendoNetwork/nex-go/v2 v2.3.1
+)
 
 require (
 	github.com/PretendoNetwork/plogger-go v1.0.4 // indirect
@@ -31,3 +34,9 @@ require (
 	golang.org/x/term v0.28.0 // indirect
 	google.golang.org/protobuf v1.36.8 // indirect
 )
+
+// The stock v2 library plus edge hooks (OutHook, RTT accessor, virtual connections): see
+// nexgo2/edge_hooks.go and the two small edits marked in prudp_connection.go / prudp_server.go.
+replace github.com/PretendoNetwork/nex-go/v2 => ./nexgo2
+
+replace github.com/Happynico7504/relaylink => ../../relaylink

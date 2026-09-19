@@ -24,7 +24,7 @@ type WSCOpen struct {
 type WSCRMC struct {
 	PID    uint32 `json:"pid"`
 	Call   uint32 `json:"call"`
-	Proto  uint8  `json:"proto"`
+	Proto  uint16 `json:"proto"`
 	Custom uint16 `json:"custom,omitempty"` // the 16-bit protocol id that follows proto 0x7f (WSC's club protocol is 0x83)
 	Method uint32 `json:"method"`
 	Params []byte `json:"params"`
@@ -83,7 +83,7 @@ type EdgePipeMsg struct {
 	IP      string    `json:"ip,omitempty"`
 	Port    int       `json:"port,omitempty"`
 	Call    uint32    `json:"call,omitempty"`
-	Proto   uint8     `json:"proto,omitempty"`
+	Proto   uint16    `json:"proto,omitempty"`
 	Custom  uint16    `json:"custom,omitempty"`
 	Method  uint32    `json:"method,omitempty"`
 	Params  []byte    `json:"params,omitempty"`
@@ -105,4 +105,23 @@ const (
 	EdgeAck   = "ack"
 	EdgeOut   = "out"
 	EdgeReset = "reset"
+)
+
+// EdgeNames are the stream method and topic names of one edge. WSC's keep their original names
+// ("wsc.open" ...); Wii U Chat's use the prefix "wuc" so both edges can share a relay and a hub.
+type EdgeNames struct {
+	Open, RMC, Alive, Close, Stats, Trace, Out string
+}
+
+// EdgeNamesFor builds the names for a prefix.
+func EdgeNamesFor(prefix string) EdgeNames {
+	return EdgeNames{
+		Open: prefix + ".open", RMC: prefix + ".rmc", Alive: prefix + ".alive", Close: prefix + ".close",
+		Stats: prefix + ".stats", Trace: prefix + ".trace", Out: prefix + ".out",
+	}
+}
+
+var (
+	WSCEdgeNames = EdgeNamesFor("wsc")
+	WUCEdgeNames = EdgeNamesFor("wuc")
 )

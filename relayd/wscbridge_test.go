@@ -247,3 +247,38 @@ func TestBridgeForwardsTracerouteOutput(t *testing.T) {
 		t.Fatalf("trace call: %+v", tr)
 	}
 }
+
+// Wii U Chat's bridge speaks the same pipe protocol but calls "wuc.*" methods, so both edges can share
+// one relay and one hub without their calls or players mixing.
+func TestChatBridgeCallsItsOwnMethods(t *testing.T) {
+	r := newBridgeRig(t)
+	r.b.Names = relaylink.WUCEdgeNames
+	r.send(relaylink.EdgePipeMsg{T: relaylink.EdgeOpen, ID: 1, PID: 42, IP: "1.2.3.4", Port: 5})
+	if ack := r.next(t); ack.Err != "" {
+		t.Fatalf("ack: %+v", ack)
+	}
+	r.send(relaylink.EdgePipeMsg{T: relaylink.EdgeRMC, ID: 2, PID: 42, Call: 1, Proto: 0x1234, Method: 3})
+	r.next(t)
+	if r.called(relaylink.WUCEdgeNames.Open) == nil || r.called(relaylink.WUCEdgeNames.RMC) == nil {
+		t.Fatal("the chat bridge did not call wuc.open / wuc.rmc")
+	}
+	if r.called(relaylink.MethodWSCOpen) != nil || r.called(relaylink.MethodWSCRMC) != nil {
+		t.Fatal("the chat bridge called WSC's methods")
+	}
+	// A 16-bit protocol id (Wii U Chat's nex-go v2) survives the trip.
+	var rmc relaylink.WSCRMC
+	json.Unmarshal(r.called(relaylink.WUCEdgeNames.RMC).body, &rmc)
+	if rmc.Proto != 0x1234 {
+		t.Fatalf("protocol id %#x", rmc.Proto)
+	}
+}
+
+func TestKnownEdgesAreDistinct(t *testing.T) {
+	w, c := KnownEdges["wscedge"], KnownEdges["wiiuchatedge"]
+	if w.Variant.Name == c.Variant.Name || w.Names.Open == c.Names.Open || w.SecretEnv == c.SecretEnv {
+		t.Fatalf("edges overlap: %+v vs %+v", w, c)
+	}
+	if w.Variant.Base != "wsc" || c.Variant.Base != "wiiu-chat" || c.SecretEnv != "PN_WUC_KERBEROS_PASSWORD" {
+		t.Fatalf("edge specs: %+v %+v", w, c)
+	}
+}

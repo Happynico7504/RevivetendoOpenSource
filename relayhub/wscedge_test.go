@@ -125,7 +125,7 @@ func TestEdgeBridgeSessionLifecycle(t *testing.T) {
 	if open["relay"] != "us-1" || open["pid"] != float64(42) || open["ip"] != "1.2.3.4" {
 		t.Fatalf("open reached the main as %v", open)
 	}
-	if id, ok := r.st.hub.RelayFor(42); !ok || id != "us-1" {
+	if id, ok := r.bridge.RelayFor(42); !ok || id != "us-1" {
 		t.Fatalf("presence: %q %v", id, ok)
 	}
 
@@ -163,7 +163,7 @@ func TestEdgeBridgeSessionLifecycle(t *testing.T) {
 	if err := r.callErr(relaylink.MethodWSCClose, relaylink.WSCClose{PID: 42}); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := r.st.hub.RelayFor(42); ok {
+	if _, ok := r.bridge.RelayFor(42); ok {
 		t.Fatal("player still present after close")
 	}
 	if code := r.postOut(42, []byte("late")); code != http.StatusNotFound {
@@ -179,7 +179,7 @@ func TestEdgeBridgeRefusedOpenLeavesNoPresence(t *testing.T) {
 	if err := r.callErr(relaylink.MethodWSCOpen, relaylink.WSCOpen{PID: 5, IP: "1.1.1.1", Port: 1}); err == nil {
 		t.Fatal("open succeeded although the main refused it")
 	}
-	if _, ok := r.st.hub.RelayFor(5); ok {
+	if _, ok := r.bridge.RelayFor(5); ok {
 		t.Fatal("presence recorded for a refused session")
 	}
 }
@@ -214,7 +214,7 @@ func TestEdgeBridgeClosesAllPlayersWhenTheRelayDrops(t *testing.T) {
 		return n == 3
 	})
 	for _, pid := range []uint32{10, 11, 12} {
-		if _, ok := r.st.hub.RelayFor(pid); ok {
+		if _, ok := r.bridge.RelayFor(pid); ok {
 			t.Fatalf("pid %d still present after the relay dropped", pid)
 		}
 	}
@@ -257,5 +257,50 @@ func TestEdgeBridgeForwardsTracerouteToTheMain(t *testing.T) {
 	m := r.main.last("trace")
 	if m["relay"] != "us-1" || m["pid"] != float64(42) || m["reason"] != "loss=40%" || m["output"] != "traceroute to 1.2.3.4\n" {
 		t.Fatalf("trace reached the main as %v", m)
+	}
+}
+
+// One player can be in WSC and Wii U Chat at the same time (through different relays even): each
+// edge's bridge keeps its own session table, so closing one session never removes the other.
+func TestTwoEdgeBridgesKeepIndependentSessionsForTheSamePlayer(t *testing.T) {
+	st := newStreamStack(t, relaylink.StreamOptions{})
+	wsc, chat := &fakeMain{status: map[string]int{}}, &fakeMain{status: map[string]int{}}
+	wscSrv, chatSrv := httptest.NewServer(wsc), httptest.NewServer(chat)
+	t.Cleanup(wscSrv.Close)
+	t.Cleanup(chatSrv.Close)
+	wb := &EdgeBridge{Streams: st.hub, Main: wscSrv.URL}
+	cb := &EdgeBridge{Streams: st.hub, Main: chatSrv.URL, Names: relaylink.WUCEdgeNames}
+	wb.Register()
+	cb.Register()
+	conn := st.connect(t, relaylink.StreamHandlers{})
+	call := func(method string, v any) error {
+		b, _ := json.Marshal(v)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_, err := conn.Call(ctx, method, b)
+		return err
+	}
+
+	if err := call(relaylink.WSCEdgeNames.Open, relaylink.WSCOpen{PID: 42, IP: "1.1.1.1", Port: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := call(relaylink.WUCEdgeNames.Open, relaylink.WSCOpen{PID: 42, IP: "1.1.1.1", Port: 2}); err != nil {
+		t.Fatal(err)
+	}
+	// Each open reached only its own game server.
+	if got := wsc.last("open")["port"]; got != float64(1) {
+		t.Fatalf("wsc server saw %v", got)
+	}
+	if got := chat.last("open")["port"]; got != float64(2) {
+		t.Fatalf("chat server saw %v", got)
+	}
+	if err := call(relaylink.WUCEdgeNames.Close, relaylink.WSCClose{PID: 42}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cb.RelayFor(42); ok {
+		t.Fatal("chat session still recorded after its close")
+	}
+	if id, ok := wb.RelayFor(42); !ok || id != "us-1" {
+		t.Fatalf("closing the chat session removed the WSC one (%q %v)", id, ok)
 	}
 }

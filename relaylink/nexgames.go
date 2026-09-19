@@ -22,16 +22,41 @@ const (
 	WSCEdgeSecurePort = "60015"    // where the edge listens: the same port wsc-secure uses on the main
 )
 
-// EdgeGame derives the wsc-edge configuration from WSC's: same access key, NEX version and
-// Kerberos secret (the edge decrypts the tickets the auth server issues), but consoles are
-// sent to secureHost, the relay.
-func EdgeGame(wsc NexGame, secureHost string) NexGame {
-	g := NexGameDefaults()[WSCEdgeGame]
-	g.GameServerID, g.AccessKey, g.BuildName = wsc.GameServerID, wsc.AccessKey, wsc.BuildName
-	g.NEXMajor, g.NEXMinor, g.NEXPatch = wsc.NEXMajor, wsc.NEXMinor, wsc.NEXPatch
-	g.KerberosPassword = wsc.KerberosPassword
-	g.SecureHost, g.SecurePort = secureHost, WSCEdgeSecurePort
+// The Wii U Chat edge auth variant, the counterpart of WSC's.
+const (
+	WUCEdgeGame       = "wiiu-chat-edge" // auth server whose secure server is the relay itself
+	WUCEdgeBase       = "wiiu-chat"      // the game whose configuration it is derived from
+	WUCEdgeSecurePort = "60005"          // where the edge listens: the same port wiiu-chat uses on the main
+)
+
+// EdgeVariant describes an auth variant that hands consoles to a relay's edge instead of the main.
+type EdgeVariant struct {
+	Name       string // the derived game, e.g. "wsc-edge"
+	Base       string // the game it is derived from, e.g. "wsc"
+	SecurePort string // the port the edge listens on
+}
+
+// EdgeVariants lists every edge variant, keyed by the game it serves.
+var EdgeVariants = map[string]EdgeVariant{
+	WSCEdgeBase: {Name: WSCEdgeGame, Base: WSCEdgeBase, SecurePort: WSCEdgeSecurePort},
+	WUCEdgeBase: {Name: WUCEdgeGame, Base: WUCEdgeBase, SecurePort: WUCEdgeSecurePort},
+}
+
+// DeriveEdgeGame derives an edge variant's configuration from its base game's: same access key, NEX
+// version and Kerberos secret (the edge decrypts the tickets the auth server issues), but consoles
+// are sent to secureHost, the relay.
+func DeriveEdgeGame(v EdgeVariant, base NexGame, secureHost string) NexGame {
+	g := NexGameDefaults()[v.Name]
+	g.GameServerID, g.AccessKey, g.BuildName = base.GameServerID, base.AccessKey, base.BuildName
+	g.NEXMajor, g.NEXMinor, g.NEXPatch = base.NEXMajor, base.NEXMinor, base.NEXPatch
+	g.KerberosPassword = base.KerberosPassword
+	g.SecureHost, g.SecurePort = secureHost, v.SecurePort
 	return g
+}
+
+// EdgeGame derives the wsc-edge configuration from WSC's (see DeriveEdgeGame).
+func EdgeGame(wsc NexGame, secureHost string) NexGame {
+	return DeriveEdgeGame(EdgeVariants[WSCEdgeBase], wsc, secureHost)
 }
 
 type NexGame struct {
@@ -61,7 +86,9 @@ func NexGameDefaults() map[string]NexGame {
 		WSCEdgeGame: {Name: WSCEdgeGame, GameServerID: "1012F100", Port: 60114, AccessKey: "4d324052", NEXMajor: 3, NEXMinor: 4, NEXPatch: 0, BuildName: "Pretendo WSC"},
 		// Wii U Chat: its auth and secure servers run in one process on the main (wiiu-chat) with
 		// NEX library version 3.3.2 and this access key; the auth server listens on 60004.
-		"wiiu-chat":    {Name: "wiiu-chat", GameServerID: "1005A000", Port: 60004, AccessKey: "e7a47214", NEXMajor: 3, NEXMinor: 3, NEXPatch: 2, BuildName: "Pretendo WiiU Chat Auth"},
+		"wiiu-chat": {Name: "wiiu-chat", GameServerID: "1005A000", Port: 60004, AccessKey: "e7a47214", NEXMajor: 3, NEXMinor: 3, NEXPatch: 2, BuildName: "Pretendo WiiU Chat Auth"},
+		// The Wii U Chat edge variant: Wii U Chat's auth with the relay itself as secure server.
+		WUCEdgeGame:    {Name: WUCEdgeGame, GameServerID: "1005A000", Port: 60104, AccessKey: "e7a47214", NEXMajor: 3, NEXMinor: 3, NEXPatch: 2, BuildName: "Pretendo WiiU Chat Auth"},
 		"badge-arcade": {Name: "badge-arcade", GameServerID: "00134600", Port: 60018, AccessKey: "82d5962d", NEXMajor: 3, NEXMinor: 7, NEXPatch: 16, BuildName: "Badge Arcade Auth"},
 	}
 }
