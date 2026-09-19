@@ -85,6 +85,16 @@ func (b *WSCBridge) handle(m relaylink.EdgePipeMsg) {
 		method, body = relaylink.MethodWSCAlive, relaylink.WSCAlive{PIDs: m.PIDs}
 	case relaylink.EdgeClose:
 		method, body = relaylink.MethodWSCClose, relaylink.WSCClose{PID: m.PID}
+	case relaylink.EdgeTrace:
+		if m.Trace == nil {
+			return
+		}
+		method, body = relaylink.MethodWSCTrace, *m.Trace
+	case relaylink.EdgeStats:
+		if m.Stats == nil {
+			return
+		}
+		method, body = relaylink.MethodWSCStats, *m.Stats
 	default:
 		b.logf("wsc bridge: unknown message %q from the edge", m.T)
 		return

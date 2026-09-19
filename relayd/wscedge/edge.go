@@ -13,6 +13,8 @@ import (
 	"time"
 
 	nex "github.com/PretendoNetwork/nex-go"
+
+	"github.com/Happynico7504/relaylink"
 )
 
 // Config mirrors wsc-secure's server settings exactly.
@@ -47,6 +49,10 @@ type Backend interface {
 	Handle(c Call) error
 	// Alive reports players heard from since the last call.
 	Alive(pids []uint32)
+	// Stats reports what the edge measured toward a player (see probe.go).
+	Stats(s relaylink.WSCStats)
+	// Trace reports a traceroute run toward a player.
+	Trace(t relaylink.WSCTrace)
 }
 
 // Edge is one running terminator.
@@ -55,9 +61,10 @@ type Edge struct {
 	backend Backend
 	srv     *nex.Server
 
-	mu      sync.Mutex
-	clients map[uint32]*nex.Client // pid -> live client
-	seen    map[uint32]struct{}    // players heard from since the last liveness report
+	mu        sync.Mutex
+	clients   map[uint32]*nex.Client // pid -> live client
+	seen      map[uint32]struct{}    // players heard from since the last liveness report
+	lastTrace map[uint32]time.Time   // last loss-triggered traceroute per player
 }
 
 func New(cfg Config, b Backend) *Edge {
@@ -104,6 +111,7 @@ func (e *Edge) Serve() {
 	srv.On("Data", e.onData)
 	srv.On("Packet", e.onPacket)
 	go e.reportAlive()
+	go e.probeLoop()
 
 	e.logf("wscedge: listening on :%d", e.cfg.Port)
 	srv.Listen(fmt.Sprintf(":%d", e.cfg.Port))
@@ -168,6 +176,10 @@ func (e *Edge) onConnect(packet *nex.PacketV1) {
 	client.UpdateRC4Key(sessionKey)
 	client.SetSessionKey(sessionKey)
 	e.logf("wscedge: connect PID=%d from %v", pid, client.Address())
+	if addr := client.Address(); addr != nil && addr.IP != nil {
+		// A path snapshot from the moment they connect, to compare a later degradation with.
+		e.traceAsync(pid, addr.IP.String(), "connect")
+	}
 }
 
 func (e *Edge) onDisconnect(packet *nex.PacketV1) {
@@ -299,6 +311,8 @@ type EchoBackend struct{ Edge *Edge }
 func (b *EchoBackend) Open(pid uint32, ip string, port int) error { return nil }
 func (b *EchoBackend) Close(pid uint32)                           {}
 func (b *EchoBackend) Alive(pids []uint32)                        {}
+func (b *EchoBackend) Stats(s relaylink.WSCStats)                 {}
+func (b *EchoBackend) Trace(t relaylink.WSCTrace)                 {}
 func (b *EchoBackend) Handle(c Call) error {
 	b.Edge.mu.Lock()
 	client := b.Edge.clients[c.PID]

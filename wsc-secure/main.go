@@ -861,16 +861,20 @@ func pingPlayerConnectivity() {
 	var lastTraceroute sync.Map // uint32 pid -> time.Time, cooldown so persistent loss doesn't spam traceroutes every cycle
 	for range ticker.C {
 		type target struct {
-			pid uint32
-			ip  string
+			pid    uint32
+			ip     string
+			client *nex.Client
 		}
 		var targets []target
 		connectedPIDs.Range(func(k, _ interface{}) bool {
 			pid := k.(uint32)
+			if _, viaEdge := edgeSessions.Load(pid); viaEdge {
+				return true // measured by the relay that holds the session (handleEdgeStats)
+			}
 			if v, ok := currentClient.Load(pid); ok {
 				if client, ok2 := v.(*nex.Client); ok2 {
 					if addr := client.Address(); addr != nil && addr.IP != nil {
-						targets = append(targets, target{pid: pid, ip: addr.IP.String()})
+						targets = append(targets, target{pid: pid, ip: addr.IP.String(), client: client})
 					}
 				}
 			}
@@ -880,7 +884,15 @@ func pingPlayerConnectivity() {
 			go func(t target) {
 				out, _ := exec.Command("ping", "-c", "5", "-W", "2", t.ip).CombinedOutput()
 				lossPct, avgRTT := parsePingOutput(string(out))
-				fmt.Printf("PlayerPing: PID=%d ip=%s loss=%s avgRTT=%s\n", t.pid, t.ip, lossPct, avgRTT)
+				fmt.Printf("PlayerPing: PID=%d ip=%s loss=%s avgRTT=%s via=direct\n", t.pid, t.ip, lossPct, avgRTT)
+				// The PRUDP acknowledgement round trip works even when the player's router
+				// drops ICMP, and is directly comparable with the edge's figure.
+				if sm, min, n := t.client.RTT(); n > 0 {
+					fmt.Printf("PlayerRTT: PID=%d ip=%s via=direct prudp=%.1fms min=%.1fms samples=%d\n", t.pid, t.ip,
+						float64(sm)/float64(time.Millisecond), float64(min)/float64(time.Millisecond), n)
+				} else {
+					fmt.Printf("PlayerRTT: PID=%d ip=%s via=direct prudp=? samples=0\n", t.pid, t.ip)
+				}
 
 				// Only chase actual loss with the much heavier traceroute (takes
 				// several seconds, one probe per hop), and only once every 5
@@ -906,7 +918,7 @@ func pingPlayerConnectivity() {
 // in its own goroutine, never inline on a packet-handling path.
 func runTraceroute(pid uint32, ip string, reason string) {
 	out, _ := exec.Command("traceroute", "-m", "15", "-w", "1", "-q", "1", ip).CombinedOutput()
-	fmt.Printf("PlayerTraceroute: PID=%d ip=%s reason=%s\n%s", pid, ip, reason, string(out))
+	fmt.Printf("PlayerTraceroute: PID=%d ip=%s reason=%s via=direct\n%s", pid, ip, reason, string(out))
 }
 
 // parsePingOutput pulls the packet-loss percentage and average RTT out of

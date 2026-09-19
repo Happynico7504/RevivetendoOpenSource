@@ -31,6 +31,9 @@ type Client struct {
 	connected                 bool
 	pendingMu                 sync.Mutex
 	pendingPackets            map[uint16]*pendingPacket
+	rttSmoothed               time.Duration // smoothed ack round trip time (RFC 6298 style, alpha 1/8)
+	rttMin                    time.Duration
+	rttSamples                int
 	outHook                   func(packet PacketInterface)
 }
 
@@ -104,7 +107,37 @@ func (client *Client) AcknowledgePending(sequenceID uint16) {
 	client.pendingMu.Lock()
 	defer client.pendingMu.Unlock()
 
+	client.sampleRTTLocked(sequenceID)
 	delete(client.pendingPackets, sequenceID)
+}
+
+// sampleRTTLocked records the round trip of an acknowledged packet. A packet that was ever
+// retransmitted is skipped: the ack could belong to either transmission (Karn's rule).
+// Caller holds pendingMu.
+func (client *Client) sampleRTTLocked(sequenceID uint16) {
+	p, ok := client.pendingPackets[sequenceID]
+	if !ok || p.retries != 0 {
+		return
+	}
+	sample := time.Since(p.sentAt)
+	if client.rttSamples == 0 {
+		client.rttSmoothed, client.rttMin = sample, sample
+	} else {
+		client.rttSmoothed += (sample - client.rttSmoothed) / 8
+		if sample < client.rttMin {
+			client.rttMin = sample
+		}
+	}
+	client.rttSamples++
+}
+
+// RTT reports the smoothed and minimum round trip time between sending a reliable packet
+// and receiving its acknowledgement, and how many samples that rests on (0 = none yet). It
+// works whatever the player's router does with ICMP.
+func (client *Client) RTT() (smoothed, min time.Duration, samples int) {
+	client.pendingMu.Lock()
+	defer client.pendingMu.Unlock()
+	return client.rttSmoothed, client.rttMin, client.rttSamples
 }
 
 // AcknowledgePendingUpTo removes every tracked packet whose sequence ID is <= base
@@ -114,6 +147,7 @@ func (client *Client) AcknowledgePendingUpTo(base uint16, additional []uint16) {
 	client.pendingMu.Lock()
 	defer client.pendingMu.Unlock()
 
+	client.sampleRTTLocked(base)
 	for seq := range client.pendingPackets {
 		if seq <= base {
 			delete(client.pendingPackets, seq)

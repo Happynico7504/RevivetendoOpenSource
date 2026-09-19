@@ -44,6 +44,8 @@ func (b *EdgeBridge) Register() {
 	b.Streams.HandleMethod(relaylink.MethodWSCRMC, b.method("rmc", false))
 	b.Streams.HandleMethod(relaylink.MethodWSCAlive, b.method("alive", false))
 	b.Streams.HandleMethod(relaylink.MethodWSCClose, b.method("close", false))
+	b.Streams.HandleMethod(relaylink.MethodWSCStats, b.method("stats", false))
+	b.Streams.HandleMethod(relaylink.MethodWSCTrace, b.method("trace", false))
 
 	prev := b.Streams.OnRelayDown
 	b.Streams.OnRelayDown = func(relayID string, pids []uint32) {

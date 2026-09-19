@@ -234,3 +234,28 @@ func TestEdgeBridgeReportsAnUnreachableMain(t *testing.T) {
 		t.Fatal("presence recorded without a main")
 	}
 }
+
+func TestEdgeBridgeForwardsStatsToTheMain(t *testing.T) {
+	r := newEdgeRig(t)
+	if err := r.callErr(relaylink.MethodWSCStats, relaylink.WSCStats{PID: 42, IP: "1.2.3.4", Loss: "0%", AvgRTT: "9ms", PRUDPRTTMs: 20.5, PRUDPMinMs: 18, Samples: 4}); err != nil {
+		t.Fatal(err)
+	}
+	m := r.main.last("stats")
+	if m["relay"] != "us-1" || m["pid"] != float64(42) || m["prudp_rtt_ms"] != 20.5 || m["samples"] != float64(4) || m["loss"] != "0%" {
+		t.Fatalf("stats reached the main as %v", m)
+	}
+	if err := r.callErr(relaylink.MethodWSCStats, map[string]any{"loss": "0%"}); err == nil {
+		t.Fatal("stats without a pid accepted")
+	}
+}
+
+func TestEdgeBridgeForwardsTracerouteToTheMain(t *testing.T) {
+	r := newEdgeRig(t)
+	if err := r.callErr(relaylink.MethodWSCTrace, relaylink.WSCTrace{PID: 42, IP: "1.2.3.4", Reason: "loss=40%", Output: "traceroute to 1.2.3.4\n"}); err != nil {
+		t.Fatal(err)
+	}
+	m := r.main.last("trace")
+	if m["relay"] != "us-1" || m["pid"] != float64(42) || m["reason"] != "loss=40%" || m["output"] != "traceroute to 1.2.3.4\n" {
+		t.Fatalf("trace reached the main as %v", m)
+	}
+}

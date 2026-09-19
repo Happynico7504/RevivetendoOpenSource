@@ -117,6 +117,14 @@ func (b *PipeBackend) Close(pid uint32) {
 	b.send(relaylink.EdgePipeMsg{T: relaylink.EdgeClose, PID: pid})
 }
 
+func (b *PipeBackend) Stats(s relaylink.WSCStats) {
+	b.send(relaylink.EdgePipeMsg{T: relaylink.EdgeStats, PID: s.PID, Stats: &s})
+}
+
+func (b *PipeBackend) Trace(t relaylink.WSCTrace) {
+	b.send(relaylink.EdgePipeMsg{T: relaylink.EdgeTrace, PID: t.PID, Trace: &t})
+}
+
 func (b *PipeBackend) Alive(pids []uint32) {
 	b.send(relaylink.EdgePipeMsg{T: relaylink.EdgeAlive, PIDs: pids})
 }

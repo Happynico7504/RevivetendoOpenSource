@@ -66,6 +66,8 @@ func startEdgeServer() {
 	mux.HandleFunc("/edge/rmc", edgeHandler(handleEdgeRMC))
 	mux.HandleFunc("/edge/alive", edgeHandler(handleEdgeAlive))
 	mux.HandleFunc("/edge/close", edgeHandler(handleEdgeClose))
+	mux.HandleFunc("/edge/stats", edgeHandler(handleEdgeStats))
+	mux.HandleFunc("/edge/trace", edgeHandler(handleEdgeTrace))
 	fmt.Printf("Edge: accepting relay-terminated sessions on %s (hub %s)\n", addr, edgeHubURL)
 	go edgeJanitor()
 	go func() {
@@ -86,6 +88,16 @@ type edgeMsg struct {
 	Method uint32   `json:"method"`
 	Params []byte   `json:"params"`
 	PIDs   []uint32 `json:"pids"`
+
+	// connectivity measurements taken on the relay (see relaylink.WSCStats)
+	Loss       string  `json:"loss"`
+	AvgRTT     string  `json:"avg_rtt"`
+	PRUDPRTTMs float64 `json:"prudp_rtt_ms"`
+	PRUDPMinMs float64 `json:"prudp_min_ms"`
+	Samples    int     `json:"samples"`
+
+	Reason string `json:"reason"` // traceroute trigger
+	Output string `json:"output"` // traceroute output
 }
 
 func edgeHandler(fn func(m *edgeMsg) error) http.HandlerFunc {
@@ -272,4 +284,33 @@ func edgeJanitor() {
 			return true
 		})
 	}
+}
+
+// handleEdgeStats logs what a relay measured toward one of its players, in the same
+// "PlayerPing"/"PlayerRTT" lines the direct path produces (tagged via=edge:<relay>), so one
+// grep compares both. ICMP from the main would measure the wrong path for these players.
+func handleEdgeStats(m *edgeMsg) error {
+	v, ok := edgeSessions.Load(m.PID)
+	if !ok || v.(*edgeSession).relay != m.Relay {
+		return fmt.Errorf("no edge session for pid %d on relay %s", m.PID, m.Relay)
+	}
+	via := "edge:" + m.Relay
+	fmt.Printf("PlayerPing: PID=%d ip=%s loss=%s avgRTT=%s via=%s\n", m.PID, m.IP, m.Loss, m.AvgRTT, via)
+	if m.Samples == 0 {
+		fmt.Printf("PlayerRTT: PID=%d ip=%s via=%s prudp=? samples=0\n", m.PID, m.IP, via)
+	} else {
+		fmt.Printf("PlayerRTT: PID=%d ip=%s via=%s prudp=%.1fms min=%.1fms samples=%d\n", m.PID, m.IP, via, m.PRUDPRTTMs, m.PRUDPMinMs, m.Samples)
+	}
+	return nil
+}
+
+// handleEdgeTrace logs a traceroute the relay ran toward one of its players, in the format of
+// the main's own PlayerTraceroute lines.
+func handleEdgeTrace(m *edgeMsg) error {
+	v, ok := edgeSessions.Load(m.PID)
+	if !ok || v.(*edgeSession).relay != m.Relay {
+		return fmt.Errorf("no edge session for pid %d on relay %s", m.PID, m.Relay)
+	}
+	fmt.Printf("PlayerTraceroute: PID=%d ip=%s reason=%s via=edge:%s\n%s", m.PID, m.IP, m.Reason, m.Relay, m.Output)
+	return nil
 }

@@ -197,3 +197,39 @@ func TestSupervisorPipesReachTheChild(t *testing.T) {
 		t.Fatal("the child never answered on the pipe")
 	}
 }
+
+func TestBridgeForwardsStatsWithoutAnAck(t *testing.T) {
+	r := newBridgeRig(t)
+	r.send(relaylink.EdgePipeMsg{T: relaylink.EdgeStats, PID: 7, Stats: &relaylink.WSCStats{PID: 7, IP: "1.2.3.4", Loss: "0%", AvgRTT: "5ms", PRUDPRTTMs: 12.5, Samples: 3}})
+	waitFor(t, "stats call", func() bool { return r.called(relaylink.MethodWSCStats) != nil })
+	var s relaylink.WSCStats
+	json.Unmarshal(r.called(relaylink.MethodWSCStats).body, &s)
+	if s.PID != 7 || s.IP != "1.2.3.4" || s.PRUDPRTTMs != 12.5 || s.Samples != 3 || s.Loss != "0%" {
+		t.Fatalf("stats call: %+v", s)
+	}
+	// A stats line without a payload is ignored, not forwarded.
+	r.send(relaylink.EdgePipeMsg{T: relaylink.EdgeStats, PID: 8})
+	time.Sleep(100 * time.Millisecond)
+	r.mu.Lock()
+	n := 0
+	for _, c := range r.calls {
+		if c.method == relaylink.MethodWSCStats {
+			n++
+		}
+	}
+	r.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("%d stats calls, want 1", n)
+	}
+}
+
+func TestBridgeForwardsTracerouteOutput(t *testing.T) {
+	r := newBridgeRig(t)
+	r.send(relaylink.EdgePipeMsg{T: relaylink.EdgeTrace, PID: 7, Trace: &relaylink.WSCTrace{PID: 7, IP: "1.2.3.4", Reason: "connect", Output: "traceroute to 1.2.3.4\n 1  a  1 ms\n"}})
+	waitFor(t, "trace call", func() bool { return r.called(relaylink.MethodWSCTrace) != nil })
+	var tr relaylink.WSCTrace
+	json.Unmarshal(r.called(relaylink.MethodWSCTrace).body, &tr)
+	if tr.PID != 7 || tr.Reason != "connect" || !strings.Contains(tr.Output, "1  a  1 ms") {
+		t.Fatalf("trace call: %+v", tr)
+	}
+}
