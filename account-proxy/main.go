@@ -6430,6 +6430,24 @@ func handleShopStub(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(`{"error":{"code":"3001","message":"not available"}}`))
 }
 
+// soapTextXMLFile lists client IPs (one per line, # comments) whose SOAP replies (ECS/NUS/IAS/CAS) are
+// sent as "text/xml" instead of "text/plain". The 2026-09-17 switch to text/plain assumed nim's
+// FUN_00117958 check applied to SOAP, but that function belongs to the ninja balance wrapper; real
+// SOAP servers answered text/xml. Re-read on every call; no file, no effect.
+const soapTextXMLFile = "/nico-pretendo-bridge/log/soap-text-xml-ips.txt"
+
+func soapContentType(r *http.Request) string {
+	if raw, err := os.ReadFile(soapTextXMLFile); err == nil {
+		ip := realIP(r)
+		for _, line := range strings.Split(string(raw), "\n") {
+			if l := strings.TrimSpace(line); l != "" && !strings.HasPrefix(l, "#") && l == ip {
+				return "text/xml"
+			}
+		}
+	}
+	return "text/plain"
+}
+
 func handleECS(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -6479,7 +6497,7 @@ func handleECS(w http.ResponseWriter, r *http.Request) {
 	// use text/plain, not a proper SOAP/XML content-type). Applied to all
 	// four broadon-namespaced handlers (ECS/NUS/IAS/CAS) here, not just
 	// GetSystemUpdate, since it's the same nim-side generic check.
-	w.Header().Set("Content-Type", "text/plain")
+	w.Header().Set("Content-Type", soapContentType(r))
 
 	switch method.XMLName.Local {
 	case "GetAccountStatus":
@@ -6607,7 +6625,7 @@ func handleNUSShop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "text/plain")
+	w.Header().Set("Content-Type", soapContentType(r))
 
 	switch method.XMLName.Local {
 	case "GetSystemTitleHash":
@@ -6716,7 +6734,7 @@ func handleIAS(w http.ResponseWriter, r *http.Request) {
 	messageID := soapFieldValue(method.Fields, "MessageId")
 	log.Printf("IAS: %s DeviceId=%s MessageId=%s, full body: %s", method.XMLName.Local, deviceID, messageID, string(body))
 
-	w.Header().Set("Content-Type", "text/plain")
+	w.Header().Set("Content-Type", soapContentType(r))
 	// Namespace matches PretendoNetwork/SOAP's real WUP IAS handler (see
 	// comment on the DeleteSavedCard response above) rather than a guessed
 	// ias.wsapi.broadon.com - low confidence (that file shows signs of being
@@ -6764,7 +6782,7 @@ func handleCAS(w http.ResponseWriter, r *http.Request) {
 	messageID := soapFieldValue(method.Fields, "MessageId")
 	log.Printf("CAS: %s DeviceId=%s MessageId=%s, full body: %s", method.XMLName.Local, deviceID, messageID, string(body))
 
-	w.Header().Set("Content-Type", "text/plain")
+	w.Header().Set("Content-Type", soapContentType(r))
 	fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><soapenv:Body><%sResponse xmlns="urn:ecs.wsapi.broadon.com"><Version>1.0</Version><DeviceId>%s</DeviceId><MessageId>%s</MessageId><TimeStamp>%d</TimeStamp><ErrorCode>0</ErrorCode></%sResponse></soapenv:Body></soapenv:Envelope>`,
 		method.XMLName.Local, deviceID, messageID, time.Now().Unix(), method.XMLName.Local)
 }
