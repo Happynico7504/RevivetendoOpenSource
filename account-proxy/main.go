@@ -6432,6 +6432,10 @@ func handleNinjaShop(w http.ResponseWriter, r *http.Request) {
 		if v, ok := ninjaLocale.Load(ip); ok {
 			country, lang = v.([2]string)[0], v.([2]string)[1]
 		}
+		// The request itself carries the console's country and language: prefer those.
+		if c, l := postForm.Get("country"), postForm.Get("lang"); ninjaLocaleRe.MatchString(c) && ninjaLocaleRe.MatchString(l) {
+			country, lang = c, l
+		}
 		// The applet checks initial_device_account_id against the console's own eShop device account
 		// (the device_account it just sent: the same AccountId as ECS/IAS), not the NNID pid.
 		devAcc := strconv.Itoa(int(pid))
