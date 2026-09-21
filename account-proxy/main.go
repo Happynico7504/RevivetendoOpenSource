@@ -695,6 +695,21 @@ func handle(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 2026-09-21: the 3DS's act uploads its device attributes (uuid_account, ctr_nex_*, ...)
+	// right after the OAuth token on every full login. Pretendo has no such endpoint and
+	// answered 404 every time (83 of 83 in the logs); 60 of the 84 full logins were then
+	// followed ~2 minutes later (median 114 s) by a second, token-only login: Badge Arcade's
+	// "double load". Accept the upload locally instead of forwarding it.
+	if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/people/@me/devices/@current/attributes") {
+		if r.Body != nil {
+			io.Copy(io.Discard, r.Body)
+		}
+		log.Printf("device attributes from %s: accepted locally (Pretendo would 404)", realIP(r))
+		w.Header().Set("Content-Length", "0")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	if strings.HasSuffix(r.URL.Path, "/service_token/@me") {
 		handleServiceToken(w, r)
 		return
@@ -5258,8 +5273,9 @@ func handleNpdlCDN(w http.ResponseWriter, r *http.Request) {
 			}
 			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
 			w.WriteHeader(http.StatusOK)
-			w.Write(data)
-			log.Printf("npdl CDN: Badge Arcade %s -> served real captured Nintendo content (%s, %d bytes)", r.URL.Path, filename, len(data))
+			sendStart := time.Now()
+			n, werr := w.Write(data)
+			log.Printf("npdl CDN: Badge Arcade %s -> served real captured Nintendo content (%s, %d bytes; wrote %d in %v, err=%v)", r.URL.Path, filename, len(data), n, time.Since(sendStart).Round(time.Millisecond), werr)
 			return
 		}
 		log.Printf("npdl CDN: Badge Arcade %s -> no captured content for this path, proxying", r.URL.Path)
