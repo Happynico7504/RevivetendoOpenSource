@@ -6223,6 +6223,8 @@ func startOLVProxy() {
 			handleECS(w, r)
 		case "nus.c.shop.nicoch.net":
 			handleNUSShop(w, r)
+		case "samurai.nicoch.net", "ccif.nicoch.net":
+			handleShopStub(w, r)
 		case "ias.c.shop.nicoch.net":
 			handleIAS(w, r)
 		case "cas.c.shop.nicoch.net":
@@ -6234,6 +6236,12 @@ func startOLVProxy() {
 		case "nppl.c.app.nicochristmann.net", "npts.c.app.nicochristmann.net":
 			handle3DSBossPolicylist(w, r, ".nicochristmann.net")
 		default:
+			// Shop-looking hosts we don't route land in the OLV handler and
+			// would otherwise vanish; log them so a mis-patched mint/nim URL
+			// shows up (e.g. a host that isn't in the switch above).
+			if h := strings.ToLower(r.Host); strings.Contains(h, "shop") || strings.Contains(h, "ninja") || strings.Contains(h, "samurai") || strings.Contains(h, "ccif") || strings.Contains(h, "eshop") || strings.HasPrefix(h, "ecs.") || strings.HasPrefix(h, "nus.") {
+				log.Printf("dispatch: UNROUTED shop-like host=%q %s %s from %s", r.Host, r.Method, r.URL.RequestURI(), realIP(r))
+			}
 			handleOLV(w, r)
 		}
 	}
@@ -6317,6 +6325,12 @@ func captureShopRequest(label string, r *http.Request, body []byte) {
 
 func handleNinjaShop(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
+	// The Nimbus mint patch (patches/mint/src/main.s) overwrites the "/" of
+	// "/ninja" with a NUL when it rewrites the hostname, so a patched mint
+	// sends "/ws/..." where an unpatched one sends "/ninja/ws/...". Accept both.
+	if strings.HasPrefix(path, "/ws/") {
+		path = "/ninja" + path
+	}
 	ip := realIP(r)
 	// TEMPORARY - logging every call (not just unhandled ones) to see the
 	// real bootstrap sequence and confirm exactly how far it gets. Remove
@@ -6329,7 +6343,7 @@ func handleNinjaShop(w http.ResponseWriter, r *http.Request) {
 		// nim doesn't actually look up ecs/ninja/nus here - those are
 		// hardcoded strings in its own binary, already patched separately -
 		// so this only needs to be well-formed, not point anywhere specific.
-		w.Write([]byte(`{"services":{"service":[{"name":"EOU","origin_fqdn":"eou.c.shop.nicoch.net","cdn_fqdn":"eou.ctr.eshop.nicoch.net"},{"name":"CCIF","origin_fqdn":"ccif.ctr.shop.nicoch.net"}]}}`))
+		w.Write([]byte(`{"services":{"service":[{"name":"SAMURAI_CTR","origin_fqdn":"samurai.nicoch.net","cdn_fqdn":"samurai.nicoch.net"},{"name":"CCIF","origin_fqdn":"ccif.nicoch.net"}]}}`))
 
 	case strings.HasPrefix(path, "/ninja/ws/country/"):
 		country := strings.TrimPrefix(path, "/ninja/ws/country/")
@@ -6360,6 +6374,17 @@ func handleNinjaShop(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(`<eshop><error><code>3001</code><message>Service temporarily unavailable</message></error></eshop>`))
 	}
+}
+
+// handleShopStub logs (and answers 404 JSON to) requests for the Samurai
+// (catalog) and CCIF (credit card) hosts that mint takes from service_hosts.
+// Both hosts sit under *.nicoch.net so the existing wildcard cert and DNS
+// cover them; this only exists to show whether mint ever calls them.
+func handleShopStub(w http.ResponseWriter, r *http.Request) {
+	log.Printf("shop stub %s: %s %s from %s", r.Host, r.Method, r.URL.RequestURI(), realIP(r))
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusNotFound)
+	w.Write([]byte(`{"error":{"code":"3001","message":"not available"}}`))
 }
 
 func handleECS(w http.ResponseWriter, r *http.Request) {
@@ -6399,7 +6424,7 @@ func handleECS(w http.ResponseWriter, r *http.Request) {
 	// TEMPORARY - logging every call (not just unrecognized ones) to see the
 	// real flow. Remove once the purchase flow is confirmed working end to
 	// end.
-	log.Printf("ECS: %s DeviceId=%s MessageId=%s AccountId=%s", method.XMLName.Local, deviceID, messageID, accountID)
+	log.Printf("ECS: %s DeviceId=%s MessageId=%s AccountId=%s Country=%s Region=%s from %s", method.XMLName.Local, deviceID, messageID, accountID, country, region, realIP(r))
 
 	// 2026-09-17: traced via Ghidra decompilation of nim's code.bin
 	// (FUN_00117958, called from FUN_00113c84, both containing literal
@@ -6553,7 +6578,7 @@ func handleNUSShop(w http.ResponseWriter, r *http.Request) {
 		for _, tv := range titleVersions {
 			fmt.Fprintf(&titleVersionsXML, `<TitleVersion><TitleId>%s</TitleId><Version>%s</Version><FsSize>262144</FsSize><TicketSize>848</TicketSize><TMDSize>4660</TMDSize></TitleVersion>`, tv.TitleId, tv.Version)
 		}
-		log.Printf("NUS: GetSystemUpdate echoing %d TitleVersion entries back with FsSize/TicketSize/TMDSize", len(titleVersions))
+		log.Printf("NUS: GetSystemUpdate echoing %d TitleVersion entries back (%d bytes of TitleVersion XML)", len(titleVersions), titleVersionsXML.Len())
 
 		// 2026-09-17: confirmed via a real A/B test that an empty
 		// TitleVersion list makes nim reject the response outright
