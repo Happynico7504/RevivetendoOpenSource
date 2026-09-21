@@ -5256,21 +5256,14 @@ func handleNpdlCDN(w http.ResponseWriter, r *http.Request) {
 			log.Printf("npdl CDN: Badge Arcade request headers for %s: If-Modified-Since=%q If-None-Match=%q Range=%q UA=%q",
 				r.URL.Path, r.Header.Get("If-Modified-Since"), r.Header.Get("If-None-Match"), r.Header.Get("Range"), r.Header.Get("User-Agent"))
 			if fi, statErr := os.Stat(badgeArcadeBossDataDir + "/" + filename); statErr == nil {
-				etag := fmt.Sprintf("\"%x-%x\"", fi.Size(), fi.ModTime().UnixNano())
-				w.Header().Set("ETag", etag)
+				w.Header().Set("ETag", fmt.Sprintf("\"%x-%x\"", fi.Size(), fi.ModTime().UnixNano()))
 				w.Header().Set("Last-Modified", fi.ModTime().UTC().Format(http.TimeFormat))
-				notModified := r.Header.Get("If-None-Match") == etag
-				if !notModified {
-					if ims, perr := http.ParseTime(r.Header.Get("If-Modified-Since")); perr == nil && !fi.ModTime().Truncate(time.Second).After(ims) {
-						notModified = true
-					}
-				}
-				if notModified {
-					w.WriteHeader(http.StatusNotModified)
-					log.Printf("npdl CDN: Badge Arcade %s -> 304 Not Modified (%s)", r.URL.Path, filename)
-					return
-				}
 			}
+			// 2026-09-21: NEVER answer a conditional request with 304. The console's first
+			// request after a Last-Modified was stored carries If-Modified-Since; we used to
+			// answer 304 and every such launch was followed by a second login ~2 minutes later
+			// (the "double load"; 4 of 4 launches). The console only recovered by dropping the
+			// header and asking again, which got the full 200. So always send the file.
 			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
 			w.WriteHeader(http.StatusOK)
 			sendStart := time.Now()
