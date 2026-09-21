@@ -5218,6 +5218,29 @@ func handleNpdlCDN(w http.ResponseWriter, r *http.Request) {
 			// SpotPass request queues up behind it.
 			w.Header().Set("Connection", "close")
 			w.Header().Set("Content-Type", "application/octet-stream")
+			// 2026-09-20: the console re-downloaded the 26MB data file on nearly
+			// every launch. Log what it sends, and give it validators (plus a
+			// 304 on a matching conditional request) so an unchanged file can be
+			// skipped. Files only change when replaced on disk.
+			log.Printf("npdl CDN: Badge Arcade request headers for %s: If-Modified-Since=%q If-None-Match=%q Range=%q UA=%q",
+				r.URL.Path, r.Header.Get("If-Modified-Since"), r.Header.Get("If-None-Match"), r.Header.Get("Range"), r.Header.Get("User-Agent"))
+			if fi, statErr := os.Stat(badgeArcadeBossDataDir + "/" + filename); statErr == nil {
+				etag := fmt.Sprintf("\"%x-%x\"", fi.Size(), fi.ModTime().UnixNano())
+				w.Header().Set("ETag", etag)
+				w.Header().Set("Last-Modified", fi.ModTime().UTC().Format(http.TimeFormat))
+				notModified := r.Header.Get("If-None-Match") == etag
+				if !notModified {
+					if ims, perr := http.ParseTime(r.Header.Get("If-Modified-Since")); perr == nil && !fi.ModTime().Truncate(time.Second).After(ims) {
+						notModified = true
+					}
+				}
+				if notModified {
+					w.WriteHeader(http.StatusNotModified)
+					log.Printf("npdl CDN: Badge Arcade %s -> 304 Not Modified (%s)", r.URL.Path, filename)
+					return
+				}
+			}
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
 			w.WriteHeader(http.StatusOK)
 			w.Write(data)
 			log.Printf("npdl CDN: Badge Arcade %s -> served real captured Nintendo content (%s, %d bytes)", r.URL.Path, filename, len(data))
