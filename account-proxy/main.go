@@ -6366,6 +6366,12 @@ func ninjaContentType(r *http.Request) string {
 	return "application/json"
 }
 
+// ninjaLocale remembers each console's shop country/language (client IP -> {country, lang}).
+var ninjaLocale sync.Map
+
+// ninjaLocaleRe keeps anything but a 2-3 letter code out of the JSON we build from it.
+var ninjaLocaleRe = regexp.MustCompile(`^[A-Za-z]{2,3}$`)
+
 func handleNinjaShop(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	// The Nimbus mint patch (patches/mint/src/main.s) overwrites the "/" of
@@ -6380,6 +6386,21 @@ func handleNinjaShop(w http.ResponseWriter, r *http.Request) {
 	// once the purchase flow is confirmed working end to end.
 	log.Printf("ninja shop: %s %s from %s", r.Method, r.URL.RequestURI(), ip)
 	w.Header().Set("Content-Type", ninjaContentType(r))
+
+	// Remember the console's own country/language (the GETs carry them; session/!open does not),
+	// and keep what a POST sends so the purchase chain can be compared with a real one.
+	c, l := r.URL.Query().Get("country"), r.URL.Query().Get("lang")
+	if c == "" && strings.HasPrefix(path, "/ninja/ws/country/") {
+		c = strings.TrimPrefix(path, "/ninja/ws/country/")
+	}
+	if ninjaLocaleRe.MatchString(c) && ninjaLocaleRe.MatchString(l) {
+		ninjaLocale.Store(ip, [2]string{c, l})
+	}
+	if r.Method == http.MethodPost && r.Body != nil {
+		b, _ := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(b))
+		captureShopRequest("ninja", r, b)
+	}
 
 	switch {
 	case path == "/ninja/ws/service_hosts":
@@ -6405,7 +6426,11 @@ func handleNinjaShop(w http.ResponseWriter, r *http.Request) {
 
 	case path == "/ninja/ws/my/session/!open":
 		pid := fetchRealPID(r)
-		fmt.Fprintf(w, `{"session_config":{"pid":%d,"account_id":"%d","country":"US","saved_lang":"en","shop_account_initialized":true,"device_link_updated":false,"owned_titles_modified":0,"shared_titles_last_modified":0,"age":21,"server_time":%d,"devices":{"device":[{"name":"CTR","initial_device_account_id":"%d","npns_ready":true,"id":4}]},"parental_controls":{"parental_control":[{"device":"CTR","type":"game_rating_age","value":0},{"device":"CTR","type":"game_rating_lock","value":0},{"device":"CTR","type":"shopping","value":0}]},"auto_billing_contracted":false,"id":"%d"}}`,
+		country, lang := "US", "en"
+		if v, ok := ninjaLocale.Load(ip); ok {
+			country, lang = v.([2]string)[0], v.([2]string)[1]
+		}
+		fmt.Fprintf(w, `{"session_config":{"pid":%d,"account_id":"%d","country":"`+country+`","saved_lang":"`+lang+`","shop_account_initialized":true,"device_link_updated":false,"owned_titles_modified":0,"shared_titles_last_modified":0,"age":21,"server_time":%d,"devices":{"device":[{"name":"CTR","initial_device_account_id":"%d","npns_ready":true,"id":4}]},"parental_controls":{"parental_control":[{"device":"CTR","type":"game_rating_age","value":0},{"device":"CTR","type":"game_rating_lock","value":0},{"device":"CTR","type":"shopping","value":0}]},"auto_billing_contracted":false,"id":"%d"}}`,
 			pid, pid, time.Now().UnixMilli(), pid, pid)
 
 	case path == "/ninja/ws/my/session/!close":
