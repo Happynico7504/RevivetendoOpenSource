@@ -260,6 +260,10 @@ func (f *Front) Handler(l Listener) http.Handler {
 	})
 }
 
+// streamWriteTimeout is how long one write of a streamed answer may block on the
+// console before the connection is given up (a stalled console, not a slow one).
+const streamWriteTimeout = 60 * time.Second
+
 // streamWindow is how many chunks are fetched from the main at once.
 const streamWindow = 4
 
@@ -295,6 +299,13 @@ func (f *Front) serveStreamed(w http.ResponseWriter, r *http.Request, out *relay
 	}
 	w.WriteHeader(out.Status)
 	flusher, _ := w.(http.Flusher)
+	// The server's WriteTimeout is a hard limit on the whole response, which a
+	// large download (Badge Arcade's 23 MB BOSS file) on a slow console link would
+	// exceed. Give each write its own deadline instead: the download may take as
+	// long as it needs while the console keeps receiving.
+	rc := http.NewResponseController(w)
+	extend := func() { rc.SetWriteDeadline(time.Now().Add(streamWriteTimeout)) }
+	extend()
 	if _, err := w.Write(out.Body); err != nil {
 		return
 	}
@@ -339,6 +350,7 @@ func (f *Front) serveStreamed(w http.ResponseWriter, r *http.Request, out *relay
 		for c, ok := pending[next]; ok; c, ok = pending[next] {
 			delete(pending, next)
 			if len(c.Data) > 0 {
+				extend()
 				if _, err := w.Write(c.Data); err != nil {
 					return // the console went away
 				}
