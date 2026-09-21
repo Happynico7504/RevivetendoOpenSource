@@ -6348,6 +6348,24 @@ func captureShopRequest(label string, r *http.Request, body []byte) {
 	os.WriteFile(base+".request.bin", body, 0644)
 }
 
+// ninjaTextPlainFile lists client IPs (one per line, # comments) whose ninja shop replies are sent as
+// "text/plain" instead of "application/json". nim's ninja response check (FUN_00117958) requires a
+// Content-Type starting with "text/plain" and returns 0xC920D086 (005-4034) otherwise. Re-read on every
+// call; no file, no effect.
+const ninjaTextPlainFile = "/nico-pretendo-bridge/log/ninja-text-plain-ips.txt"
+
+func ninjaContentType(r *http.Request) string {
+	if raw, err := os.ReadFile(ninjaTextPlainFile); err == nil {
+		ip := realIP(r)
+		for _, line := range strings.Split(string(raw), "\n") {
+			if l := strings.TrimSpace(line); l != "" && !strings.HasPrefix(l, "#") && l == ip {
+				return "text/plain"
+			}
+		}
+	}
+	return "application/json"
+}
+
 func handleNinjaShop(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	// The Nimbus mint patch (patches/mint/src/main.s) overwrites the "/" of
@@ -6361,7 +6379,7 @@ func handleNinjaShop(w http.ResponseWriter, r *http.Request) {
 	// real bootstrap sequence and confirm exactly how far it gets. Remove
 	// once the purchase flow is confirmed working end to end.
 	log.Printf("ninja shop: %s %s from %s", r.Method, r.URL.RequestURI(), ip)
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", ninjaContentType(r))
 
 	switch {
 	case path == "/ninja/ws/service_hosts":
