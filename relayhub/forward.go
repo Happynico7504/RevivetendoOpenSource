@@ -93,6 +93,9 @@ func (f *Forwarder) transport(name string, be Backend, sni string) *http.Transpo
 	return t
 }
 
+// RelayIDHeader tells the backend which relay forwarded the request.
+const RelayIDHeader = "X-Revivetendo-Relay"
+
 // Do performs one forwarded request for the relay `relayID`. Small answers come
 // back inline; a large one (more than ForwardInlineMax) is streamed: the answer
 // carries the first part and a StreamID, and the relay fetches the rest with
@@ -124,7 +127,7 @@ func (f *Forwarder) Do(ctx context.Context, relayID string, fr *relaylink.Forwar
 	}
 	for k, vs := range fr.Headers {
 		ck := http.CanonicalHeaderKey(k)
-		if hopByHop[ck] || ck == "X-Forwarded-For" || ck == "X-Real-Ip" || ck == "Host" {
+		if hopByHop[ck] || ck == "X-Forwarded-For" || ck == "X-Real-Ip" || ck == "Host" || ck == RelayIDHeader {
 			continue // identity headers are set by the hub, never trusted from the relay's client
 		}
 		for _, v := range vs {
@@ -134,6 +137,9 @@ func (f *Forwarder) Do(ctx context.Context, relayID string, fr *relaylink.Forwar
 	if host := firstValue(fr.Headers, "Host"); host != "" {
 		req.Host = host
 	}
+	// Which relay the console came through (set by the hub, never by the client),
+	// so a backend can hand out that relay's own address, e.g. Swapdoodle's locator.
+	req.Header.Set(RelayIDHeader, relayID)
 	// account-proxy identifies the console by X-Forwarded-For (its realIP()).
 	if net.ParseIP(fr.ClientIP) != nil {
 		req.Header.Set("X-Forwarded-For", fr.ClientIP)

@@ -4524,6 +4524,21 @@ const swapdoodleGameServerID = "001a2c00"
 // hostname.
 const swapdoodleLocator = "45.157.178.35:9013"
 
+// swapdoodleRelayLocators maps a relay id (the X-Revivetendo-Relay header the hub
+// sets on forwarded requests) to that relay's public ip:9013. Swapdoodle is not
+// latency sensitive, so consoles that came through a relay send their HPP traffic
+// there too, and it reaches us over the relay's encrypted link.
+var swapdoodleRelayLocators = map[string]string{
+	"us-1": "107.173.31.124:9013",
+}
+
+func swapdoodleLocatorFor(r *http.Request) string {
+	if loc, ok := swapdoodleRelayLocators[r.Header.Get("X-Revivetendo-Relay")]; ok {
+		return loc
+	}
+	return swapdoodleLocator
+}
+
 // handleNASC intercepts nasc.nicochristmann.net (patches/friends/src/nasc_url.s
 // points here instead of Pretendo's real NASC). Only Swapdoodle's own
 // game_server_id gets a real override, pointing at our own swapdoodle server;
@@ -4570,15 +4585,16 @@ func handleNASC(w http.ResponseWriter, r *http.Request) {
 	// the literal '*' characters Nintendo's base64 alphabet uses as padding - the
 	// real captured NASC response (from nasc.pretendo.cc) has those unescaped
 	// (e.g. "locator=...MA**&retry=MA**"), so ours must match that exactly.
+	locator := swapdoodleLocatorFor(r)
 	respBody := fmt.Sprintf("locator=%s&retry=%s&returncd=%s&token=%s&datetime=%s",
-		nintendoBase64Encode([]byte(swapdoodleLocator)),
+		nintendoBase64Encode([]byte(locator)),
 		nintendoBase64Encode([]byte("0")),
 		nintendoBase64Encode([]byte("001")),
 		nintendoBase64Encode(tokenBytes),
 		nintendoBase64Encode([]byte(time.Now().UTC().Format("20060102150405"))),
 	)
 
-	log.Printf("NASC: Swapdoodle LOGIN from %s -> locator=%s", realIP(r), swapdoodleLocator)
+	log.Printf("NASC: Swapdoodle LOGIN from %s -> locator=%s", realIP(r), locator)
 	w.Header().Set("Content-Type", "text/plain")
 	w.Write([]byte(respBody))
 }

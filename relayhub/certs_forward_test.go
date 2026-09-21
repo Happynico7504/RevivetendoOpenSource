@@ -275,3 +275,16 @@ func TestHubRoutesForward(t *testing.T) {
 		t.Fatalf("forwarding disabled: %d", r.Status)
 	}
 }
+
+// The hub tells the backend which relay a request came through, and never
+// believes a relay id the console itself sent.
+func TestForwardSetsRelayID(t *testing.T) {
+	var got string
+	be := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { got = r.Header.Get(RelayIDHeader) }))
+	defer be.Close()
+	f := &Forwarder{Backends: map[string]Backend{"account": {Addr: strings.TrimPrefix(be.URL, "http://")}}}
+	fwd(t, f, relaylink.ForwardRequest{Backend: "account", Method: "GET", Path: "/", Headers: map[string][]string{RelayIDHeader: {"forged"}}})
+	if got != "us-1" {
+		t.Fatalf("backend saw relay id %q, want us-1", got)
+	}
+}
