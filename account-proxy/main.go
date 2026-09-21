@@ -6530,6 +6530,32 @@ func handleECS(w http.ResponseWriter, r *http.Request) {
 // exact response shape, including a working dummy TitleHash value
 // (D2F8020CA37AC652691BF17CDD610182) their own working implementation
 // uses - adapted here.
+// nusExperimentFile lists per-device NUS overrides, one per line: "<DeviceId> <Method>=<HTTP status>",
+// e.g. "17198931270 GetSystemUpdate=404". Read on every call, so it can be edited or deleted without
+// a restart. Lines starting with # are comments. No file, no effect.
+const nusExperimentFile = "/nico-pretendo-bridge/log/nus-experiment.txt"
+
+func nusExperimentStatus(deviceID, method string) int {
+	raw, err := os.ReadFile(nusExperimentFile)
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		f := strings.Fields(strings.TrimSpace(line))
+		if len(f) != 2 || strings.HasPrefix(f[0], "#") || f[0] != deviceID {
+			continue
+		}
+		name, code, ok := strings.Cut(f[1], "=")
+		if !ok || name != method {
+			continue
+		}
+		if n, err := strconv.Atoi(code); err == nil && n >= 100 && n <= 599 {
+			return n
+		}
+	}
+	return 0
+}
+
 func handleNUSShop(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -6554,6 +6580,14 @@ func handleNUSShop(w http.ResponseWriter, r *http.Request) {
 	deviceID := soapFieldValue(method.Fields, "DeviceId")
 	messageID := soapFieldValue(method.Fields, "MessageId")
 	log.Printf("NUS: %s DeviceId=%s MessageId=%s", method.XMLName.Local, deviceID, messageID)
+
+	// Per-device experiment switch (off unless the file exists): make one NUS call answer
+	// with a plain HTTP status, to see how nim behaves without a reply to parse.
+	if status := nusExperimentStatus(deviceID, method.XMLName.Local); status != 0 {
+		log.Printf("NUS: EXPERIMENT answering %s for device %s with HTTP %d", method.XMLName.Local, deviceID, status)
+		w.WriteHeader(status)
+		return
+	}
 
 	w.Header().Set("Content-Type", "text/plain")
 
