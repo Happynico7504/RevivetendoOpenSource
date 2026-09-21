@@ -6425,7 +6425,7 @@ func handleNinjaShop(w http.ResponseWriter, r *http.Request) {
 // cover them; this only exists to show whether mint ever calls them.
 func handleShopStub(w http.ResponseWriter, r *http.Request) {
 	log.Printf("shop stub %s: %s %s from %s", r.Host, r.Method, r.URL.RequestURI(), realIP(r))
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", ninjaContentType(r))
 	w.WriteHeader(http.StatusNotFound)
 	w.Write([]byte(`{"error":{"code":"3001","message":"not available"}}`))
 }
