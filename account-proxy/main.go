@@ -6662,12 +6662,17 @@ func handleNUSShop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", soapContentType(r))
+	// 2026-09-22: verified against a real captured reply from Nintendo's live NUS server
+	// (using the console's own CTR Common client cert, one-off diagnostic capture - see
+	// project_badge_arcade_buy_plays_investigation memory). Real header, byte for byte:
+	// "Content-Type: text/xml;charset=utf-8".
+	w.Header().Set("Content-Type", "text/xml;charset=utf-8")
 
 	switch method.XMLName.Local {
 	case "GetSystemTitleHash":
 		fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><soapenv:Body><GetSystemTitleHashResponse xmlns="urn:nus.wsapi.broadon.com"><Version>1.0</Version><DeviceId>%s</DeviceId><MessageId>%s</MessageId><TimeStamp>%d</TimeStamp><ErrorCode>0</ErrorCode><TitleHash>D2F8020CA37AC652691BF17CDD610182</TitleHash></GetSystemTitleHashResponse></soapenv:Body></soapenv:Envelope>`,
-			deviceID, messageID, time.Now().Unix())
+			// TimeStamp is milliseconds (verified against a real reply 2026-09-22), not time.Now().Unix()'s seconds.
+			deviceID, messageID, time.Now().UnixMilli())
 
 	case "GetSystemUpdate":
 		// 2026-09-16: the safecerthax-shaped response (ContentPrefixURL/
@@ -6730,7 +6735,7 @@ func handleNUSShop(w http.ResponseWriter, r *http.Request) {
 		// every GetSystemUpdate and this is very likely the same value it
 		// expects echoed back here.
 		fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><soapenv:Body><GetSystemUpdateResponse xmlns="urn:nus.wsapi.broadon.com"><Version>1.0</Version><DeviceId>%s</DeviceId><MessageId>%s</MessageId><TimeStamp>%d</TimeStamp><ErrorCode>0</ErrorCode><TitleHash>D2F8020CA37AC652691BF17CDD610182</TitleHash><ContentPrefixURL>https://nus.c.shop.nicoch.net/ccs/download</ContentPrefixURL><UncachedContentPrefixURL>https://nus.c.shop.nicoch.net/ccs/download</UncachedContentPrefixURL>%s<UploadAuditData>1</UploadAuditData></GetSystemUpdateResponse></soapenv:Body></soapenv:Envelope>`,
-			deviceID, messageID, time.Now().Unix(), titleVersionsXML.String())
+			deviceID, messageID, time.Now().UnixMilli(), titleVersionsXML.String())
 
 	default:
 		// Unrecognized NUS method - log the full raw request for review
@@ -6738,7 +6743,7 @@ func handleNUSShop(w http.ResponseWriter, r *http.Request) {
 		// ECS's default case.
 		log.Printf("NUS: unrecognized method %q, full body: %s", method.XMLName.Local, string(body))
 		fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><soapenv:Body><%sResponse xmlns="urn:nus.wsapi.broadon.com"><Version>1.0</Version><DeviceId>%s</DeviceId><MessageId>%s</MessageId><TimeStamp>%d</TimeStamp><ErrorCode>0</ErrorCode></%sResponse></soapenv:Body></soapenv:Envelope>`,
-			method.XMLName.Local, deviceID, messageID, time.Now().Unix(), method.XMLName.Local)
+			method.XMLName.Local, deviceID, messageID, time.Now().UnixMilli(), method.XMLName.Local)
 	}
 }
 
