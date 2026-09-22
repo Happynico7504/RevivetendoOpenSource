@@ -38,6 +38,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/andybalholm/brotli"
 	"github.com/joho/godotenv"
@@ -1997,7 +1998,19 @@ func proxy(w http.ResponseWriter, r *http.Request, body []byte) {
 	}
 	log.Printf("upstream %d (%d bytes)", statusCode, len(b))
 	if statusCode != http.StatusOK {
-		log.Printf("upstream body: %s", b)
+		// 2026-09-22: this used to log the raw body unconditionally, which for a non-text
+		// response (seen for real: a 403 with a compressed/binary body, presumably a scanner
+		// hitting some odd path and getting a WAF/challenge response back through this same
+		// fallback, not Pretendo itself) put a NUL byte into the log file. That's harmless to
+		// the file itself, but it makes tools that treat the presence of any NUL as "this is a
+		// binary file" (e.g. grep -I, which the wrapped `grep` in this shell uses) skip the
+		// whole file silently. Keep the diagnostic value for the common case (Pretendo's real
+		// error bodies are JSON/XML) but don't dump raw bytes when it isn't text.
+		if utf8.Valid(b) && !bytes.ContainsRune(b, 0) {
+			log.Printf("upstream body: %s", b)
+		} else {
+			log.Printf("upstream body: %d bytes, not valid text - not logging raw", len(b))
+		}
 	}
 	if body != nil {
 		b = body
