@@ -6711,11 +6711,47 @@ func handleNUSShop(w http.ResponseWriter, r *http.Request) {
 		// echoing back every requested title. Using the same fixed dummy
 		// values safecerthax's own real-hardware-tested template uses,
 		// since we have no real per-title size data of our own.
+		//
+		// 2026-09-22, verified against a real captured reply from Nintendo's live NUS server
+		// (one-off diagnostic capture, see project_badge_arcade_buy_plays_investigation memory),
+		// two real bugs found:
+		//
+		//  1. TitleId format: the REQUEST carries each TitleId as a decimal string
+		//     (e.g. "1127205576906242"), but the real server's RESPONSE uses the standard
+		//     16-char hex form ("0004001000022000"). We were echoing the request's decimal
+		//     string straight back. nim's response parser (FUN_00134d74, traced via Ghidra)
+		//     parses TitleId as a HEX number - decimal digits are all valid hex digits too, so
+		//     this never raised a parse error, it silently produced a completely wrong 64-bit
+		//     value for every single title, which most likely doesn't match anything in nim's
+		//     own installed-title list and gets the whole response rejected downstream.
+		//
+		//  2. Title filtering: the real server silently drops a handful of titles from the
+		//     echoed list - for one real device, exactly 6 of 139 requested were dropped:
+		//     000401300CF00F02 and five 0004800x-prefixed titles with ASCII-looking low bits
+		//     (00048015484E4250, 00048005484E4B50, 00048005484E4950, 00048015534C524E,
+		//     00048017484E4150). This matches "0004800x" IDs an earlier session already
+		//     suspected and tried excluding (see the 2026-09-21 STATUS note) but ruled out at
+		//     the time - very likely because bug #1 above was still masking any effect. We
+		//     don't have Nintendo's real title catalog to replicate the general rule, so this
+		//     excludes only the specific 0004800x-category pattern (all confirmed-dropped IDs
+		//     share it) plus the one confirmed CF00F02 outlier. Other players may have other
+		//     odd titles the real server also drops that this doesn't yet cover.
+		nusExcludedTitleIDs := map[string]bool{"000401300CF00F02": true}
 		var titleVersionsXML strings.Builder
+		kept := 0
 		for _, tv := range titleVersions {
-			fmt.Fprintf(&titleVersionsXML, `<TitleVersion><TitleId>%s</TitleId><Version>%s</Version><FsSize>262144</FsSize><TicketSize>848</TicketSize><TMDSize>4660</TMDSize></TitleVersion>`, tv.TitleId, tv.Version)
+			idNum, err := strconv.ParseUint(tv.TitleId, 10, 64)
+			if err != nil {
+				continue // not a well-formed decimal TitleId - drop it rather than send garbage
+			}
+			hexID := fmt.Sprintf("%016X", idNum)
+			if nusExcludedTitleIDs[hexID] || strings.HasPrefix(hexID, "00048") {
+				continue
+			}
+			kept++
+			fmt.Fprintf(&titleVersionsXML, `<TitleVersion><TitleId>%s</TitleId><Version>%s</Version><FsSize>262144</FsSize><TicketSize>848</TicketSize><TMDSize>4660</TMDSize></TitleVersion>`, hexID, tv.Version)
 		}
-		log.Printf("NUS: GetSystemUpdate echoing %d TitleVersion entries back (%d bytes of TitleVersion XML)", len(titleVersions), titleVersionsXML.Len())
+		log.Printf("NUS: GetSystemUpdate echoing %d of %d requested TitleVersion entries back (%d bytes of TitleVersion XML)", kept, len(titleVersions), titleVersionsXML.Len())
 
 		// 2026-09-17: confirmed via a real A/B test that an empty
 		// TitleVersion list makes nim reject the response outright
