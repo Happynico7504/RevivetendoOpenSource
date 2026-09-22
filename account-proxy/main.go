@@ -6734,7 +6734,14 @@ func handleNUSShop(w http.ResponseWriter, r *http.Request) {
 		// successfully, since nim calls that endpoint immediately before
 		// every GetSystemUpdate and this is very likely the same value it
 		// expects echoed back here.
-		fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><soapenv:Body><GetSystemUpdateResponse xmlns="urn:nus.wsapi.broadon.com"><Version>1.0</Version><DeviceId>%s</DeviceId><MessageId>%s</MessageId><TimeStamp>%d</TimeStamp><ErrorCode>0</ErrorCode><TitleHash>D2F8020CA37AC652691BF17CDD610182</TitleHash><ContentPrefixURL>https://nus.c.shop.nicoch.net/ccs/download</ContentPrefixURL><UncachedContentPrefixURL>https://nus.c.shop.nicoch.net/ccs/download</UncachedContentPrefixURL>%s<UploadAuditData>1</UploadAuditData></GetSystemUpdateResponse></soapenv:Body></soapenv:Envelope>`,
+		// 2026-09-22: field order verified against a real captured reply from Nintendo's live
+		// NUS server (one-off diagnostic capture, see project_badge_arcade_buy_plays_investigation
+		// memory). TitleHash comes LAST, after UploadAuditData - we had it right after ErrorCode,
+		// near the start, which is very likely why nim always rejected this response (005-4034),
+		// even after every other fix. Real order: Version, DeviceId, MessageId, TimeStamp,
+		// ErrorCode, ContentPrefixURL, UncachedContentPrefixURL, TitleVersion..., UploadAuditData,
+		// TitleHash.
+		fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><soapenv:Body><GetSystemUpdateResponse xmlns="urn:nus.wsapi.broadon.com"><Version>1.0</Version><DeviceId>%s</DeviceId><MessageId>%s</MessageId><TimeStamp>%d</TimeStamp><ErrorCode>0</ErrorCode><ContentPrefixURL>https://nus.c.shop.nicoch.net/ccs/download</ContentPrefixURL><UncachedContentPrefixURL>https://nus.c.shop.nicoch.net/ccs/download</UncachedContentPrefixURL>%s<UploadAuditData>1</UploadAuditData><TitleHash>D2F8020CA37AC652691BF17CDD610182</TitleHash></GetSystemUpdateResponse></soapenv:Body></soapenv:Envelope>`,
 			deviceID, messageID, time.Now().UnixMilli(), titleVersionsXML.String())
 
 	default:
