@@ -6727,16 +6727,24 @@ func handleNUSShop(w http.ResponseWriter, r *http.Request) {
 		//
 		//  2. Title filtering: the real server silently drops a handful of titles from the
 		//     echoed list - for one real device, exactly 6 of 139 requested were dropped:
-		//     000401300CF00F02 and five 0004800x-prefixed titles with ASCII-looking low bits
-		//     (00048015484E4250, 00048005484E4B50, 00048005484E4950, 00048015534C524E,
-		//     00048017484E4150). This matches "0004800x" IDs an earlier session already
-		//     suspected and tried excluding (see the 2026-09-21 STATUS note) but ruled out at
-		//     the time - very likely because bug #1 above was still masking any effect. We
-		//     don't have Nintendo's real title catalog to replicate the general rule, so this
-		//     excludes only the specific 0004800x-category pattern (all confirmed-dropped IDs
-		//     share it) plus the one confirmed CF00F02 outlier. Other players may have other
-		//     odd titles the real server also drops that this doesn't yet cover.
-		nusExcludedTitleIDs := map[string]bool{"000401300CF00F02": true}
+		//     000401300CF00F02 and five 0004800x-prefixed titles with ASCII-looking low bits.
+		//     Tried a broad "any 0004800x title" rule first, but disproved it against the same
+		//     capture: 4 other 0004800x titles in the same request WERE kept by the real
+		//     server, with no separating bit pattern found. This matches "0004800x" IDs an
+		//     earlier session already suspected and tried excluding (see the 2026-09-21 STATUS
+		//     note) but ruled out at the time - very likely because bug #1 above was still
+		//     masking any effect. We don't have Nintendo's real title catalog to replicate the
+		//     general rule, so this is an exact-match list of only the 6 confirmed-dropped IDs.
+		//     Other players may have other odd titles the real server also drops that this
+		//     doesn't yet cover.
+		nusExcludedTitleIDs := map[string]bool{
+			"000401300CF00F02": true,
+			"00048015484E4250": true,
+			"00048005484E4B50": true,
+			"00048005484E4950": true,
+			"00048015534C524E": true,
+			"00048017484E4150": true,
+		}
 		var titleVersionsXML strings.Builder
 		kept := 0
 		for _, tv := range titleVersions {
@@ -6745,7 +6753,7 @@ func handleNUSShop(w http.ResponseWriter, r *http.Request) {
 				continue // not a well-formed decimal TitleId - drop it rather than send garbage
 			}
 			hexID := fmt.Sprintf("%016X", idNum)
-			if nusExcludedTitleIDs[hexID] || strings.HasPrefix(hexID, "00048") {
+			if nusExcludedTitleIDs[hexID] {
 				continue
 			}
 			kept++
