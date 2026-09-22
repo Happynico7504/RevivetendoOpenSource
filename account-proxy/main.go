@@ -6441,7 +6441,7 @@ func handleNinjaShop(w http.ResponseWriter, r *http.Request) {
 		if da := postForm.Get("device_account"); len(da) > 0 && len(da) <= 12 && strings.Trim(da, "0123456789") == "" {
 			devAcc = da
 		}
-		fmt.Fprintf(w, `{"session_config":{"pid":%d,"account_id":"%d","country":"`+country+`","saved_lang":"`+lang+`","shop_account_initialized":true,"device_link_updated":false,"owned_titles_modified":0,"shared_titles_last_modified":0,"age":21,"server_time":%d,"devices":{"device":[{"name":"CTR","initial_device_account_id":"%s","npns_ready":true,"id":4}]},"parental_controls":{"parental_control":[{"device":"CTR","type":"game_rating_age","value":0},{"device":"CTR","type":"game_rating_lock","value":0},{"device":"CTR","type":"shopping","value":0}]},"auto_billing_contracted":false,"id":"%d"}}`,
+		fmt.Fprintf(w, `{"session_config":{"pid":%d,"account_id":"%d","country":"`+country+`","saved_lang":"`+lang+`","shop_account_initialized":true,"device_link_updated":false,"owned_titles_modified":0,"shared_titles_last_modified":0,"age":21,"server_time":%d,"devices":{"device":[{"name":"CTR","initial_device_account_id":"%s","npns_ready":true,"id":4}]},"parental_controls":{"parental_control":[{"device":"CTR","type":"game_rating_age","value":0},{"device":"CTR","type":"game_rating_lock","value":0},{"device":"CTR","type":"shopping","value":0}]},"auto_billing_contracted":true,"id":"%d"}}`,
 			pid, pid, time.Now().UnixMilli(), devAcc, pid)
 
 	case path == "/ninja/ws/my/session/!close":
