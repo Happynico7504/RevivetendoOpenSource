@@ -6886,6 +6886,29 @@ func handleCAS(w http.ResponseWriter, r *http.Request) {
 	log.Printf("CAS: %s DeviceId=%s MessageId=%s, full body: %s", method.XMLName.Local, deviceID, messageID, string(body))
 
 	w.Header().Set("Content-Type", soapContentType(r))
-	fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><soapenv:Body><%sResponse xmlns="urn:ecs.wsapi.broadon.com"><Version>1.0</Version><DeviceId>%s</DeviceId><MessageId>%s</MessageId><TimeStamp>%d</TimeStamp><ErrorCode>0</ErrorCode></%sResponse></soapenv:Body></soapenv:Envelope>`,
-		method.XMLName.Local, deviceID, messageID, time.Now().Unix(), method.XMLName.Local)
+
+	// 2026-09-22: ListItems, traced via a full Ghidra decompile of nim's catalog-response parser
+	// (FUN_0011ff98 -> per-item FUN_001267d0 -> per-price FUN_00136448, all in nim's code.bin).
+	// The console calls this 6 times with growing backoff then gives up (005-4034) against the
+	// old generic-echo reply below, which returned no item list at all. Confirmed from the
+	// decompile: the response needs a top-level <ListResultTotalSize> plus one <Items> element
+	// per result, each needing <TitleId> first (required - the item is skipped entirely if
+	// missing); a <Prices> entry's <LicenseKind> is checked against a fixed table found in the
+	// binary (PERMANENT/DEMO/TRIAL/RENTAL/SUBSCRIPT/SERVICE) - SERVICE matches our item's own
+	// TitleKind. The exact sub-field names inside one <Prices> entry beyond LicenseKind (an Id,
+	// a 64-byte field, two more fields from a helper not fully traced) are NOT confirmed - this
+	// is a best-effort guess (Amount/Currency, matching the same convention ECS's own Balance
+	// field already uses in this codebase), priced free like the rest of our free-play design.
+	if method.XMLName.Local == "ListItems" {
+		titleID := soapFieldValue(method.Fields, "TitleId")
+		if titleID == "" {
+			titleID = "0004000D00153600"
+		}
+		fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><soapenv:Body><ListItemsResponse xmlns="urn:cas.wsapi.broadon.com"><Version>1.0</Version><DeviceId>%s</DeviceId><MessageId>%s</MessageId><TimeStamp>%d</TimeStamp><ErrorCode>0</ErrorCode><ListResultTotalSize>1</ListResultTotalSize><Items><TitleId>%s</TitleId><Prices><Id>1</Id><Amount>0</Amount><Currency>EUR</Currency><LicenseKind>SERVICE</LicenseKind></Prices></Items></ListItemsResponse></soapenv:Body></soapenv:Envelope>`,
+			deviceID, messageID, time.Now().UnixMilli(), titleID)
+		return
+	}
+
+	fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><soapenv:Body><%sResponse xmlns="urn:cas.wsapi.broadon.com"><Version>1.0</Version><DeviceId>%s</DeviceId><MessageId>%s</MessageId><TimeStamp>%d</TimeStamp><ErrorCode>0</ErrorCode></%sResponse></soapenv:Body></soapenv:Envelope>`,
+		method.XMLName.Local, deviceID, messageID, time.Now().UnixMilli(), method.XMLName.Local)
 }
