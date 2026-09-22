@@ -680,14 +680,13 @@ func handle(w http.ResponseWriter, r *http.Request) {
 			bodyBuf, _ = io.ReadAll(r.Body)
 			r.Body = io.NopCloser(bytes.NewReader(bodyBuf))
 		}
-		// TEMPORARY - capture full request to compare a successful real-3DS
-		// login against a failing Azahar one, diagnosing intermittent
-		// 022-2932/1600 errors. Remove once resolved.
-		os.MkdirAll("/nico-pretendo-bridge/act-capture", 0755)
-		ts := time.Now().Format("20060102-150405.000")
-		reqLog := fmt.Sprintf("From: %s\nHeaders: %v\nBody: %s\n", realIP(r), r.Header, bodyBuf)
-		os.WriteFile(fmt.Sprintf("/nico-pretendo-bridge/act-capture/%s_access_token_generate.request.txt", ts), []byte(reqLog), 0644)
-		// Parse user_id from form body before proxying
+		// 2026-09-22: the per-request file dump that used to live here (every access_token/generate
+		// request, headers + form body including the password hash, written to
+		// /nico-pretendo-bridge/act-capture/) was marked TEMPORARY for one 2026-08-22 debugging
+		// session and never removed - it ran for a month, capturing 159 distinct accounts' password
+		// hashes across 3121 files before being found and removed. Do not reintroduce logging of
+		// this request's headers or body anywhere; the password hash is a real, replayable
+		// credential, not a display-only value.
 		if vals, err := url.ParseQuery(string(bodyBuf)); err == nil {
 			if uid := vals.Get("user_id"); uid != "" {
 				storeDeviceHeaders(uid, vals.Get("password"), r)
