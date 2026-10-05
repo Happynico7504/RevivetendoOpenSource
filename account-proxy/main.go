@@ -5206,6 +5206,32 @@ func badgeArcadeRegionForRequest(r *http.Request) string {
 	}
 }
 
+// badgeArcadeBossAppIDPrefix maps each regional Badge Arcade's bossAppId to the
+// file set it was really served. BOSS content is encrypted per bossAppId, so the
+// ID in the URL - not where the console is, or which region its system is set
+// to - decides which bytes decrypt. Within one bossAppId the country/language
+// folders don't matter: all 1596 USA folders and every EUR folder checked
+// (NL/nl, DE/de, GB/en, FR/fr, ...) are byte-identical in the archive (2026-10-05).
+var badgeArcadeBossAppIDPrefix = map[string]string{
+	"J6la9Kj8iqTvAPOq": "GB_en", // EUR
+	"OvbmGLZ9senvgV3K": "US_en", // USA
+	"j0ITmVqVgfUxe0O9": "JP_ja", // JPN
+}
+
+// badgeArcadeRegionForBossAppID picks the file set from the bossAppId in a
+// /p01/nsa/<bossAppId>/... path.
+// 2026-10-05: replaces the User-Agent/IP-geolocation pick for every known
+// bossAppId - that heuristic served EUR bytes to a European console's request
+// for the USA title, and could not follow a console used outside its region.
+func badgeArcadeRegionForBossAppID(path string) (string, bool) {
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	if len(parts) < 3 || parts[0] != "p01" || parts[1] != "nsa" {
+		return "", false
+	}
+	prefix, ok := badgeArcadeBossAppIDPrefix[parts[2]]
+	return prefix, ok
+}
+
 func handleNpdlCDN(w http.ResponseWriter, r *http.Request) {
 	// 2026-09-17: back to matching on the file paths themselves regardless of
 	// bossAppId (undoing a same-night revert to strict badgeArcadeBossAppId
@@ -5233,7 +5259,10 @@ func handleNpdlCDN(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if isBadgeArcadeBossPath {
-		regionPrefix := badgeArcadeRegionForRequest(r)
+		regionPrefix, ok := badgeArcadeRegionForBossAppID(r.URL.Path)
+		if !ok {
+			regionPrefix = badgeArcadeRegionForRequest(r)
+		}
 		for suffix, fragment := range badgeArcadeBossFileSuffixes {
 			if !strings.HasSuffix(r.URL.Path, suffix) {
 				continue

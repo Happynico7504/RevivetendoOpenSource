@@ -8,12 +8,12 @@ import (
 )
 
 func GetMaintenanceStatus(err error, client *nex.Client, callID uint32) {
-	// Stock Pretendo code hardcoded maintenanceStatus=0xFFFF here (a "TODO: don't
-	// hardcode" stub) which produced a real-hardware error (004-3003) right after
-	// this call - 0xFFFF looks like an uninitialized/all-bits sentinel rather than
-	// a real "not in maintenance" value, so use 0 instead until real captured
-	// traffic confirms the correct encoding.
-	var maintenanceStatus uint16 = 0
+	// Stock Pretendo value. 2026-09-16 bring-up changed this to 0, blaming it for
+	// a 004-3003 - but 004 is a SpotPass/BOSS error series, and that one was
+	// really the startup BOSS task 404ing (fixed by serving archived content).
+	// Restored 2026-10-05 while chasing new players stalling right after this
+	// call; the real encoding is still unconfirmed by captured traffic.
+	var maintenanceStatus uint16 = 0xFFFF
 	var maintenanceTime uint32 = 0
 	var isSuccess bool = true
 
