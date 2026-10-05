@@ -79,6 +79,13 @@ func registerBadgeEditor() {
 	}
 	static, _ := fs.Sub(badgeEditorFiles, "badgeeditor")
 	http.Handle(badgeEditorBase, http.StripPrefix(badgeEditorBase, http.FileServer(http.FS(static))))
+	// Without this, ServeMux answers ".../badge-arcade" (no slash) with an
+	// absolute redirect to /my/badge-arcade/, which drops the public site's
+	// /inkay/ prefix. A relative Location keeps whatever prefix the browser used.
+	http.HandleFunc(strings.TrimSuffix(badgeEditorBase, "/"), func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "badge-arcade/")
+		w.WriteHeader(http.StatusMovedPermanently)
+	})
 	http.HandleFunc(badgeEditorBase+"api/me", badgeEditorMe)
 	http.HandleFunc(badgeEditorBase+"api/preview", badgeEditorPreview)
 	http.HandleFunc(badgeEditorBase+"api/creations", badgeEditorCreations)
