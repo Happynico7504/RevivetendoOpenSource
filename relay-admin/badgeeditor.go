@@ -5,14 +5,16 @@ package main
 // creation under the player's PID. Admins review and deploy creations later
 // (account-proxy builds them into the daily SpotPass package).
 //
-// Routes (all relative, the public site sits behind a path prefix):
+// Routes live under /my/ so the existing my_session cookie (Path /inkay/my/
+// on the public site) reaches them; all URLs in the app are relative because
+// the public site sits behind the /inkay/ prefix:
 //
-//	/badge-arcade/editor/            static editor app (badgeeditor/)
-//	/badge-arcade/api/me             login state
-//	/badge-arcade/api/preview        render a badge exactly as the 3DS will
-//	/badge-arcade/api/creations      list (GET) / create (POST) own creations
-//	/badge-arcade/api/creations/{id} load (GET) / update (PUT) / delete (DELETE)
-//	/badge-arcade/api/creations/{id}/art.png
+//	/my/badge-arcade/                  static editor app (badgeeditor/)
+//	/my/badge-arcade/api/me            login state
+//	/my/badge-arcade/api/preview       render a badge exactly as the 3DS will
+//	/my/badge-arcade/api/creations     list (GET) / create (POST) own creations
+//	/my/badge-arcade/api/creations/{id} load (GET) / update (PUT) / delete (DELETE)
+//	/my/badge-arcade/api/creations/{id}/art.png
 
 import (
 	"bytes"
@@ -61,6 +63,8 @@ CREATE TABLE IF NOT EXISTS badge_arcade_creations (
 CREATE INDEX IF NOT EXISTS badge_arcade_creations_pid ON badge_arcade_creations (pid);
 `
 
+const badgeEditorBase = "/my/badge-arcade/"
+
 const (
 	badgeEditorMaxCreations = 100
 	badgeEditorMaxArt       = 512 << 10 // composed 128x128 art, PNG
@@ -74,11 +78,11 @@ func registerBadgeEditor() {
 		log.Printf("badge editor schema: %v", err)
 	}
 	static, _ := fs.Sub(badgeEditorFiles, "badgeeditor")
-	http.Handle("/badge-arcade/editor/", http.StripPrefix("/badge-arcade/editor/", http.FileServer(http.FS(static))))
-	http.HandleFunc("/badge-arcade/api/me", badgeEditorMe)
-	http.HandleFunc("/badge-arcade/api/preview", badgeEditorPreview)
-	http.HandleFunc("/badge-arcade/api/creations", badgeEditorCreations)
-	http.HandleFunc("/badge-arcade/api/creations/", badgeEditorCreation)
+	http.Handle(badgeEditorBase, http.StripPrefix(badgeEditorBase, http.FileServer(http.FS(static))))
+	http.HandleFunc(badgeEditorBase+"api/me", badgeEditorMe)
+	http.HandleFunc(badgeEditorBase+"api/preview", badgeEditorPreview)
+	http.HandleFunc(badgeEditorBase+"api/creations", badgeEditorCreations)
+	http.HandleFunc(badgeEditorBase+"api/creations/", badgeEditorCreation)
 }
 
 func badgeEditorJSON(w http.ResponseWriter, status int, v any) {
@@ -430,7 +434,7 @@ func badgeEditorCreation(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	rest := strings.TrimPrefix(r.URL.Path, "/badge-arcade/api/creations/")
+	rest := strings.TrimPrefix(r.URL.Path, badgeEditorBase+"api/creations/")
 	idStr, sub, _ := strings.Cut(rest, "/")
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {

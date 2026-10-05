@@ -1,10 +1,11 @@
 // Badge Arcade badge editor. The badge is a 128x128 artwork (the 3DS also
 // derives the 64x64 HOME Menu image and the shadow from it); collision
 // outlines are polygons in those 128x128 pixels. All URLs are relative: the
-// public site sits behind a path prefix.
+// public site sits behind a path prefix, and the page lives under /my/ so the
+// login cookie reaches the API.
 (function () {
   "use strict";
-  var API = "../api/";
+  var API = "api/"; // page is /inkay/my/badge-arcade/ on the public site
   var SIZE = 128, ZOOM = 3; // stage = 384px
   var LANGS = [
     [0, "Japanese"], [2, "French"], [3, "German"], [4, "Italian"], [5, "Spanish"],
@@ -257,10 +258,10 @@
       state.loggedIn = me.loggedIn;
       var a = $("account");
       if (me.loggedIn) {
-        a.innerHTML = "Logged in as <strong>" + esc(me.pnid || "you") + "</strong> · <a href=\"../../my/\">My page</a>" +
+        a.innerHTML = "Logged in as <strong>" + esc(me.pnid || "you") + "</strong> · <a href=\"../\">My page</a>" +
           (me.banned ? '<br><span class="note">This account can\'t save creations.</span>' : "");
       } else {
-        a.innerHTML = '<a href="../../my/">Log in</a> to save your creations<br><small>(then come back to this page)</small>';
+        a.innerHTML = '<a href="../">Log in</a> to save your creations<br><small>(then come back to this page)</small>';
       }
       $("save").disabled = $("saveCopy").disabled = !me.loggedIn;
       return refreshList();
