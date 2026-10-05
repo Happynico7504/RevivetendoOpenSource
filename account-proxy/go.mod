@@ -8,7 +8,6 @@ require (
 )
 
 require (
-	github.com/andybalholm/brotli v1.2.2 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
@@ -16,10 +15,7 @@ require (
 	github.com/klauspost/crc32 v1.3.0 // indirect
 	github.com/minio/crc64nvme v1.1.1 // indirect
 	github.com/minio/md5-simd v1.1.2 // indirect
-	github.com/minio/minio-go/v7 v7.2.0 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect
-	github.com/pires/go-proxyproto v0.15.0 // indirect
-	github.com/redis/go-redis/v9 v9.22.0 // indirect
 	github.com/rs/xid v1.6.0 // indirect
 	github.com/tinylib/msgp v1.6.1 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
@@ -44,3 +40,13 @@ require (
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
 )
+
+require (
+	github.com/Happynico7504/badgearcade v0.0.0
+	github.com/andybalholm/brotli v1.2.2
+	github.com/minio/minio-go/v7 v7.2.0
+	github.com/pires/go-proxyproto v0.15.0
+	github.com/redis/go-redis/v9 v9.22.0
+)
+
+replace github.com/Happynico7504/badgearcade => ../badgearcade

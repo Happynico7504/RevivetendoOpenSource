@@ -9,13 +9,33 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Happynico7504/badgearcade"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
+// loadBadgeArcadeData decrypts one of Nintendo's archived packages from
+// badgeArcadeBossDataDir (kept out of the repo); skips when unavailable.
+func loadBadgeArcadeData(t *testing.T, prefix string) (key, raw []byte, serial uint64, payloads []badgearcade.BOSSPayload) {
+	t.Helper()
+	key, err := loadBoss3DSKey()
+	if err != nil {
+		t.Skipf("no 3DS BOSS key: %v", err)
+	}
+	raw, err = os.ReadFile(badgeArcadeBossDataDir + "/" + prefix + "_data_data_v131.dat.boss")
+	if err != nil {
+		t.Skipf("no archived content: %v", err)
+	}
+	serial, payloads, err = badgearcade.ParseBOSS(key, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return
+}
+
 func badgeArcadeTestSchedule(t *testing.T) string {
 	_, _, _, payloads := loadBadgeArcadeData(t, "GB_en")
-	entries, err := parseSARC(payloads[0].Content)
+	entries, err := badgearcade.ParseSARC(payloads[0].Content)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,17 +111,17 @@ func TestBadgeArcadeGalleryLive(t *testing.T) {
 	for _, p := range posts {
 		t.Logf("post %s by %s, %d yeahs, %s", p.ID, p.Name, p.Yeahs, p.CreatedAt.Format(time.RFC3339))
 	}
-	out, ids, err := generateBadgeArcadeGallery(ctx, "GB_en", day, posts)
+	out, ids, err := generateBadgeArcadeGallery(ctx, "GB_en", day, posts, badgeArcadeStableVariant)
 	if err != nil {
 		t.Fatal(err)
 	}
 	key, _ := loadBoss3DSKey()
-	_, payloads, err := parseBoss3DS(key, out)
+	_, payloads, err := badgearcade.ParseBOSS(key, out)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Logf("package %d bytes, ns_data_id %d, posts %v", len(out), payloads[0].NsDataID, ids)
-	entries, err := parseSARC(payloads[0].Content)
+	entries, err := badgearcade.ParseSARC(payloads[0].Content)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +129,7 @@ func TestBadgeArcadeGalleryLive(t *testing.T) {
 		if !strings.HasPrefix(e.Name, "post/") {
 			continue
 		}
-		inner, err := parseSARC(e.Data)
+		inner, err := badgearcade.ParseSARC(e.Data)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -122,10 +142,31 @@ func TestBadgeArcadeGalleryLive(t *testing.T) {
 				os.WriteFile(base+".xml", f.Data, 0o644)
 			case "Mii.Etc1_a4":
 				if w, err := os.Create(base + "_mii.png"); err == nil {
-					png.Encode(w, decodeETC1A4(f.Data, 128, 128))
+					png.Encode(w, badgearcade.DecodeETC1A4(f.Data, 128, 128))
 					w.Close()
 				}
 			}
 		}
+	}
+}
+
+func TestRedateCraneSchedule(t *testing.T) {
+	orig := badgeArcadeTestSchedule(t)
+	day := time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC)
+	out := redateCraneSchedule(orig, day)
+	if n := strings.Count(out, "<DateStartText>20261005<"); n != 31 { // 30 DefaultStage + 1 BonusStage
+		t.Fatalf("%d items dated today, want 31", n)
+	}
+	if strings.Count(out, "<DateExpireText>20261006<") != 31 {
+		t.Fatal("today's items should expire tomorrow")
+	}
+	if !strings.Contains(out, "<RegexSetName>PrizeCollection</RegexSetName>") || strings.Count(out, "<DateExpireText>20991231<") != 1 {
+		t.Fatal("PrizeCollection not opened")
+	}
+	if len(out) != len(orig) {
+		t.Fatalf("length changed %d -> %d", len(orig), len(out))
+	}
+	if next := redateCraneSchedule(orig, day.Add(24*time.Hour)); next == strings.ReplaceAll(out, "20261005", "20261006") {
+		t.Fatal("consecutive days should pick different lineups")
 	}
 }

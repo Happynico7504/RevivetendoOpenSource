@@ -5280,7 +5280,7 @@ func handleNpdlCDN(w http.ResponseWriter, r *http.Request) {
 				log.Printf("npdl CDN: Badge Arcade %s -> real content %s unavailable (%v)", r.URL.Path, filename, err)
 				break
 			}
-			if gallery := badgeArcadeGalleryFile(regionPrefix, fragment); gallery != "" && badgeArcadeGalleryEnabledFor(r) {
+			if gallery := badgeArcadeGalleryFile(r, regionPrefix, fragment); gallery != "" {
 				if galleryData, galleryErr := os.ReadFile(badgeArcadeBossDataDir + "/" + gallery); galleryErr == nil {
 					filename, data = gallery, galleryData
 				}

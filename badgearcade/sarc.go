@@ -1,4 +1,4 @@
-package main
+package badgearcade
 
 // Minimal SARC archive reader/writer (little-endian, as used on 3DS).
 
@@ -9,14 +9,16 @@ import (
 	"sort"
 )
 
-type sarcEntry struct {
+// SARCEntry is one file in a SARC archive.
+type SARCEntry struct {
 	Name string
 	Data []byte
 }
 
 const sarcHashMultiplier = 0x65
 
-func sarcHash(name string) uint32 {
+// SARCHash is SARC's file name hash.
+func SARCHash(name string) uint32 {
 	var h uint32
 	for i := 0; i < len(name); i++ {
 		h = h*sarcHashMultiplier + uint32(name[i])
@@ -24,8 +26,8 @@ func sarcHash(name string) uint32 {
 	return h
 }
 
-// parseSARC returns the archive's entries in stored (hash) order.
-func parseSARC(b []byte) ([]sarcEntry, error) {
+// ParseSARC returns the archive's entries in stored (hash) order.
+func ParseSARC(b []byte) ([]SARCEntry, error) {
 	if len(b) < 0x20 || string(b[:4]) != "SARC" || b[6] != 0xff || b[7] != 0xfe {
 		return nil, errors.New("sarc: not a little-endian SARC")
 	}
@@ -40,7 +42,7 @@ func parseSARC(b []byte) ([]sarcEntry, error) {
 	if names > len(b) || string(b[names-8:names-4]) != "SFNT" {
 		return nil, errors.New("sarc: missing SFNT")
 	}
-	entries := make([]sarcEntry, 0, count)
+	entries := make([]SARCEntry, 0, count)
 	for i := 0; i < count; i++ {
 		n := b[nodes+16*i:]
 		attr := binary.LittleEndian.Uint32(n[4:])
@@ -61,18 +63,18 @@ func parseSARC(b []byte) ([]sarcEntry, error) {
 			}
 			name = string(b[off : off+l])
 		}
-		entries = append(entries, sarcEntry{Name: name, Data: b[start:end]})
+		entries = append(entries, SARCEntry{Name: name, Data: b[start:end]})
 	}
 	return entries, nil
 }
 
-// buildSARC writes entries sorted by name hash. Each file's data is aligned to
+// BuildSARC writes entries sorted by name hash. Each file's data is aligned to
 // fileAlign within the data section, which itself starts at a multiple of
 // dataAlign. Nintendo's Badge Arcade archives use (4, 16) for data_v131.dat's
 // outer archive and (128, 128) for each post archive.
-func buildSARC(entries []sarcEntry, fileAlign, dataAlign int) []byte {
-	sorted := append([]sarcEntry{}, entries...)
-	sort.SliceStable(sorted, func(i, j int) bool { return sarcHash(sorted[i].Name) < sarcHash(sorted[j].Name) })
+func BuildSARC(entries []SARCEntry, fileAlign, dataAlign int) []byte {
+	sorted := append([]SARCEntry{}, entries...)
+	sort.SliceStable(sorted, func(i, j int) bool { return SARCHash(sorted[i].Name) < SARCHash(sorted[j].Name) })
 
 	var names bytes.Buffer
 	nameOffsets := make([]int, len(sorted))
@@ -99,7 +101,7 @@ func buildSARC(entries []sarcEntry, fileAlign, dataAlign int) []byte {
 		start := data.Len()
 		data.Write(e.Data)
 		n := nodes[16*i:]
-		binary.LittleEndian.PutUint32(n[0:], sarcHash(e.Name))
+		binary.LittleEndian.PutUint32(n[0:], SARCHash(e.Name))
 		binary.LittleEndian.PutUint32(n[4:], 1<<24|uint32(nameOffsets[i]/4))
 		binary.LittleEndian.PutUint32(n[8:], uint32(start))
 		binary.LittleEndian.PutUint32(n[12:], uint32(data.Len()))

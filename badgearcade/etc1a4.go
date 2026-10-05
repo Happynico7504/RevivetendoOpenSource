@@ -1,4 +1,4 @@
-package main
+package badgearcade
 
 // 3DS ETC1A4 textures, as used by Badge Arcade's Miiverse gallery (Mii.Etc1_a4,
 // 128x128). Layout: the image is split into 8x8 tiles in row-major order; each
@@ -40,8 +40,8 @@ func clamp255(v int) uint8 {
 	return uint8(v)
 }
 
-// decodeETC1A4 decodes a w x h ETC1A4 texture.
-func decodeETC1A4(data []byte, w, h int) *image.NRGBA {
+// DecodeETC1A4 decodes a w x h ETC1A4 texture.
+func DecodeETC1A4(data []byte, w, h int) *image.NRGBA {
 	img := image.NewNRGBA(image.Rect(0, 0, w, h))
 	for bi, o := range etc1a4BlockOrigins(w, h) {
 		if (bi+1)*16 > len(data) {
@@ -94,10 +94,10 @@ func decodeETC1A4(data []byte, w, h int) *image.NRGBA {
 	return img
 }
 
-// encodeETC1A4 encodes a w x h image (w, h multiples of 8) as ETC1A4, using
+// EncodeETC1A4 encodes a w x h image (w, h multiples of 8) as ETC1A4, using
 // ETC1's individual mode with an exhaustive search over flip and tables -
 // plenty for a 128x128 Mii face.
-func encodeETC1A4(img image.Image, w, h int) []byte {
+func EncodeETC1A4(img image.Image, w, h int) []byte {
 	px := func(x, y int) (int, int, int, uint8) {
 		c := color.NRGBAModel.Convert(img.At(img.Bounds().Min.X+x, img.Bounds().Min.Y+y)).(color.NRGBA)
 		return int(c.R), int(c.G), int(c.B), c.A

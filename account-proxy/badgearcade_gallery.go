@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"image"
 	"image/color"
-	"image/draw"
 	"image/jpeg"
 	_ "image/png"
 	"io"
@@ -28,11 +27,13 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/Happynico7504/badgearcade"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -54,30 +55,64 @@ var badgeArcadeGalleryPrefixes = []string{"GB_en", "US_en", "JP_ja"}
 // badgeArcadeGalleryTestConsoles get it - useful for trying out package changes.
 const badgeArcadeGalleryForEveryone = true
 
-// badgeArcadeGalleryTestConsoles are console IDs from the SpotPass User-Agent
-// ("PBOS-8.0/<id>-...") that get the generated package even when it isn't
-// served to everyone.
-var badgeArcadeGalleryTestConsoles = map[string]bool{}
-
-func badgeArcadeGalleryEnabledFor(r *http.Request) bool {
-	if badgeArcadeGalleryForEveryone {
-		return true
-	}
+// badgeArcadeTestConsole reports whether the request's SpotPass User-Agent
+// ("PBOS-8.0/<console id>-...") is listed in badgeArcadeBossDataDir/test-consoles.txt
+// (one ID per line, # comments). Test consoles get the gallery even when it isn't
+// served to everyone, and the experimental package variant when one exists. A
+// file outside the repo keeps console IDs private, and edits apply immediately.
+func badgeArcadeTestConsole(r *http.Request) bool {
 	id, _, _ := strings.Cut(strings.TrimPrefix(r.Header.Get("User-Agent"), "PBOS-8.0/"), "-")
-	return badgeArcadeGalleryTestConsoles[id]
+	if id == "" {
+		return false
+	}
+	raw, err := os.ReadFile(badgeArcadeBossDataDir + "/test-consoles.txt")
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		line, _, _ = strings.Cut(line, "#")
+		if strings.TrimSpace(line) == id {
+			return true
+		}
+	}
+	return false
 }
 
-// badgeArcadeGalleryFile returns the generated package's path relative to
-// badgeArcadeBossDataDir, or "" when there is none for this file set.
-func badgeArcadeGalleryFile(prefix, fragment string) string {
-	if fragment != badgeArcadeGalleryDataFile {
+func badgeArcadeGalleryEnabledFor(r *http.Request) bool {
+	return badgeArcadeGalleryForEveryone || badgeArcadeTestConsole(r)
+}
+
+// badgeArcadePackageVariant is one flavour of the generated package.
+type badgeArcadePackageVariant struct {
+	Dir      string // under badgeArcadeBossDataDir
+	Cranes   bool   // also put a crane lineup on today's schedule (redateCraneSchedule)
+	NsOffset uint32 // keeps its ns_data_ids apart from the other variant's
+}
+
+var (
+	badgeArcadeStableVariant       = badgeArcadePackageVariant{Dir: badgeArcadeGalleryDir}
+	badgeArcadeExperimentalVariant = badgeArcadePackageVariant{Dir: badgeArcadeGalleryDir + "/experimental", Cranes: true, NsOffset: 50000}
+	badgeArcadePackageVariants     = []badgeArcadePackageVariant{badgeArcadeStableVariant, badgeArcadeExperimentalVariant}
+)
+
+// badgeArcadeGalleryFile returns the generated package to serve for this
+// request, relative to badgeArcadeBossDataDir, or "" for none: the experimental
+// variant for test consoles when it exists, otherwise the stable one.
+func badgeArcadeGalleryFile(r *http.Request, prefix, fragment string) string {
+	if fragment != badgeArcadeGalleryDataFile || !badgeArcadeGalleryEnabledFor(r) {
 		return ""
 	}
-	rel := badgeArcadeGalleryDir + "/" + prefix + "_" + fragment
-	if _, err := os.Stat(badgeArcadeBossDataDir + "/" + rel); err != nil {
-		return ""
+	variants := []badgeArcadePackageVariant{badgeArcadeStableVariant}
+	if badgeArcadeTestConsole(r) {
+		variants = []badgeArcadePackageVariant{badgeArcadeExperimentalVariant, badgeArcadeStableVariant}
 	}
-	return rel
+	for _, v := range variants {
+		rel := v.Dir + "/" + prefix + "_" + fragment
+		if _, err := os.Stat(badgeArcadeBossDataDir + "/" + rel); err == nil {
+			return rel
+		}
+	}
+	return ""
 }
 
 type badgeArcadeGalleryPost struct {
@@ -147,59 +182,6 @@ func fetchBadgeArcadeGalleryImage(url string) (image.Image, error) {
 	return img, err
 }
 
-// fitImage scales src (bilinear) to fit inside w x h, centred on bg.
-func fitImage(src image.Image, w, h int, bg color.Color) *image.NRGBA {
-	dst := image.NewNRGBA(image.Rect(0, 0, w, h))
-	draw.Draw(dst, dst.Bounds(), &image.Uniform{bg}, image.Point{}, draw.Src)
-	sb := src.Bounds()
-	sw, sh := sb.Dx(), sb.Dy()
-	if sw == 0 || sh == 0 {
-		return dst
-	}
-	scale := float64(w) / float64(sw)
-	if s := float64(h) / float64(sh); s < scale {
-		scale = s
-	}
-	tw, th := int(float64(sw)*scale+0.5), int(float64(sh)*scale+0.5)
-	ox, oy := (w-tw)/2, (h-th)/2
-	at := func(x, y int) color.NRGBA {
-		if x >= sw {
-			x = sw - 1
-		}
-		if y >= sh {
-			y = sh - 1
-		}
-		return color.NRGBAModel.Convert(src.At(sb.Min.X+x, sb.Min.Y+y)).(color.NRGBA)
-	}
-	for y := 0; y < th; y++ {
-		fy := (float64(y)+0.5)/scale - 0.5
-		if fy < 0 {
-			fy = 0
-		}
-		y0 := int(fy)
-		wy := fy - float64(y0)
-		for x := 0; x < tw; x++ {
-			fx := (float64(x)+0.5)/scale - 0.5
-			if fx < 0 {
-				fx = 0
-			}
-			x0 := int(fx)
-			wx := fx - float64(x0)
-			c00, c10, c01, c11 := at(x0, y0), at(x0+1, y0), at(x0, y0+1), at(x0+1, y0+1)
-			mix := func(a, b, c, d uint8) uint8 {
-				top := float64(a)*(1-wx) + float64(b)*wx
-				bot := float64(c)*(1-wx) + float64(d)*wx
-				return uint8(top*(1-wy) + bot*wy + 0.5)
-			}
-			dst.SetNRGBA(ox+x, oy+y, color.NRGBA{
-				mix(c00.R, c10.R, c01.R, c11.R), mix(c00.G, c10.G, c01.G, c11.G),
-				mix(c00.B, c10.B, c01.B, c11.B), mix(c00.A, c10.A, c01.A, c11.A),
-			})
-		}
-	}
-	return dst
-}
-
 func xmlEscapeText(s string) string {
 	var b strings.Builder
 	for _, r := range s {
@@ -230,13 +212,13 @@ func buildBadgeArcadeGalleryPost(p badgeArcadeGalleryPost, index int) ([]byte, e
 		return nil, err
 	}
 	var jpg bytes.Buffer
-	if err := jpeg.Encode(&jpg, fitImage(pic, 320, 240, color.Black), &jpeg.Options{Quality: 90}); err != nil {
+	if err := jpeg.Encode(&jpg, badgearcade.FitImage(pic, 320, 240, color.Black), &jpeg.Options{Quality: 90}); err != nil {
 		return nil, err
 	}
 	// A missing Mii face shouldn't drop the post; it then shows no Mii.
 	face := image.Image(image.NewNRGBA(image.Rect(0, 0, 128, 128)))
 	if f, err := fetchBadgeArcadeGalleryImage(fmt.Sprintf("%s/mii/%d/normal_face.png", badgeArcadeGalleryAssetBase, p.PID)); err == nil {
-		face = fitImage(f, 128, 128, color.Transparent)
+		face = badgearcade.FitImage(f, 128, 128, color.Transparent)
 	} else {
 		log.Printf("badge arcade gallery: no Mii for post %s: %v", p.ID, err)
 	}
@@ -248,10 +230,10 @@ func buildBadgeArcadeGalleryPost(p badgeArcadeGalleryPost, index int) ([]byte, e
 		"  <PathMii>Mii.Etc1_a4</PathMii>\r\n" +
 		"  <PathImage>Image.jpg</PathImage>\r\n" +
 		"</DistributablePost>"
-	return buildSARC([]sarcEntry{
+	return badgearcade.BuildSARC([]badgearcade.SARCEntry{
 		{Name: "post.xml", Data: []byte(postXML)},
 		{Name: "Image.jpg", Data: jpg.Bytes()},
-		{Name: "Mii.Etc1_a4", Data: encodeETC1A4(face, 128, 128)},
+		{Name: "Mii.Etc1_a4", Data: badgearcade.EncodeETC1A4(face, 128, 128)},
 	}, 128, 128), nil
 }
 
@@ -327,16 +309,82 @@ func rewriteBadgeArcadeSchedule(schedule string, ids []string) (string, error) {
 	return scheduleCountRe.ReplaceAllString(out, fmt.Sprintf("<ItemsCount>%d</ItemsCount>", total)), nil
 }
 
+// redateCraneSchedule puts a crane lineup on today's schedule: the crane archive
+// (PrizeCollection) gets an open window, and of Nintendo's seven daily groups of
+// DefaultStage (30 machines) and BonusStage items, the one picked by the day
+// number gets today as its window. The other days stay expired.
+func redateCraneSchedule(schedule string, dayStart time.Time) string {
+	startRe := regexp.MustCompile(`<DateStartText>(\d{8})<`)
+	setName := func(item string) string {
+		if m := regexp.MustCompile(`<RegexSetName>([^<]*)<`).FindStringSubmatch(item); m != nil {
+			return m[1]
+		}
+		return ""
+	}
+	days := map[string]bool{}
+	for _, it := range scheduleItemRe.FindAllString(schedule, -1) {
+		if n := setName(it); n == "DefaultStage" || n == "BonusStage" {
+			if m := startRe.FindStringSubmatch(it); m != nil {
+				days[m[1]] = true
+			}
+		}
+	}
+	var sorted []string
+	for d := range days {
+		sorted = append(sorted, d)
+	}
+	sort.Strings(sorted)
+	pick := ""
+	if len(sorted) > 0 {
+		pick = sorted[int(dayStart.Unix()/86400)%len(sorted)]
+	}
+	today, tomorrow := dayStart.Format("20060102"), dayStart.Add(24*time.Hour).Format("20060102")
+	window := func(item, from, to string) string {
+		item = regexp.MustCompile(`<DateStartText>\d{8}<`).ReplaceAllString(item, "<DateStartText>"+from+"<")
+		return regexp.MustCompile(`<DateExpireText>\d{8}<`).ReplaceAllString(item, "<DateExpireText>"+to+"<")
+	}
+	return scheduleItemRe.ReplaceAllStringFunc(schedule, func(it string) string {
+		switch setName(it) {
+		case "PrizeCollection":
+			return window(it, "20260101", "20991231")
+		case "DefaultStage", "BonusStage":
+			if m := startRe.FindStringSubmatch(it); m != nil && m[1] == pick {
+				return window(it, today, tomorrow)
+			}
+		}
+		return it
+	})
+}
+
 // badgeArcadeGalleryNsDataID is unique per UTC day and above every ns_data_id
 // Nintendo used for Badge Arcade (max seen: 11500), so consoles always take a
 // new day's package as new data.
+var (
+	boss3DSKeyOnce sync.Once
+	boss3DSKey     []byte
+	boss3DSKeyErr  error
+)
+
+// loadBoss3DSKey loads the 3DS BOSS key from BOSS3DS_KEY_FILE (default
+// /home/nico/boss3ds_key.hex; console-derived, so kept outside the repo).
+func loadBoss3DSKey() ([]byte, error) {
+	boss3DSKeyOnce.Do(func() {
+		path := os.Getenv("BOSS3DS_KEY_FILE")
+		if path == "" {
+			path = "/home/nico/boss3ds_key.hex"
+		}
+		boss3DSKey, boss3DSKeyErr = badgearcade.LoadBOSSKey(path)
+	})
+	return boss3DSKey, boss3DSKeyErr
+}
+
 func badgeArcadeGalleryNsDataID(dayStart time.Time) uint32 {
 	return uint32(100000 + dayStart.Unix()/86400)
 }
 
 // generateBadgeArcadeGallery builds one file set's package for dayStart and
 // returns its bytes plus the posts used.
-func generateBadgeArcadeGallery(ctx context.Context, prefix string, dayStart time.Time, posts []badgeArcadeGalleryPost) ([]byte, []string, error) {
+func generateBadgeArcadeGallery(ctx context.Context, prefix string, dayStart time.Time, posts []badgeArcadeGalleryPost, variant badgeArcadePackageVariant) ([]byte, []string, error) {
 	key, err := loadBoss3DSKey()
 	if err != nil {
 		return nil, nil, err
@@ -345,16 +393,16 @@ func generateBadgeArcadeGallery(ctx context.Context, prefix string, dayStart tim
 	if err != nil {
 		return nil, nil, err
 	}
-	serial, payloads, err := parseBoss3DS(key, raw)
+	serial, payloads, err := badgearcade.ParseBOSS(key, raw)
 	if err != nil || len(payloads) != 1 {
 		return nil, nil, fmt.Errorf("%s: %v (payloads %d)", prefix, err, len(payloads))
 	}
-	entries, err := parseSARC(payloads[0].Content)
+	entries, err := badgearcade.ParseSARC(payloads[0].Content)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	var kept []sarcEntry
+	var kept []badgearcade.SARCEntry
 	var indexes []int // Nintendo's <index> values, reused in slot order
 	var schedule string
 	for _, e := range entries {
@@ -362,7 +410,7 @@ func generateBadgeArcadeGallery(ctx context.Context, prefix string, dayStart tim
 		case e.Name == "Schedule.xml":
 			schedule = string(e.Data) // replaced below
 		case strings.HasPrefix(e.Name, "post/"):
-			if inner, err := parseSARC(e.Data); err == nil {
+			if inner, err := badgearcade.ParseSARC(e.Data); err == nil {
 				for _, f := range inner {
 					if f.Name == "post.xml" {
 						if m := postXMLIndexRe.FindSubmatch(f.Data); m != nil {
@@ -390,7 +438,7 @@ func generateBadgeArcadeGallery(ctx context.Context, prefix string, dayStart tim
 			log.Printf("badge arcade gallery: skipping post %s: %v", p.ID, err)
 			continue
 		}
-		kept = append(kept, sarcEntry{Name: "post/" + p.ID + ".sarc", Data: sarc})
+		kept = append(kept, badgearcade.SARCEntry{Name: "post/" + p.ID + ".sarc", Data: sarc})
 		ids = append(ids, p.ID)
 	}
 	if len(posts) > 0 && len(ids) == 0 {
@@ -405,12 +453,15 @@ func generateBadgeArcadeGallery(ctx context.Context, prefix string, dayStart tim
 	if err != nil {
 		return nil, nil, err
 	}
-	kept = append(kept, sarcEntry{Name: "Schedule.xml", Data: []byte(newSchedule)})
+	if variant.Cranes {
+		newSchedule = redateCraneSchedule(newSchedule, dayStart)
+	}
+	kept = append(kept, badgearcade.SARCEntry{Name: "Schedule.xml", Data: []byte(newSchedule)})
 
-	payloads[0].Content = buildSARC(kept, 4, 16)
-	payloads[0].NsDataID = badgeArcadeGalleryNsDataID(dayStart)
+	payloads[0].Content = badgearcade.BuildSARC(kept, 4, 16)
+	payloads[0].NsDataID = badgeArcadeGalleryNsDataID(dayStart) + variant.NsOffset
 	payloads[0].Version = 1
-	out, err := buildBoss3DS(key, serial, payloads, nil)
+	out, err := badgearcade.BuildBOSS(key, serial, payloads, nil)
 	return out, ids, err
 }
 
@@ -420,40 +471,42 @@ func refreshBadgeArcadeGallery(ctx context.Context, now time.Time) {
 	badgeArcadeGalMux.Lock()
 	defer badgeArcadeGalMux.Unlock()
 	dayStart := now.UTC().Truncate(24 * time.Hour)
-	dir := badgeArcadeBossDataDir + "/" + badgeArcadeGalleryDir
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		log.Printf("badge arcade gallery: %v", err)
-		return
-	}
 	dayTag := dayStart.Format("2006-01-02")
 	var posts []badgeArcadeGalleryPost
 	selected := false
-	for _, prefix := range badgeArcadeGalleryPrefixes {
-		marker := dir + "/" + prefix + ".day"
-		if b, err := os.ReadFile(marker); err == nil && strings.TrimSpace(string(b)) == dayTag {
-			continue
+	for _, variant := range badgeArcadePackageVariants {
+		dir := badgeArcadeBossDataDir + "/" + variant.Dir
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			log.Printf("badge arcade gallery: %v", err)
+			return
 		}
-		if !selected {
-			var err error
-			if posts, err = selectBadgeArcadeGalleryPosts(ctx, dayStart); err != nil {
-				log.Printf("badge arcade gallery: selecting posts: %v", err)
-				return
+		for _, prefix := range badgeArcadeGalleryPrefixes {
+			marker := dir + "/" + prefix + ".day"
+			if b, err := os.ReadFile(marker); err == nil && strings.TrimSpace(string(b)) == dayTag {
+				continue
 			}
-			selected = true
+			if !selected {
+				var err error
+				if posts, err = selectBadgeArcadeGalleryPosts(ctx, dayStart); err != nil {
+					log.Printf("badge arcade gallery: selecting posts: %v", err)
+					return
+				}
+				selected = true
+			}
+			out, ids, err := generateBadgeArcadeGallery(ctx, prefix, dayStart, posts, variant)
+			if err != nil {
+				log.Printf("badge arcade gallery: %s: %v", prefix, err)
+				continue
+			}
+			final := dir + "/" + prefix + "_" + badgeArcadeGalleryDataFile
+			if err := os.WriteFile(final+".tmp", out, 0o644); err != nil || os.Rename(final+".tmp", final) != nil {
+				log.Printf("badge arcade gallery: writing %s failed", final)
+				continue
+			}
+			os.WriteFile(marker, []byte(dayTag+"\n"), 0o644)
+			log.Printf("badge arcade gallery: built %s/%s for %s (ns_data_id %d, %d bytes, posts %v)",
+				variant.Dir, prefix, dayTag, badgeArcadeGalleryNsDataID(dayStart)+variant.NsOffset, len(out), ids)
 		}
-		out, ids, err := generateBadgeArcadeGallery(ctx, prefix, dayStart, posts)
-		if err != nil {
-			log.Printf("badge arcade gallery: %s: %v", prefix, err)
-			continue
-		}
-		final := dir + "/" + prefix + "_" + badgeArcadeGalleryDataFile
-		if err := os.WriteFile(final+".tmp", out, 0o644); err != nil || os.Rename(final+".tmp", final) != nil {
-			log.Printf("badge arcade gallery: writing %s failed", final)
-			continue
-		}
-		os.WriteFile(marker, []byte(dayTag+"\n"), 0o644)
-		log.Printf("badge arcade gallery: built %s for %s (ns_data_id %d, %d bytes, posts %v)",
-			prefix, dayTag, badgeArcadeGalleryNsDataID(dayStart), len(out), ids)
 	}
 }
 
