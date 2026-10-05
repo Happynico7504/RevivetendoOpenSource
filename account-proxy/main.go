@@ -436,6 +436,7 @@ func main() {
 	}
 	mongoDB = mongoClient.Database("pretendo")
 	wscMongoDB = mongoClient.Database("wsc")
+	go badgeArcadeGalleryLoop()
 	log.Printf("connected to MongoDB")
 
 	refreshRedirects()
@@ -5278,6 +5279,11 @@ func handleNpdlCDN(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				log.Printf("npdl CDN: Badge Arcade %s -> real content %s unavailable (%v)", r.URL.Path, filename, err)
 				break
+			}
+			if gallery := badgeArcadeGalleryFile(regionPrefix, fragment); gallery != "" && badgeArcadeGalleryEnabledFor(r) {
+				if galleryData, galleryErr := os.ReadFile(badgeArcadeBossDataDir + "/" + gallery); galleryErr == nil {
+					filename, data = gallery, galleryData
+				}
 			}
 			// 2026-09-17: same CONN_HOST_MAX class of bug already root-caused
 			// for WSC (see project_wsc_taskrunnbdl_conn_host_max memory) -
