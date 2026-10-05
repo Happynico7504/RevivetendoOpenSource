@@ -58,7 +58,8 @@ const badgeArcadeGalleryForEveryone = true
 // badgeArcadeTestConsole reports whether the request's SpotPass User-Agent
 // ("PBOS-8.0/<console id>-...") is listed in badgeArcadeBossDataDir/test-consoles.txt
 // (one ID per line, # comments). Test consoles get the gallery even when it isn't
-// served to everyone, and the experimental package variant when one exists. A
+// served to everyone, and the experimental package variant (with "test"
+// deployments) when one exists. A
 // file outside the repo keeps console IDs private, and edits apply immediately.
 func badgeArcadeTestConsole(r *http.Request) bool {
 	id, _, _ := strings.Cut(strings.TrimPrefix(r.Header.Get("User-Agent"), "PBOS-8.0/"), "-")
@@ -84,18 +85,26 @@ func badgeArcadeGalleryEnabledFor(r *http.Request) bool {
 
 // badgeArcadePackageVariant is one flavour of the generated package.
 type badgeArcadePackageVariant struct {
-	Dir      string // under badgeArcadeBossDataDir
-	Cranes   bool   // also put a crane lineup on today's schedule (redateCraneSchedule)
-	NsOffset uint32 // keeps its ns_data_ids apart from the other variant's
+	Dir         string // under badgeArcadeBossDataDir
+	IncludeTest bool   // also build "test" deployments (test consoles only)
+	NsBase      uint32 // keeps the variants' ns_data_ids apart
 }
 
 var (
-	badgeArcadeStableVariant = badgeArcadePackageVariant{Dir: badgeArcadeGalleryDir}
-	// Bump the 1000s in NsOffset whenever the experimental content changes
-	// within a day, so test consoles take the rebuilt package as new data.
-	badgeArcadeExperimentalVariant = badgeArcadePackageVariant{Dir: badgeArcadeGalleryDir + "/experimental", Cranes: true, NsOffset: 50000 + 3*1000}
+	badgeArcadeStableVariant       = badgeArcadePackageVariant{Dir: badgeArcadeGalleryDir, NsBase: 1000000}
+	badgeArcadeExperimentalVariant = badgeArcadePackageVariant{Dir: badgeArcadeGalleryDir + "/experimental", IncludeTest: true, NsBase: 3000000}
 	badgeArcadePackageVariants     = []badgeArcadePackageVariant{badgeArcadeStableVariant, badgeArcadeExperimentalVariant}
 )
+
+// badgeArcadeMaxRevision is how often one day's package can be rebuilt
+// ("Publish now") while keeping ns_data_ids unique: NsBase + day*10 + rev.
+const badgeArcadeMaxRevision = 9
+
+// badgeArcadePackageNsDataID gives every day and revision its own ns_data_id
+// (above all of Nintendo's, max 11500), so consoles take it as new data.
+func badgeArcadePackageNsDataID(v badgeArcadePackageVariant, day time.Time, rev int) uint32 {
+	return v.NsBase + uint32(day.Unix()/86400)*10 + uint32(rev)
+}
 
 // badgeArcadeGalleryFile returns the generated package to serve for this
 // request, relative to badgeArcadeBossDataDir, or "" for none: the experimental
@@ -358,100 +367,6 @@ func redateCraneSchedule(schedule string, dayStart time.Time) string {
 	})
 }
 
-// Custom test content (experimental variant only; 2026-10-05 first custom
-// badge test): when badgeArcadeBossDataDir/custom/test-badge.png exists, a badge
-// is built from it, a copy of crane machine badgeArcadeCustomTemplate is filled
-// with it, and that machine becomes today's BonusStage (training crane) and the
-// first hall machine.
-const (
-	badgeArcadeCustomTemplate = "Pokemon_091" // standard crane, 7 prize spots, one slope (PokeDot_124 was too hard)
-	badgeArcadeCustomMachine  = "Rvt_000"
-	badgeArcadeCustomBadge    = "Pr_Rvt_Test_000"
-	badgeArcadeCustomBadgeID  = 900000001 // custom badges: 900,000,000+ (Nintendo's max is 80,100,000)
-	badgeArcadeCustomCraneID  = 9001      // custom machines: 9,000+ (Nintendo's max is 4,498)
-)
-
-func addBadgeArcadeCustomTest(kept []badgearcade.SARCEntry, schedule string, dayStart time.Time) (string, error) {
-	f, err := os.Open(badgeArcadeBossDataDir + "/custom/test-badge.png")
-	if err != nil {
-		return schedule, nil // no test content
-	}
-	defer f.Close()
-	img, _, err := image.Decode(f)
-	if err != nil {
-		return "", fmt.Errorf("custom test badge: %v", err)
-	}
-	for i, e := range kept {
-		if !strings.HasPrefix(e.Name, "sharc/") {
-			continue
-		}
-		weekly, err := badgearcade.ParseSARC(e.Data)
-		if err != nil {
-			return "", err
-		}
-		var tmpl *badgearcade.CraneInstance
-		category := "Rvt"
-		for _, w := range weekly {
-			if w.Name == badgearcade.CraneInstancePath(badgeArcadeCustomTemplate) {
-				if tmpl, err = badgearcade.ParseCraneInstanceFile(w.Data); err != nil {
-					return "", err
-				}
-			}
-		}
-		if tmpl == nil {
-			return "", fmt.Errorf("custom test: template %s not in %s", badgeArcadeCustomTemplate, e.Name)
-		}
-		// Use the template prizes' category, so the badge files under an
-		// existing collection book instead of needing a new one.
-		for _, w := range weekly {
-			if len(tmpl.Prizes) > 0 && w.Name == badgearcade.PrizePath(tmpl.Prizes[0]) {
-				if p, err := badgearcade.ParsePrizeFile(w.Data); err == nil {
-					category = p.CategoryName()
-				}
-			}
-		}
-		spec := badgearcade.PrizeSpec{BadgeID: badgeArcadeCustomBadgeID, FileName: badgeArcadeCustomBadge, Category: category, Image: img}
-		for l := range spec.Names {
-			spec.Names[l] = "Mii TV"
-		}
-		badge := badgearcade.BuildPrize(spec)
-		tmpl.ID, tmpl.Name = badgeArcadeCustomCraneID, badgeArcadeCustomMachine
-		tmpl.Prizes = []string{badge.Name()}
-		for k := range tmpl.MachinePrizes {
-			tmpl.MachinePrizes[k].Index = 0
-		}
-		for k := range tmpl.CollectionPrizes {
-			tmpl.CollectionPrizes[k].Index = 0
-		}
-		out, err := badgearcade.AddCustomContent(e.Data, []*badgearcade.Prize{badge}, []*badgearcade.CraneInstance{tmpl})
-		if err != nil {
-			return "", err
-		}
-		kept[i].Data = out
-		// Today's BonusStage (training crane, one free try per day) and the
-		// first of today's 30 DefaultStage hall machines -> our machine.
-		today := "<DateStartText>" + dayStart.Format("20060102") + "<"
-		valueRe := regexp.MustCompile(`<Value>[^<]*</Value>`)
-		hallDone := false
-		return scheduleItemRe.ReplaceAllStringFunc(schedule, func(it string) string {
-			if !strings.Contains(it, today) {
-				return it
-			}
-			bonus := strings.Contains(it, "<RegexSetName>BonusStage</RegexSetName>")
-			hall := !hallDone && strings.Contains(it, "<RegexSetName>DefaultStage</RegexSetName>")
-			if !bonus && !hall {
-				return it
-			}
-			hallDone = hallDone || hall
-			return valueRe.ReplaceAllString(it, "<Value>"+badgeArcadeCustomMachine+"</Value>")
-		}), nil
-	}
-	return "", fmt.Errorf("custom test: package has no crane archive")
-}
-
-// badgeArcadeGalleryNsDataID is unique per UTC day and above every ns_data_id
-// Nintendo used for Badge Arcade (max seen: 11500), so consoles always take a
-// new day's package as new data.
 var (
 	boss3DSKeyOnce sync.Once
 	boss3DSKey     []byte
@@ -471,13 +386,10 @@ func loadBoss3DSKey() ([]byte, error) {
 	return boss3DSKey, boss3DSKeyErr
 }
 
-func badgeArcadeGalleryNsDataID(dayStart time.Time) uint32 {
-	return uint32(100000 + dayStart.Unix()/86400)
-}
-
-// generateBadgeArcadeGallery builds one file set's package for dayStart and
-// returns its bytes plus the posts used.
-func generateBadgeArcadeGallery(ctx context.Context, prefix string, dayStart time.Time, posts []badgeArcadeGalleryPost, variant badgeArcadePackageVariant) ([]byte, []string, error) {
+// generateBadgeArcadeGallery builds one file set's package for dayStart (gallery
+// posts plus deployments) and returns its bytes plus the posts used.
+func generateBadgeArcadeGallery(ctx context.Context, prefix string, dayStart time.Time, posts []badgeArcadeGalleryPost,
+	deps []badgeArcadeDeployment, variant badgeArcadePackageVariant, rev int) ([]byte, []string, error) {
 	key, err := loadBoss3DSKey()
 	if err != nil {
 		return nil, nil, err
@@ -546,24 +458,27 @@ func generateBadgeArcadeGallery(ctx context.Context, prefix string, dayStart tim
 	if err != nil {
 		return nil, nil, err
 	}
-	if variant.Cranes {
+	if len(deps) > 0 {
 		newSchedule = redateCraneSchedule(newSchedule, dayStart)
-		if newSchedule, err = addBadgeArcadeCustomTest(kept, newSchedule, dayStart); err != nil {
+		if newSchedule, err = applyBadgeArcadeDeployments(prefix, kept, newSchedule, dayStart, deps); err != nil {
 			return nil, nil, err
 		}
 	}
 	kept = append(kept, badgearcade.SARCEntry{Name: "Schedule.xml", Data: []byte(newSchedule)})
 
 	payloads[0].Content = badgearcade.BuildSARC(kept, 4, 16)
-	payloads[0].NsDataID = badgeArcadeGalleryNsDataID(dayStart) + variant.NsOffset
+	payloads[0].NsDataID = badgeArcadePackageNsDataID(variant, dayStart, rev)
 	payloads[0].Version = 1
 	out, err := badgearcade.BuildBOSS(key, serial, payloads, nil)
 	return out, ids, err
 }
 
-// refreshBadgeArcadeGallery (re)builds every file set's package for the
-// current UTC day unless it already exists.
-func refreshBadgeArcadeGallery(ctx context.Context, now time.Time) {
+// rebuildBadgeArcadePackages (re)builds every variant's and file set's package
+// for the current UTC day: once per day normally, or - with force - again with
+// the next revision when that variant's deployments changed ("Publish now";
+// unchanged packages keep their ns_data_id so consoles don't re-download
+// them). The .day marker holds "<date> <revision> <deployments fingerprint>".
+func rebuildBadgeArcadePackages(ctx context.Context, now time.Time, force bool) {
 	badgeArcadeGalMux.Lock()
 	defer badgeArcadeGalMux.Unlock()
 	dayStart := now.UTC().Truncate(24 * time.Hour)
@@ -576,20 +491,39 @@ func refreshBadgeArcadeGallery(ctx context.Context, now time.Time) {
 			log.Printf("badge arcade gallery: %v", err)
 			return
 		}
+		deps, err := loadBadgeArcadeDeployments(ctx, dayStart, variant.IncludeTest)
+		if err != nil {
+			log.Printf("badge arcade gallery: loading deployments: %v", err)
+			return
+		}
+		fingerprint := badgeArcadeDeploymentsFingerprint(deps)
 		for _, prefix := range badgeArcadeGalleryPrefixes {
 			marker := dir + "/" + prefix + ".day"
-			if b, err := os.ReadFile(marker); err == nil && strings.TrimSpace(string(b)) == dayTag {
-				continue
+			rev := 0
+			if b, err := os.ReadFile(marker); err == nil {
+				f := strings.Fields(string(b))
+				if len(f) > 0 && f[0] == dayTag {
+					if !force || (len(f) > 2 && f[2] == fingerprint) {
+						continue
+					}
+					if len(f) > 1 {
+						rev, _ = strconv.Atoi(f[1])
+					}
+					if rev >= badgeArcadeMaxRevision {
+						log.Printf("badge arcade gallery: %s/%s already rebuilt %d times today; next build at midnight", variant.Dir, prefix, rev)
+						continue
+					}
+					rev++
+				}
 			}
 			if !selected {
-				var err error
 				if posts, err = selectBadgeArcadeGalleryPosts(ctx, dayStart); err != nil {
 					log.Printf("badge arcade gallery: selecting posts: %v", err)
 					return
 				}
 				selected = true
 			}
-			out, ids, err := generateBadgeArcadeGallery(ctx, prefix, dayStart, posts, variant)
+			out, ids, err := generateBadgeArcadeGallery(ctx, prefix, dayStart, posts, deps, variant, rev)
 			if err != nil {
 				log.Printf("badge arcade gallery: %s: %v", prefix, err)
 				continue
@@ -599,9 +533,9 @@ func refreshBadgeArcadeGallery(ctx context.Context, now time.Time) {
 				log.Printf("badge arcade gallery: writing %s failed", final)
 				continue
 			}
-			os.WriteFile(marker, []byte(dayTag+"\n"), 0o644)
-			log.Printf("badge arcade gallery: built %s/%s for %s (ns_data_id %d, %d bytes, posts %v)",
-				variant.Dir, prefix, dayTag, badgeArcadeGalleryNsDataID(dayStart)+variant.NsOffset, len(out), ids)
+			os.WriteFile(marker, []byte(fmt.Sprintf("%s %d %s\n", dayTag, rev, fingerprint)), 0o644)
+			log.Printf("badge arcade gallery: built %s/%s for %s rev %d (ns_data_id %d, %d bytes, posts %v, %d deployments)",
+				variant.Dir, prefix, dayTag, rev, badgeArcadePackageNsDataID(variant, dayStart, rev), len(out), ids, len(deps))
 		}
 	}
 }
@@ -610,7 +544,7 @@ func refreshBadgeArcadeGallery(ctx context.Context, now time.Time) {
 // UTC midnight; failures retry every 10 minutes.
 func badgeArcadeGalleryLoop() {
 	for {
-		refreshBadgeArcadeGallery(context.Background(), time.Now())
+		rebuildBadgeArcadePackages(context.Background(), time.Now(), false)
 		now := time.Now().UTC()
 		next := now.Truncate(24 * time.Hour).Add(24*time.Hour + 2*time.Minute)
 		if wait := time.Until(next); wait > 10*time.Minute {

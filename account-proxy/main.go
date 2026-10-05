@@ -460,6 +460,7 @@ func main() {
 	go func() {
 		mux := http.NewServeMux()
 		mux.HandleFunc("/internal/auth", handleInternalAuth)
+		mux.HandleFunc("/internal/badge-arcade/rebuild", handleBadgeArcadeRebuild)
 		mux.HandleFunc("/internal/mii", handleInternalMii)
 		mux.HandleFunc("/internal/web/status", handleWebStatus)
 		mux.HandleFunc("/internal/web/set-password", handleWebSetPassword)

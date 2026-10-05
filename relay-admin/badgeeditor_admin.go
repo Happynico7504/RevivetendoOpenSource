@@ -253,7 +253,7 @@ button{font:inherit;cursor:pointer;border:none;border-radius:4px;padding:.35rem 
 <body>
 <p><a href="/inkay/admin/">← Back to admin</a></p>
 <h1>Badge Arcade creations</h1>
-<p class="meta">Players make these in the <a href="/inkay/my/badge-arcade/" target="_blank">badge editor</a>. Approved creations can be deployed to the arcade.</p>
+<p class="meta">Players make these in the <a href="/inkay/my/badge-arcade/" target="_blank">badge editor</a>. Approved creations can be put into the arcade under <a href="/inkay/admin/badge-arcade/deployments/">Deployments</a>.</p>
 {{if .Msg}}<div class="msg">{{.Msg}}</div>{{end}}
 <div class="tabs">{{$st := .Status}}{{$c := .Counts}}{{range .Statuses}}<a href="?status={{.}}" class="{{if eq . $st}}on{{end}}">{{.}} ({{count $c .}})</a>{{end}}</div>
 {{range .Items}}

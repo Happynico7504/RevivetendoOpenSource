@@ -97,6 +97,7 @@ func registerBadgeEditor() {
 	http.HandleFunc(badgeEditorBase+"api/creations", badgeEditorCreations)
 	http.HandleFunc(badgeEditorBase+"api/creations/", badgeEditorCreation)
 	registerBadgeEditorAdmin()
+	registerBadgeArcadeDeploy()
 }
 
 func badgeEditorJSON(w http.ResponseWriter, status int, v any) {

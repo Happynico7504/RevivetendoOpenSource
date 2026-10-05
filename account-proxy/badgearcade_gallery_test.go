@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"image"
+	"image/color"
 	"image/png"
 	"os"
 	"regexp"
@@ -112,7 +115,7 @@ func TestBadgeArcadeGalleryLive(t *testing.T) {
 	for _, p := range posts {
 		t.Logf("post %s by %s, %d yeahs, %s", p.ID, p.Name, p.Yeahs, p.CreatedAt.Format(time.RFC3339))
 	}
-	out, ids, err := generateBadgeArcadeGallery(ctx, "GB_en", day, posts, badgeArcadeStableVariant)
+	out, ids, err := generateBadgeArcadeGallery(ctx, "GB_en", day, posts, nil, badgeArcadeStableVariant, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,13 +175,28 @@ func TestRedateCraneSchedule(t *testing.T) {
 	}
 }
 
-func TestBadgeArcadeCustomTest(t *testing.T) {
-	if _, err := os.Stat(badgeArcadeBossDataDir + "/custom/test-badge.png"); err != nil {
-		t.Skip("no custom test badge")
-	}
+func TestBadgeArcadeDeployments(t *testing.T) {
 	loadBadgeArcadeData(t, "GB_en") // skips without key/content
-	day := time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC)
-	out, _, err := generateBadgeArcadeGallery(context.Background(), "GB_en", day, nil, badgeArcadeExperimentalVariant)
+	img := image.NewNRGBA(image.Rect(0, 0, 64, 96))
+	for y := 8; y < 88; y++ {
+		for x := 8; x < 56; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{40, 120, 200, 255})
+		}
+	}
+	var art bytes.Buffer
+	png.Encode(&art, img)
+	badge := func(id int64, name string) badgeArcadeDeploymentBadge {
+		b := badgeArcadeDeploymentBadge{CreationID: id, Art: art.Bytes()}
+		b.Spec.Names[1] = name
+		return b
+	}
+	deps := []badgeArcadeDeployment{
+		{ID: 1, Template: "Pokemon_091", Slot: "hall", Badges: []badgeArcadeDeploymentBadge{badge(11, "One"), badge(12, "Two")}},
+		{ID: 2, Template: "Pokemon_091", Slot: "training", Badges: []badgeArcadeDeploymentBadge{badge(11, "One")}},
+		{ID: 3, Template: "NoSuchTemplate", Slot: "hall", Badges: []badgeArcadeDeploymentBadge{badge(13, "Three")}},
+	}
+	day := time.Date(2026, 10, 6, 0, 0, 0, 0, time.UTC)
+	out, _, err := generateBadgeArcadeGallery(context.Background(), "GB_en", day, nil, deps, badgeArcadeStableVariant, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,52 +205,52 @@ func TestBadgeArcadeCustomTest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if payloads[0].NsDataID != badgeArcadeGalleryNsDataID(day)+badgeArcadeExperimentalVariant.NsOffset {
-		t.Fatal("wrong ns_data_id")
+	if got, want := payloads[0].NsDataID, badgeArcadePackageNsDataID(badgeArcadeStableVariant, day, 2); got != want {
+		t.Fatalf("ns_data_id %d, want %d", got, want)
 	}
 	entries, _ := badgearcade.ParseSARC(payloads[0].Content)
+	wi, _ := badgearcade.WeeklyArchiveIndex(entries)
+	weekly, _ := badgearcade.ParseSARC(entries[wi].Data)
+	files := map[string][]byte{}
+	for _, w := range weekly {
+		files[w.Name] = w.Data
+	}
+	for _, id := range []int64{11, 12} {
+		p, err := badgearcade.ParsePrizeFile(files[badgearcade.PrizePath(badgeArcadeDeployedBadgeName(id))])
+		if err != nil || p.BadgeID != uint32(badgeArcadeCustomBadgeBase+id) {
+			t.Fatalf("badge %d: %v", id, err)
+		}
+	}
+	if _, ok := files[badgearcade.PrizePath(badgeArcadeDeployedBadgeName(13))]; ok {
+		t.Fatal("badge of the unbuildable deployment was added")
+	}
+	hall, err := badgearcade.ParseCraneInstanceFile(files[badgearcade.CraneInstancePath(badgeArcadeDeployedMachineName(1))])
+	if err != nil || len(hall.Prizes) != 2 {
+		t.Fatalf("hall machine: %v", err)
+	}
 	var schedule string
-	var weekly []badgearcade.SARCEntry
 	for _, e := range entries {
 		if e.Name == "Schedule.xml" {
 			schedule = string(e.Data)
 		}
-		if strings.HasPrefix(e.Name, "sharc/") {
-			weekly, _ = badgearcade.ParseSARC(e.Data)
+	}
+	if strings.Count(schedule, "<Value>"+badgeArcadeDeployedMachineName(1)+"</Value>") != 1 ||
+		strings.Count(schedule, "<Value>"+badgeArcadeDeployedMachineName(2)+"</Value>") != 1 {
+		t.Fatal("deployments not scheduled exactly once each")
+	}
+	if !regexp.MustCompile(`(?s)<DateStartText>20261006<.{0,900}<RegexSetName>BonusStage</RegexSetName>.{0,900}<Value>` + badgeArcadeDeployedMachineName(2) + `</Value>`).MatchString(schedule) {
+		t.Fatal("training deployment is not today's BonusStage")
+	}
+	// Without deployments nothing about the cranes changes.
+	plain, _, err := generateBadgeArcadeGallery(context.Background(), "GB_en", day, nil, nil, badgeArcadeStableVariant, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, pp, _ := badgearcade.ParseBOSS(key, plain)
+	pe, _ := badgearcade.ParseSARC(pp[0].Content)
+	for _, e := range pe {
+		if e.Name == "Schedule.xml" && strings.Contains(string(e.Data), "<DateStartText>20261006<") {
+			t.Fatal("crane schedule changed without deployments")
 		}
-	}
-	found := map[string]bool{}
-	for _, w := range weekly {
-		found[w.Name] = true
-		if w.Name == badgearcade.CraneInstancePath(badgeArcadeCustomMachine) {
-			c, err := badgearcade.ParseCraneInstanceFile(w.Data)
-			if err != nil || c.Prizes[0] != badgeArcadeCustomBadge || c.ID != badgeArcadeCustomCraneID {
-				t.Fatalf("custom machine wrong: %v", err)
-			}
-			t.Logf("machine %s: stage %s, %d prize spots, category from template", c.Name, c.Crane, len(c.MachinePrizes))
-		}
-		if w.Name == badgearcade.PrizePath(badgeArcadeCustomBadge) {
-			p, err := badgearcade.ParsePrizeFile(w.Data)
-			if err != nil || p.BadgeID != badgeArcadeCustomBadgeID {
-				t.Fatalf("custom badge wrong: %v", err)
-			}
-			polys, _ := p.CollisionPolygons()
-			t.Logf("badge %s id %d category %s name %q, %d collision polygons", p.Name(), p.BadgeID, p.CategoryName(), p.DisplayName(1), len(polys))
-			if dir := os.Getenv("BADGE_ARCADE_GALLERY_LIVE"); dir != "" {
-				if w, err := os.Create(dir + "/custom_badge_64.png"); err == nil {
-					png.Encode(w, p.Image64())
-					w.Close()
-				}
-			}
-		}
-	}
-	if !found[badgearcade.PrizePath(badgeArcadeCustomBadge)] || !found[badgearcade.CraneInstancePath(badgeArcadeCustomMachine)] {
-		t.Fatal("custom files missing from the crane archive")
-	}
-	if !regexp.MustCompile(`(?s)<DateStartText>20261005<.{0,900}<RegexSetName>BonusStage</RegexSetName>.{0,900}<Value>` + badgeArcadeCustomMachine + `</Value>`).MatchString(schedule) {
-		t.Fatal("today's BonusStage does not point at the custom machine")
-	}
-	if n := strings.Count(schedule, "<Value>"+badgeArcadeCustomMachine+"</Value>"); n != 2 {
-		t.Fatalf("custom machine scheduled %d times, want 2 (training + hall)", n)
 	}
 }
