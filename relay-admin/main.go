@@ -558,6 +558,7 @@ func main() {
 	http.HandleFunc("/my/discord", myDiscordHandler)
 	http.HandleFunc("/my/account", myAccountHandler)
 	http.HandleFunc("/my/", myHandler)
+	registerBadgeEditor()
 	http.HandleFunc("/activity/random-mii", activityRandomMiiHandler)
 	http.HandleFunc("/activity/bgm.mp3", activityBGMHandler)
 	http.HandleFunc("/activity/logo.png", activityLogoHandler)

@@ -16,9 +16,7 @@ require (
 	github.com/klauspost/crc32 v1.3.0 // indirect
 	github.com/minio/crc64nvme v1.1.1 // indirect
 	github.com/minio/md5-simd v1.1.2 // indirect
-	github.com/minio/minio-go/v7 v7.3.0 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect
-	github.com/redis/go-redis/v9 v9.22.0 // indirect
 	github.com/rs/xid v1.6.0 // indirect
 	github.com/tinylib/msgp v1.6.4 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
@@ -30,3 +28,11 @@ require (
 	golang.org/x/text v0.41.0 // indirect
 	gopkg.in/ini.v1 v1.67.3 // indirect
 )
+
+require (
+	github.com/Happynico7504/badgearcade v0.0.0
+	github.com/minio/minio-go/v7 v7.3.0
+	github.com/redis/go-redis/v9 v9.22.0
+)
+
+replace github.com/Happynico7504/badgearcade => ../badgearcade

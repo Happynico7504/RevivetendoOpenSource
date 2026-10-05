@@ -32,9 +32,9 @@ declare -A BIN_NAME=(
 	[badge-arcade-authentication]=badge-arcade-auth [badge-arcade-secure]=badge-arcade-secure [relayhub]=relayhub
 )
 declare -A BUILD_PKG=([account-grpc]=./cmd/account [relayhub]=./cmd/relayhub)
-# relayhub depends on the sibling relaylink module and account-proxy on badgearcade
+# relayhub depends on the sibling relaylink module, account-proxy and relay-admin on badgearcade
 # (go.mod replace directives), so changes there also trigger a rebuild.
-declare -A SRC_EXTRA=([account-proxy]="assets ../badgearcade" [relayhub]="../relaylink")
+declare -A SRC_EXTRA=([account-proxy]="assets ../badgearcade" [relay-admin]="../badgearcade" [relayhub]="../relaylink")
 
 # The command that rebuilds one service (run in a subshell via eval).
 declare -A BUILD_CMD=()
