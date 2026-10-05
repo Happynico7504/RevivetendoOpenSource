@@ -59,3 +59,7 @@ figcaption{font-size:.75rem;color:var(--muted);margin-top:.35rem}
 .pill{display:inline-block;border-radius:999px;padding:.05rem .5rem;font-size:.7rem;font-weight:600;background:#e2e8f0;color:#334155;margin-top:.25rem}
 .pill.submitted{background:#fef3c7;color:#92400e}.pill.approved{background:#dcfce7;color:#166534}.pill.rejected{background:#fee2e2;color:#991b1b}
 .note{font-size:.75rem;color:#991b1b;margin-top:.25rem}
+button.submit{border-color:#16a34a;color:#166534}
+button.submit:hover{background:#f0fdf4}
+.rules{background:#fff;border:1px solid var(--line);border-radius:8px;padding:.6rem .9rem;margin-top:.75rem;font-size:.85rem}
+.rules p{margin:.2rem 0}.rules ul{margin:.3rem 0 .2rem;padding-left:1.2rem}.rules li{margin:.15rem 0}

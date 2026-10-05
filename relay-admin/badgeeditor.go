@@ -15,6 +15,8 @@ package main
 //	/my/badge-arcade/api/creations     list (GET) / create (POST) own creations
 //	/my/badge-arcade/api/creations/{id} load (GET) / update (PUT) / delete (DELETE)
 //	/my/badge-arcade/api/creations/{id}/art.png
+//	/my/badge-arcade/api/creations/{id}/submit    send a draft/rejected creation for review
+//	/my/badge-arcade/api/creations/{id}/withdraw  take a submission back
 
 import (
 	"bytes"
@@ -61,6 +63,9 @@ CREATE TABLE IF NOT EXISTS badge_arcade_creations (
 	updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS badge_arcade_creations_pid ON badge_arcade_creations (pid);
+ALTER TABLE badge_arcade_creations ADD COLUMN IF NOT EXISTS submitted_at TIMESTAMPTZ;
+ALTER TABLE badge_arcade_creations ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS badge_arcade_creations_status ON badge_arcade_creations (status, submitted_at);
 `
 
 const badgeEditorBase = "/my/badge-arcade/"
@@ -71,6 +76,7 @@ const (
 	badgeEditorMaxSource    = 3 << 20   // original upload, kept for re-editing
 	badgeEditorMaxBody      = 6 << 20
 	badgeEditorMaxTitle     = 60
+	badgeEditorMaxPending   = 5 // submissions waiting for review, per account
 )
 
 func registerBadgeEditor() {
@@ -90,6 +96,7 @@ func registerBadgeEditor() {
 	http.HandleFunc(badgeEditorBase+"api/preview", badgeEditorPreview)
 	http.HandleFunc(badgeEditorBase+"api/creations", badgeEditorCreations)
 	http.HandleFunc(badgeEditorBase+"api/creations/", badgeEditorCreation)
+	registerBadgeEditorAdmin()
 }
 
 func badgeEditorJSON(w http.ResponseWriter, status int, v any) {
@@ -470,6 +477,18 @@ func badgeEditorCreation(w http.ResponseWriter, r *http.Request) {
 		w.Write(art)
 		return
 	}
+	if sub == "submit" || sub == "withdraw" {
+		if r.Method != http.MethodPost {
+			badgeEditorError(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		var empty struct{}
+		if !badgeEditorReadJSON(w, r, &empty) { // JSON only, see badgeEditorReadJSON
+			return
+		}
+		badgeEditorSubmit(w, pid, id, status, sub == "submit")
+		return
+	}
 	if sub != "" {
 		badgeEditorError(w, http.StatusNotFound, "not found")
 		return
@@ -531,3 +550,33 @@ func badgeEditorCreation(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// badgeEditorSubmit moves a creation into the review queue, or back out.
+func badgeEditorSubmit(w http.ResponseWriter, pid, id int64, status string, submit bool) {
+	if !submit {
+		if status != "submitted" {
+			badgeEditorError(w, http.StatusConflict, "only submitted creations can be withdrawn")
+			return
+		}
+		db.Exec(`UPDATE badge_arcade_creations SET status = 'draft', submitted_at = NULL, updated_at = NOW()
+			WHERE id = $1 AND pid = $2 AND status = 'submitted'`, id, pid)
+		badgeEditorJSON(w, http.StatusOK, map[string]any{"id": id, "status": "draft"})
+		return
+	}
+	if status != "draft" && status != "rejected" {
+		badgeEditorError(w, http.StatusConflict, "this creation is already "+status)
+		return
+	}
+	if badgeEditorBanned(pid) {
+		badgeEditorError(w, http.StatusForbidden, "this account can't submit creations")
+		return
+	}
+	var pending int
+	db.QueryRow(`SELECT COUNT(*) FROM badge_arcade_creations WHERE pid = $1 AND status = 'submitted'`, pid).Scan(&pending)
+	if pending >= badgeEditorMaxPending {
+		badgeEditorError(w, http.StatusForbidden, fmt.Sprintf("you already have %d creations waiting for review", pending))
+		return
+	}
+	db.Exec(`UPDATE badge_arcade_creations SET status = 'submitted', submitted_at = NOW(), review_note = '', updated_at = NOW()
+		WHERE id = $1 AND pid = $2`, id, pid)
+	badgeEditorJSON(w, http.StatusOK, map[string]any{"id": id, "status": "submitted"})
+}

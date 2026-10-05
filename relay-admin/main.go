@@ -1996,6 +1996,7 @@ input[type=text],select{border:1px solid #d1d5db;border-radius:4px;padding:.4rem
   <a href="/inkay/admin/spotpass-wiiu/">📢 Wii U SpotPass</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/spotpass-3ds/">📮 3DS Swapdoodle</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/spotpass-3ds-sysmsg/">📢 3DS SpotPass</a> &nbsp;|&nbsp;
+  <a href="/inkay/admin/badge-arcade/">🏅 Badge Arcade</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/api-docs/">📖 API docs</a> &nbsp;|&nbsp;
   <a href="/wsc-public/">🎳 WSC</a>
 </p>

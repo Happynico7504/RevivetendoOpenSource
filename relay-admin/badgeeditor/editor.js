@@ -264,6 +264,7 @@
         a.innerHTML = '<a href="../">Log in</a> to save your creations<br><small>(then come back to this page)</small>';
       }
       $("save").disabled = $("saveCopy").disabled = !me.loggedIn;
+      updateSubmit();
       return refreshList();
     });
   }
@@ -278,13 +279,21 @@
           '<div class="t" title="' + esc(c.title) + '">' + esc(c.title) + "</div>" +
           '<span class="pill ' + c.status + '">' + c.status + "</span>" +
           (c.reviewNote ? '<div class="note">' + esc(c.reviewNote) + "</div>" : "") +
-          '<div class="actions"><button type="button" data-load="' + c.id + '">Edit</button>' +
+          '<div class="actions"><button type="button" data-load="' + c.id + '">' + (c.status === "draft" || c.status === "rejected" ? "Edit" : "View") + "</button>" +
+          (c.status === "submitted" ? '<button type="button" data-withdraw="' + c.id + '">Withdraw</button>' : "") +
           (c.status !== "approved" ? '<button type="button" data-del="' + c.id + '">Delete</button>' : "") + "</div></div>";
       }).join("") + "</div>";
     }).catch(function (e) { box.innerHTML = '<p class="status err">' + esc(e.message) + "</p>"; });
   }
   $("creations").addEventListener("click", function (e) {
-    var id = e.target.getAttribute("data-load"), del = e.target.getAttribute("data-del");
+    var id = e.target.getAttribute("data-load"), del = e.target.getAttribute("data-del"), wd = e.target.getAttribute("data-withdraw");
+    if (wd) {
+      api("creations/" + wd + "/withdraw", { method: "POST", body: {} }).then(function () {
+        if (state.current && state.current.id === +wd) state.current.status = "draft";
+        refreshList(); updateSubmit();
+      }).catch(function (err) { alert(err.message); });
+      return;
+    }
     if (id) {
       if (state.dirty && !confirm("Discard your unsaved changes?")) return;
       loadCreation(+id);
@@ -312,6 +321,7 @@
         $("title").value = c.title || "";
         state.current = { id: c.id, status: c.status };
         state.dirty = false;
+        updateSubmit();
         $("drophint").classList.add("hidden");
         render(); preview(); refreshList();
         status($("saveStatus"), c.status === "submitted" || c.status === "approved"
@@ -321,8 +331,8 @@
   }
 
   function save(asCopy) {
-    if (!state.img) { status($("saveStatus"), "Add an image first.", "err"); return; }
-    if (!$("nameEn").value.trim()) { status($("saveStatus"), "Give the badge an English name.", "err"); $("nameEn").focus(); return; }
+    if (!state.img) { status($("saveStatus"), "Add an image first.", "err"); return Promise.reject(new Error("no image")); }
+    if (!$("nameEn").value.trim()) { status($("saveStatus"), "Give the badge an English name.", "err"); $("nameEn").focus(); return Promise.reject(new Error("no name")); }
     var body = {
       kind: "badge", title: $("title").value, art: artDataURL(), source: state.source || "",
       spec: { names: names(), collision: state.collision, view: state.view }
@@ -332,15 +342,42 @@
       ? api("creations/" + state.current.id, { method: "PUT", body: body })
       : api("creations", { method: "POST", body: body });
     status($("saveStatus"), "Saving…");
-    req.then(function (r) {
+    return req.then(function (r) {
       state.current = { id: r.id, status: "draft" };
       state.dirty = false;
       status($("saveStatus"), "Saved.", "ok");
-      refreshList();
-    }).catch(function (e) { status($("saveStatus"), e.message, "err"); });
+      refreshList(); updateSubmit();
+      return r;
+    }).catch(function (e) { status($("saveStatus"), e.message, "err"); throw e; });
   }
-  $("save").onclick = function () { save(false); };
-  $("saveCopy").onclick = function () { save(true); };
+
+  // ---------- submitting for review ----------
+  function updateSubmit() {
+    var st = state.current && state.current.status;
+    var b = $("submit");
+    b.disabled = !state.loggedIn || st === "submitted" || st === "approved";
+    b.textContent = st === "submitted" ? "Waiting for review" : st === "approved" ? "Approved" : "Submit for review…";
+  }
+  $("submit").onclick = function () {
+    if (!state.img) { status($("saveStatus"), "Add an image first.", "err"); return; }
+    $("rules").hidden = false;
+  };
+  $("submitCancel").onclick = function () { $("rules").hidden = true; };
+  $("submitConfirm").onclick = function () {
+    $("rules").hidden = true;
+    var st = state.current && state.current.status;
+    var saved = state.current && !state.dirty && (st === "draft" || st === "rejected")
+      ? Promise.resolve(state.current) : save(false);
+    saved.then(function (c) {
+      return api("creations/" + c.id + "/submit", { method: "POST", body: {} });
+    }).then(function () {
+      state.current.status = "submitted";
+      status($("saveStatus"), "Submitted — you'll see the review result in “My creations”.", "ok");
+      refreshList(); updateSubmit();
+    }).catch(function (e) { status($("saveStatus"), e.message, "err"); });
+  };
+  $("save").onclick = function () { save(false).catch(function () {}); };
+  $("saveCopy").onclick = function () { save(true).catch(function () {}); };
   $("new").onclick = function () {
     if (state.dirty && !confirm("Discard your unsaved changes?")) return;
     state.img = null; state.source = null; state.collision = null; state.shown = []; state.current = null; state.dirty = false;
@@ -349,7 +386,7 @@
     ["p64", "p32", "ptex", "pshadow"].forEach(function (i) { $(i).removeAttribute("src"); });
     $("drophint").classList.remove("hidden");
     status($("saveStatus"), ""); status($("previewStatus"), "");
-    render(); refreshList();
+    render(); refreshList(); updateSubmit();
   };
 
   window.addEventListener("beforeunload", function (e) { if (state.dirty) { e.preventDefault(); e.returnValue = ""; } });
