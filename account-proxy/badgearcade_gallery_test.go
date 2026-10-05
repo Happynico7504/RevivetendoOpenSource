@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"image/png"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -168,5 +169,70 @@ func TestRedateCraneSchedule(t *testing.T) {
 	}
 	if next := redateCraneSchedule(orig, day.Add(24*time.Hour)); next == strings.ReplaceAll(out, "20261005", "20261006") {
 		t.Fatal("consecutive days should pick different lineups")
+	}
+}
+
+func TestBadgeArcadeCustomTest(t *testing.T) {
+	if _, err := os.Stat(badgeArcadeBossDataDir + "/custom/test-badge.png"); err != nil {
+		t.Skip("no custom test badge")
+	}
+	loadBadgeArcadeData(t, "GB_en") // skips without key/content
+	day := time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC)
+	out, _, err := generateBadgeArcadeGallery(context.Background(), "GB_en", day, nil, badgeArcadeExperimentalVariant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, _ := loadBoss3DSKey()
+	_, payloads, err := badgearcade.ParseBOSS(key, out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payloads[0].NsDataID != badgeArcadeGalleryNsDataID(day)+badgeArcadeExperimentalVariant.NsOffset {
+		t.Fatal("wrong ns_data_id")
+	}
+	entries, _ := badgearcade.ParseSARC(payloads[0].Content)
+	var schedule string
+	var weekly []badgearcade.SARCEntry
+	for _, e := range entries {
+		if e.Name == "Schedule.xml" {
+			schedule = string(e.Data)
+		}
+		if strings.HasPrefix(e.Name, "sharc/") {
+			weekly, _ = badgearcade.ParseSARC(e.Data)
+		}
+	}
+	found := map[string]bool{}
+	for _, w := range weekly {
+		found[w.Name] = true
+		if w.Name == badgearcade.CraneInstancePath(badgeArcadeCustomMachine) {
+			c, err := badgearcade.ParseCraneInstanceFile(w.Data)
+			if err != nil || c.Prizes[0] != badgeArcadeCustomBadge || c.ID != badgeArcadeCustomCraneID {
+				t.Fatalf("custom machine wrong: %v", err)
+			}
+			t.Logf("machine %s: stage %s, %d prize spots, category from template", c.Name, c.Crane, len(c.MachinePrizes))
+		}
+		if w.Name == badgearcade.PrizePath(badgeArcadeCustomBadge) {
+			p, err := badgearcade.ParsePrizeFile(w.Data)
+			if err != nil || p.BadgeID != badgeArcadeCustomBadgeID {
+				t.Fatalf("custom badge wrong: %v", err)
+			}
+			polys, _ := p.CollisionPolygons()
+			t.Logf("badge %s id %d category %s name %q, %d collision polygons", p.Name(), p.BadgeID, p.CategoryName(), p.DisplayName(1), len(polys))
+			if dir := os.Getenv("BADGE_ARCADE_GALLERY_LIVE"); dir != "" {
+				if w, err := os.Create(dir + "/custom_badge_64.png"); err == nil {
+					png.Encode(w, p.Image64())
+					w.Close()
+				}
+			}
+		}
+	}
+	if !found[badgearcade.PrizePath(badgeArcadeCustomBadge)] || !found[badgearcade.CraneInstancePath(badgeArcadeCustomMachine)] {
+		t.Fatal("custom files missing from the crane archive")
+	}
+	if !regexp.MustCompile(`(?s)<DateStartText>20261005<.{0,900}<RegexSetName>BonusStage</RegexSetName>.{0,900}<Value>` + badgeArcadeCustomMachine + `</Value>`).MatchString(schedule) {
+		t.Fatal("today's BonusStage does not point at the custom machine")
+	}
+	if n := strings.Count(schedule, "<Value>"+badgeArcadeCustomMachine+"</Value>"); n != 2 {
+		t.Fatalf("custom machine scheduled %d times, want 2 (training + hall)", n)
 	}
 }

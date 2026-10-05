@@ -90,8 +90,10 @@ type badgeArcadePackageVariant struct {
 }
 
 var (
-	badgeArcadeStableVariant       = badgeArcadePackageVariant{Dir: badgeArcadeGalleryDir}
-	badgeArcadeExperimentalVariant = badgeArcadePackageVariant{Dir: badgeArcadeGalleryDir + "/experimental", Cranes: true, NsOffset: 50000}
+	badgeArcadeStableVariant = badgeArcadePackageVariant{Dir: badgeArcadeGalleryDir}
+	// Bump the 1000s in NsOffset whenever the experimental content changes
+	// within a day, so test consoles take the rebuilt package as new data.
+	badgeArcadeExperimentalVariant = badgeArcadePackageVariant{Dir: badgeArcadeGalleryDir + "/experimental", Cranes: true, NsOffset: 50000 + 3*1000}
 	badgeArcadePackageVariants     = []badgeArcadePackageVariant{badgeArcadeStableVariant, badgeArcadeExperimentalVariant}
 )
 
@@ -356,6 +358,97 @@ func redateCraneSchedule(schedule string, dayStart time.Time) string {
 	})
 }
 
+// Custom test content (experimental variant only; 2026-10-05 first custom
+// badge test): when badgeArcadeBossDataDir/custom/test-badge.png exists, a badge
+// is built from it, a copy of crane machine badgeArcadeCustomTemplate is filled
+// with it, and that machine becomes today's BonusStage (training crane) and the
+// first hall machine.
+const (
+	badgeArcadeCustomTemplate = "Pokemon_091" // standard crane, 7 prize spots, one slope (PokeDot_124 was too hard)
+	badgeArcadeCustomMachine  = "Rvt_000"
+	badgeArcadeCustomBadge    = "Pr_Rvt_Test_000"
+	badgeArcadeCustomBadgeID  = 900000001 // custom badges: 900,000,000+ (Nintendo's max is 80,100,000)
+	badgeArcadeCustomCraneID  = 9001      // custom machines: 9,000+ (Nintendo's max is 4,498)
+)
+
+func addBadgeArcadeCustomTest(kept []badgearcade.SARCEntry, schedule string, dayStart time.Time) (string, error) {
+	f, err := os.Open(badgeArcadeBossDataDir + "/custom/test-badge.png")
+	if err != nil {
+		return schedule, nil // no test content
+	}
+	defer f.Close()
+	img, _, err := image.Decode(f)
+	if err != nil {
+		return "", fmt.Errorf("custom test badge: %v", err)
+	}
+	for i, e := range kept {
+		if !strings.HasPrefix(e.Name, "sharc/") {
+			continue
+		}
+		weekly, err := badgearcade.ParseSARC(e.Data)
+		if err != nil {
+			return "", err
+		}
+		var tmpl *badgearcade.CraneInstance
+		category := "Rvt"
+		for _, w := range weekly {
+			if w.Name == badgearcade.CraneInstancePath(badgeArcadeCustomTemplate) {
+				if tmpl, err = badgearcade.ParseCraneInstanceFile(w.Data); err != nil {
+					return "", err
+				}
+			}
+		}
+		if tmpl == nil {
+			return "", fmt.Errorf("custom test: template %s not in %s", badgeArcadeCustomTemplate, e.Name)
+		}
+		// Use the template prizes' category, so the badge files under an
+		// existing collection book instead of needing a new one.
+		for _, w := range weekly {
+			if len(tmpl.Prizes) > 0 && w.Name == badgearcade.PrizePath(tmpl.Prizes[0]) {
+				if p, err := badgearcade.ParsePrizeFile(w.Data); err == nil {
+					category = p.CategoryName()
+				}
+			}
+		}
+		spec := badgearcade.PrizeSpec{BadgeID: badgeArcadeCustomBadgeID, FileName: badgeArcadeCustomBadge, Category: category, Image: img}
+		for l := range spec.Names {
+			spec.Names[l] = "Mii TV"
+		}
+		badge := badgearcade.BuildPrize(spec)
+		tmpl.ID, tmpl.Name = badgeArcadeCustomCraneID, badgeArcadeCustomMachine
+		tmpl.Prizes = []string{badge.Name()}
+		for k := range tmpl.MachinePrizes {
+			tmpl.MachinePrizes[k].Index = 0
+		}
+		for k := range tmpl.CollectionPrizes {
+			tmpl.CollectionPrizes[k].Index = 0
+		}
+		out, err := badgearcade.AddCustomContent(e.Data, []*badgearcade.Prize{badge}, []*badgearcade.CraneInstance{tmpl})
+		if err != nil {
+			return "", err
+		}
+		kept[i].Data = out
+		// Today's BonusStage (training crane, one free try per day) and the
+		// first of today's 30 DefaultStage hall machines -> our machine.
+		today := "<DateStartText>" + dayStart.Format("20060102") + "<"
+		valueRe := regexp.MustCompile(`<Value>[^<]*</Value>`)
+		hallDone := false
+		return scheduleItemRe.ReplaceAllStringFunc(schedule, func(it string) string {
+			if !strings.Contains(it, today) {
+				return it
+			}
+			bonus := strings.Contains(it, "<RegexSetName>BonusStage</RegexSetName>")
+			hall := !hallDone && strings.Contains(it, "<RegexSetName>DefaultStage</RegexSetName>")
+			if !bonus && !hall {
+				return it
+			}
+			hallDone = hallDone || hall
+			return valueRe.ReplaceAllString(it, "<Value>"+badgeArcadeCustomMachine+"</Value>")
+		}), nil
+	}
+	return "", fmt.Errorf("custom test: package has no crane archive")
+}
+
 // badgeArcadeGalleryNsDataID is unique per UTC day and above every ns_data_id
 // Nintendo used for Badge Arcade (max seen: 11500), so consoles always take a
 // new day's package as new data.
@@ -455,6 +548,9 @@ func generateBadgeArcadeGallery(ctx context.Context, prefix string, dayStart tim
 	}
 	if variant.Cranes {
 		newSchedule = redateCraneSchedule(newSchedule, dayStart)
+		if newSchedule, err = addBadgeArcadeCustomTest(kept, newSchedule, dayStart); err != nil {
+			return nil, nil, err
+		}
 	}
 	kept = append(kept, badgearcade.SARCEntry{Name: "Schedule.xml", Data: []byte(newSchedule)})
 
