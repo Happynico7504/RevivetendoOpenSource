@@ -7,6 +7,7 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"sync"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -185,6 +186,7 @@ func dbFindGathering(gameMode uint32, requesterNatm uint32) uint32 {
 	filter := bson.D{
 		{Key: "match_key", Value: matchKey},
 		{Key: "open", Value: true},
+		{Key: "friends", Value: bson.D{{Key: "$ne", Value: true}}}, // friend sessions are joined by ID only
 	}
 	// Only match gatherings whose host has a compatible NAT type.
 	// natm ≤ 2 = open/cone (can hole-punch); natm = 3 = symmetric (cannot).
@@ -259,6 +261,13 @@ func dbFindGathering(gameMode uint32, requesterNatm uint32) uint32 {
 }
 
 func dbNewGathering(hostPID, gameMode, maxPlayers, hostNatm uint32) uint32 {
+	return dbNewGatheringOpts(hostPID, gameMode, maxPlayers, hostNatm, false)
+}
+
+// dbNewGatheringOpts creates a gathering; friends marks a session the host
+// created for friends (CreateMatchmakeSession), which friends join by ID and
+// random matchmaking (dbFindGathering) never offers.
+func dbNewGatheringOpts(hostPID, gameMode, maxPlayers, hostNatm uint32, friends bool) uint32 {
 	for {
 		gid := rand.Uint32()%500000 + 1
 		var check bson.M
@@ -277,12 +286,32 @@ func dbNewGathering(hostPID, gameMode, maxPlayers, hostNatm uint32) uint32 {
 			{Key: "player_count", Value: int64(1)},
 			{Key: "players", Value: bson.A{hostPID}},
 			{Key: "open", Value: maxPlayers > 1},
+			{Key: "friends", Value: friends},
 		})
 		return gid
 	}
 }
 
+// dbSetGatheringSession stores the host's own MatchmakeSession description of a
+// friend session (raw, as sent to CreateMatchmakeSession) and where its
+// ParticipationCount sits, for BrowseMatchmakeSession.
+func dbSetGatheringSession(gid uint32, content []byte, participationCountOffset int) {
+	gatheringsCol.UpdateOne(context.Background(),
+		bson.D{{Key: "gid", Value: gid}},
+		bson.D{{Key: "$set", Value: bson.D{
+			{Key: "session", Value: content},
+			{Key: "session_pc_offset", Value: int64(participationCountOffset)},
+		}}})
+}
+
+// gatheringMembersMu serializes the read-modify-write of a gathering's player
+// list (join/leave): two concurrent changes would otherwise each write back
+// their own copy of the list and one of them would be lost.
+var gatheringMembersMu sync.Mutex
+
 func dbJoinGathering(gid, pid uint32) {
+	gatheringMembersMu.Lock()
+	defer gatheringMembersMu.Unlock()
 	var result bson.M
 	err := gatheringsCol.FindOne(context.Background(), bson.D{{Key: "gid", Value: gid}}).Decode(&result)
 	if err != nil {
@@ -340,6 +369,8 @@ func dbLeaveAllGatherings(pid uint32) {
 }
 
 func dbLeaveGathering(gid, pid uint32) {
+	gatheringMembersMu.Lock()
+	defer gatheringMembersMu.Unlock()
 	var result bson.M
 	err := gatheringsCol.FindOne(context.Background(), bson.D{{Key: "gid", Value: gid}}).Decode(&result)
 	if err != nil {

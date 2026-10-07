@@ -30,6 +30,7 @@ import (
 	secure_connection "github.com/PretendoNetwork/nex-protocols-go/secure-connection"
 	utility "github.com/PretendoNetwork/nex-protocols-go/utility"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
@@ -1321,6 +1322,12 @@ func main() {
 				go handleOpenParticipation(packet)
 			case matchmake_extension.MethodCloseParticipation:
 				go handleCloseParticipation(packet)
+			case matchmake_extension.MethodCreateMatchmakeSession:
+				go handleCreateMatchmakeSessionRaw(packet)
+			case methodJoinMatchmakeSession, matchmake_extension.MethodJoinMatchmakeSessionEx:
+				go handleJoinMatchmakeSessionRaw(packet)
+			case methodBrowseMatchmakeSession:
+				go handleBrowseMatchmakeSessionRaw(packet)
 			default:
 				// Return empty list for any unimplemented MatchmakeExtension method so
 				// the client doesn't hang waiting (e.g. method=0x4 BrowseMatchmakeSession).
@@ -2410,6 +2417,289 @@ func handleAutoMatchmakeRaw(packet *nex.PacketV1) {
 	rmcResponseStream.WriteBytesNext(content)
 
 	sendResponse(client, matchmake_extension.ProtocolID, callID, matchmake_extension.MethodAutoMatchmakeWithSearchCriteria_Postpone, rmcResponseStream.Bytes())
+}
+
+// methodJoinMatchmakeSession is MatchmakeExtension method 7, which this
+// nex-protocols-go version has no constant for.
+const methodJoinMatchmakeSession = 0x7
+
+func sendErrorResponse(client *nex.Client, protocolID uint8, callID uint32, errorCode uint32) {
+	rmcResponse := nex.NewRMCResponse(protocolID, callID)
+	rmcResponse.SetError(errorCode)
+	pkt, _ := nex.NewPacketV1(client, nil)
+	pkt.SetVersion(1)
+	pkt.SetSource(0xA1)
+	pkt.SetDestination(0xAF)
+	pkt.SetType(nex.DataPacket)
+	pkt.SetPayload(rmcResponse.Bytes())
+	pkt.AddFlag(nex.FlagNeedsAck)
+	pkt.AddFlag(nex.FlagReliable)
+	nexServer.Send(pkt)
+}
+
+// methodBrowseMatchmakeSession is MatchmakeExtension method 4 (no constant in
+// this nex-protocols-go version).
+const methodBrowseMatchmakeSession = 0x4
+
+type friendListEntry struct {
+	PID  uint32
+	when time.Time
+	set  map[uint32]bool
+}
+
+var friendListCache sync.Map // uint32 pid -> friendListEntry
+
+// friendPIDsOf is a player's friends (account-proxy's /internal/friends, from the
+// Pretendo friend list syncs), cached for 30 s.
+func friendPIDsOf(pid uint32) map[uint32]bool {
+	if v, ok := friendListCache.Load(pid); ok && time.Since(v.(friendListEntry).when) < 30*time.Second {
+		return v.(friendListEntry).set
+	}
+	set := map[uint32]bool{}
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:9191/internal/friends/%d", pid))
+	if err != nil {
+		fmt.Printf("friendPIDsOf PID=%d: %v\n", pid, err)
+		return set
+	}
+	defer resp.Body.Close()
+	var list []struct {
+		PID uint32 `json:"pid"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&list) == nil {
+		for _, f := range list {
+			set[f.PID] = true
+		}
+	}
+	friendListCache.Store(pid, friendListEntry{PID: pid, when: time.Now(), set: set})
+	return set
+}
+
+// handleBrowseMatchmakeSessionRaw lets friends find each other's sessions: WSC
+// browses before creating its own (CreateMatchmakeSession), and with the stub's
+// empty list every friend ended up hosting a session of their own. Request:
+// MatchmakeSessionSearchCriteria (same layout as in AutoMatchmake), ResultRange.
+// Response: List<Data<MatchmakeSession>> of open friend sessions whose host is
+// a friend of the requester and plays the same sport/sub-mode.
+func handleBrowseMatchmakeSessionRaw(packet *nex.PacketV1) {
+	client := packet.Sender()
+	request := packet.RMCRequest()
+	callID := request.CallID()
+	params := request.Parameters()
+	empty := func() {
+		out := nex.NewStreamOut(nexServer)
+		out.WriteUInt32LE(0)
+		sendResponse(client, matchmake_extension.ProtocolID, callID, methodBrowseMatchmakeSession, out.Bytes())
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("BrowseMatchmakeSession panic (bug): PID=%d %v raw=%x\n", client.PID(), r, params)
+			empty()
+		}
+	}()
+	stream := nex.NewStreamIn(params, nexServer)
+	readStr := func() string {
+		l := stream.ReadUInt16LE()
+		b := stream.ReadBytesNext(int64(l))
+		if len(b) > 0 && b[len(b)-1] == 0 {
+			b = b[:len(b)-1]
+		}
+		return string(b)
+	}
+	var attribs []string
+	for n := int(stream.ReadUInt32LE()); n > 0; n-- {
+		attribs = append(attribs, readStr())
+	}
+	gameModeStr := readStr()
+	minStr, maxStr, systemType := readStr(), readStr(), readStr()
+	vacantOnly, excludeLocked, excludeNonHostPid := stream.ReadBool(), stream.ReadBool(), stream.ReadBool()
+	selection := stream.ReadUInt32LE()
+	vacant := stream.ReadUInt16LE()
+	offset, length := stream.ReadUInt32LE(), stream.ReadUInt32LE()
+	fmt.Printf("BrowseMatchmakeSession: PID=%d gameMode=%q min=%q max=%q system=%q attribs=%v vacantOnly=%t excludeLocked=%t excludeNonHost=%t selection=%d vacant=%d range=%d+%d\n",
+		client.PID(), gameModeStr, minStr, maxStr, systemType, attribs, vacantOnly, excludeLocked, excludeNonHostPid, selection, vacant, offset, length)
+
+	filter := bson.D{{Key: "friends", Value: true}, {Key: "open", Value: true}}
+	if gm, err := strconv.ParseUint(gameModeStr, 10, 32); err == nil {
+		filter = append(filter, bson.E{Key: "match_key", Value: int64(uint32(gm) & 0xFFFF0000)})
+	}
+	cur, err := gatheringsCol.Find(context.Background(), filter)
+	if err != nil {
+		empty()
+		return
+	}
+	var docs []bson.M
+	cur.All(context.Background(), &docs)
+
+	friends := friendPIDsOf(client.PID())
+	var found []bson.M
+	for _, d := range docs {
+		host := uint32(bsonInt(d["host"]))
+		if host == client.PID() || !friends[host] {
+			continue
+		}
+		if _, ok := connectedPIDs.Load(host); !ok {
+			continue
+		}
+		if bsonInt(d["player_count"]) >= bsonInt(d["max_players"]) {
+			continue
+		}
+		found = append(found, d)
+	}
+	if int(offset) < len(found) {
+		found = found[offset:]
+	} else {
+		found = nil
+	}
+	if length > 0 && int(length) < len(found) {
+		found = found[:length]
+	}
+
+	out := nex.NewStreamOut(nexServer)
+	out.WriteUInt32LE(uint32(len(found)))
+	for _, d := range found {
+		host := uint32(bsonInt(d["host"]))
+		if raw, ok := d["session"].(primitive.Binary); ok && len(raw.Data) >= 12 {
+			// The host's own session description, with the current ID, host and
+			// player count filled in.
+			c := append([]byte(nil), raw.Data...)
+			binary.LittleEndian.PutUint32(c[0:], uint32(bsonInt(d["gid"])))
+			binary.LittleEndian.PutUint32(c[4:], host)
+			binary.LittleEndian.PutUint32(c[8:], host)
+			if off := int(bsonInt(d["session_pc_offset"])); off > 0 && off+4 <= len(c) {
+				binary.LittleEndian.PutUint32(c[off:], uint32(bsonInt(d["player_count"])))
+			}
+			out.WriteString("MatchmakeSession")
+			out.WriteUInt32LE(uint32(len(c)) + 4)
+			out.WriteUInt32LE(uint32(len(c)))
+			out.Grow(int64(len(c)))
+			out.WriteBytesNext(c)
+			fmt.Printf("BrowseMatchmakeSession: PID=%d offered friend session gid=%d host=%d (host's description, %d bytes)\n", client.PID(), bsonInt(d["gid"]), host, len(c))
+			continue
+		}
+		session := match_making.NewMatchmakeSession()
+		session.GameMode = uint32(bsonInt(d["game_mode"]))
+		session.Gathering.ID = uint32(bsonInt(d["gid"]))
+		session.Gathering.OwnerPID = host
+		session.Gathering.HostPID = host
+		session.Gathering.MinimumParticipants = 1
+		session.Gathering.MaximumParticipants = uint16(bsonInt(d["max_players"]))
+		session.OpenParticipation = true
+		session.ParticipationCount = uint32(bsonInt(d["player_count"]))
+		session.SessionKey = make([]byte, 0)
+		content := nex.NewStreamOut(nexServer)
+		content.WriteStructure(session.Gathering)
+		content.WriteStructure(session)
+		c := content.Bytes()
+		out.WriteString("MatchmakeSession")
+		out.WriteUInt32LE(uint32(len(c)) + 4)
+		out.WriteUInt32LE(uint32(len(c)))
+		out.Grow(int64(len(c)))
+		out.WriteBytesNext(c)
+		fmt.Printf("BrowseMatchmakeSession: PID=%d offered friend session gid=%d host=%d\n", client.PID(), session.Gathering.ID, host)
+	}
+	sendResponse(client, matchmake_extension.ProtocolID, callID, methodBrowseMatchmakeSession, out.Bytes())
+}
+
+// handleCreateMatchmakeSessionRaw is the host side of a friend session: WSC
+// creates its own session (instead of AutoMatchmake) that friends then join by
+// its ID from the host's Friends presence. It was stubbed with an empty list,
+// so friend sessions never existed on the server (and never showed on the
+// dashboard). Parsed by hand like AutoMatchmake: NEX 3.4, no structure headers.
+// Request: Data<MatchmakeSession> (Gathering fields, then GameMode, ...),
+// message, participation count. Response: gid, session key.
+func handleCreateMatchmakeSessionRaw(packet *nex.PacketV1) {
+	client := packet.Sender()
+	request := packet.RMCRequest()
+	callID := request.CallID()
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("CreateMatchmakeSession panic (bug): PID=%d %v\n", client.PID(), r)
+			sendErrorResponse(client, matchmake_extension.ProtocolID, callID, nex.Errors.Core.InvalidArgument)
+		}
+	}()
+	stream := nex.NewStreamIn(request.Parameters(), nexServer)
+	if name, err := stream.ReadString(); err != nil || name != "MatchmakeSession" {
+		panic(fmt.Sprintf("unexpected data holder %q (%v)", name, err))
+	}
+	stream.ReadUInt32LE() // data holder length
+	contentLen := stream.ReadUInt32LE()
+	content := append([]byte(nil), stream.ReadBytesNext(int64(contentLen))...)
+	// The session exactly as the host described it (incl. its application data,
+	// where WSC keeps the host's name and Mii), kept so BrowseMatchmakeSession can
+	// hand it to friends; we parse only what we need from it.
+	cs := nex.NewStreamIn(content, nexServer)
+	cs.ReadUInt32LE() // Gathering.ID
+	cs.ReadUInt32LE() // OwnerPID
+	cs.ReadUInt32LE() // HostPID
+	cs.ReadUInt16LE() // MinimumParticipants
+	maxPlayers := uint32(cs.ReadUInt16LE())
+	cs.ReadUInt32LE()                          // ParticipationPolicy
+	cs.ReadUInt32LE()                          // PolicyArgument
+	cs.ReadUInt32LE()                          // Flags
+	cs.ReadUInt32LE()                          // State
+	if _, err := cs.ReadString(); err != nil { // Description
+		panic(err)
+	}
+	gameMode := cs.ReadUInt32LE()
+	cs.ReadListUInt32LE()                      // Attributes
+	cs.ReadUInt8()                             // OpenParticipation
+	cs.ReadUInt32LE()                          // MatchmakeSystemType
+	if _, err := cs.ReadBuffer(); err != nil { // ApplicationData
+		panic(err)
+	}
+	participationCountOffset := int(cs.ByteOffset())
+	if maxPlayers == 0 {
+		maxPlayers = 2
+	}
+
+	var natm uint32
+	if v, ok := pidNATm.Load(client.PID()); ok {
+		natm = v.(uint32)
+	}
+	dbLeaveAllGatherings(client.PID()) // a host can only be in one session
+	gid := dbNewGatheringOpts(client.PID(), gameMode, maxPlayers, natm, true)
+	dbSetGatheringSession(gid, content, participationCountOffset)
+	fmt.Printf("CreateMatchmakeSession: PID=%d created friend gathering gid=%d gameMode=%d (sport=0x%02x) maxPlayers=%d natm=%d\n",
+		client.PID(), gid, gameMode, gameMode>>24, maxPlayers, natm)
+
+	out := nex.NewStreamOut(nexServer)
+	out.WriteUInt32LE(gid)
+	out.WriteBuffer([]byte{}) // session key (empty, like AutoMatchmake's)
+	sendResponse(client, matchmake_extension.ProtocolID, callID, matchmake_extension.MethodCreateMatchmakeSession, out.Bytes())
+}
+
+// handleJoinMatchmakeSessionRaw is the friend side: joining a session by the ID
+// from the host's presence (JoinMatchmakeSession: gid, message;
+// JoinMatchmakeSessionEx adds dontCareMyBlockList, participationCount).
+// Response: session key.
+func handleJoinMatchmakeSessionRaw(packet *nex.PacketV1) {
+	client := packet.Sender()
+	request := packet.RMCRequest()
+	callID := request.CallID()
+	methodID := request.MethodID()
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("JoinMatchmakeSession panic (bug): PID=%d %v\n", client.PID(), r)
+			sendErrorResponse(client, matchmake_extension.ProtocolID, callID, nex.Errors.Core.InvalidArgument)
+		}
+	}()
+	stream := nex.NewStreamIn(request.Parameters(), nexServer)
+	gid := stream.ReadUInt32LE()
+
+	host := dbGetGatheringHost(gid)
+	if host == 0 {
+		fmt.Printf("JoinMatchmakeSession: PID=%d gid=%d not found\n", client.PID(), gid)
+		sendErrorResponse(client, matchmake_extension.ProtocolID, callID, nex.Errors.RendezVous.SessionVoid)
+		return
+	}
+	dbJoinGathering(gid, client.PID())
+	playerJoinedAt.Store(client.PID(), joinRecord{gid: gid, when: time.Now()})
+	fmt.Printf("JoinMatchmakeSession: PID=%d joined gathering gid=%d (host %d, method 0x%x)\n", client.PID(), gid, host, methodID)
+
+	out := nex.NewStreamOut(nexServer)
+	out.WriteBuffer([]byte{}) // session key
+	sendResponse(client, matchmake_extension.ProtocolID, callID, methodID, out.Bytes())
 }
 
 func handleOpenParticipation(packet *nex.PacketV1) {
