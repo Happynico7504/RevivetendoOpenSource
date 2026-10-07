@@ -353,6 +353,20 @@ CREATE TABLE IF NOT EXISTS pnid_cache (
 	pnid       TEXT        NOT NULL,
 	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS patreon_links (
+	pid             BIGINT      PRIMARY KEY,
+	patreon_user_id TEXT        NOT NULL UNIQUE,
+	full_name       TEXT        NOT NULL DEFAULT '',
+	linked_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS patreon_pending (
+	ref             TEXT        PRIMARY KEY,
+	patreon_user_id TEXT        NOT NULL,
+	coins           INTEGER     NOT NULL,
+	created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 `
 
 const seedRedirects = `
@@ -557,6 +571,11 @@ func main() {
 	http.HandleFunc("/my/logout", myLogoutHandler)
 	http.HandleFunc("/my/discord", myDiscordHandler)
 	http.HandleFunc("/my/account", myAccountHandler)
+	http.HandleFunc("/my/patreon", myPatreonHandler)
+	http.HandleFunc("/my/patreon/start", myPatreonStart)
+	http.HandleFunc("/my/patreon/callback", myPatreonCallback)
+	http.HandleFunc("/my/patreon/unlink", myPatreonUnlink)
+	http.HandleFunc("/patreon/webhook", patreonWebhook)
 	http.HandleFunc("/my/", myHandler)
 	registerBadgeEditor()
 	http.HandleFunc("/activity/random-mii", activityRandomMiiHandler)
@@ -572,6 +591,8 @@ func main() {
 	http.HandleFunc("/admin/relays/add", requireClientCert(adminRelaysAdd))
 	http.HandleFunc("/admin/relays/toggle", requireClientCert(adminRelaysToggle))
 	http.HandleFunc("/admin/relays/delete", requireClientCert(adminRelaysDelete))
+	http.HandleFunc("/admin/coins/", requireClientCert(adminCoins))
+	http.HandleFunc("/admin/coins/adjust", requireClientCert(adminCoinsAdjust))
 	http.HandleFunc("/admin/bans/", requireClientCert(adminBans))
 	http.HandleFunc("/admin/bans/add", requireClientCert(adminBanAdd))
 	http.HandleFunc("/admin/bans/remove", requireClientCert(adminBanRemove))
@@ -1751,15 +1772,7 @@ tr:last-child td{border-bottom:none}
   </a>
   <a class="card" href="/inkay/my/">
     <h2>My Status</h2>
-    <p>Your online state and friends list — sign in with your web password</p>
-  </a>
-  <a class="card" href="/inkay/my/discord">
-    <h2>Discord Link</h2>
-    <p>Link your PNID to Discord for WiiU Chat call notifications</p>
-  </a>
-  <a class="card" href="/inkay/my/account">
-    <h2>My Account</h2>
-    <p>Change your web password — sign in with your PNID and current web password</p>
+    <p>Your account, coins, friends, Discord link and web password — sign in with your PNID and web password</p>
   </a>
   <a class="card" href="/wsc-public/">
     <h2>WSC Status and Players/Sessions</h2>
@@ -1991,6 +2004,7 @@ input[type=text],select{border:1px solid #d1d5db;border-radius:4px;padding:.4rem
   <a href="/inkay/stats/" target="_blank">← Public stats</a> &nbsp;|&nbsp;
   <a class="dl" href="/inkay/admin/client-cert.p12" download="inkay-admin.p12">⬇ Download client cert</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/bans/">🚫 Banned users</a> &nbsp;|&nbsp;
+  <a href="/inkay/admin/coins/">🪙 Coins</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/relays/">🌍 Relays</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/access/">🔑 Access levels</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/spotpass-wiiu/">📢 Wii U SpotPass</a> &nbsp;|&nbsp;
@@ -3889,6 +3903,13 @@ type myStatusData struct {
 	GameServerHex string
 	Friends       []myFriendEntry
 	DiscordLinked bool
+	// ShowWiiU is true only for accounts that have a Wii U (a Wii U credential or Friends
+	// server login). Friends, online status and the auto-refresh all come from the Wii U
+	// Friends server, so they are hidden entirely for everyone else (e.g. 3DS-only players).
+	ShowWiiU bool
+	// ShowWallet: the account has a linked 3DS and a RevivetendoCoin wallet.
+	ShowWallet    bool
+	WalletBalance int
 }
 
 // --- Discord Link page ---
@@ -3921,7 +3942,7 @@ h1{font-size:1.4rem;margin-bottom:.5rem}
 <body>
 <div class="card">
   <h1>Discord Link</h1>
-  <p class="sub">Link your PNID to Discord to receive WiiU Chat call notifications via DM.</p>
+  <p class="sub">Link your PNID to Discord to reset your web password from the bot, and (with a Wii U) to receive WiiU Chat call notifications via DM.</p>
   {{if .LinkedDiscordID}}
   <div class="linked">✅ Your account is linked to Discord user ID <strong>{{.LinkedDiscordID}}</strong>.</div>
   {{end}}
@@ -3931,7 +3952,7 @@ h1{font-size:1.4rem;margin-bottom:.5rem}
   <ol class="steps">
     <li>Join the Revivetendo Discord server</li>
     <li>Run the slash command:<br><code>/link_pnid {{.Code}}</code></li>
-    <li>Done! Call notifications will arrive as Discord DMs.</li>
+    <li>Done! You can now use <code>/reset_web_password</code>, and Wii U owners get call notifications as Discord DMs.</li>
   </ol>
   <a class="btn-sm" href="/inkay/my/">← Back to My Status</a>
   <a class="btn-sm" href="/inkay/my/logout" style="margin-left:.4rem">Sign out</a>
@@ -3946,6 +3967,17 @@ type myDiscordData struct {
 	LinkedDiscordID string
 }
 
+// discordIDForPNID returns the Discord user linked to a PNID, from either the Wii U
+// or the 3DS credential row (empty when not linked).
+func discordIDForPNID(pnid string) string {
+	var id string
+	db.QueryRow(`SELECT COALESCE(NULLIF(w.discord_id,''), n.discord_id, '')
+		FROM (SELECT $1::text AS u) x
+		LEFT JOIN wii_devices w ON w.username = x.u
+		LEFT JOIN n3ds_devices n ON n.username = x.u`, pnid).Scan(&id)
+	return id
+}
+
 func myDiscordHandler(w http.ResponseWriter, r *http.Request) {
 	pid, ok := mySessionPID(r)
 	if !ok {
@@ -3954,13 +3986,11 @@ func myDiscordHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Look up PNID and current Discord link.
-	var pnid, discordID string
-	// Use user_settings.nnid as the canonical PNID — nex_accounts.username can be a numeric string.
-	db.QueryRow(`SELECT COALESCE(NULLIF(us.nnid,''), na.username), COALESCE(wd.discord_id,'')
-		FROM nex_accounts na
-		LEFT JOIN user_settings us ON us.pid = na.pid
-		LEFT JOIN wii_devices wd ON wd.username = COALESCE(NULLIF(us.nnid,''), na.username)
-		WHERE na.pid = $1`, pid).Scan(&pnid, &discordID)
+	// pnid_cache is the canonical PID->PNID map (nex_accounts.username can be a numeric
+	// string, and 3DS-only accounts have no nex_accounts row at all).
+	var pnid string
+	db.QueryRow(`SELECT COALESCE(NULLIF(pnid,''), '') FROM pnid_cache WHERE pid = $1`, pid).Scan(&pnid)
+	discordID := discordIDForPNID(pnid)
 	if pnid == "" {
 		http.Error(w, "account not found", http.StatusInternalServerError)
 		return
@@ -4069,10 +4099,16 @@ button.logout-btn{background:none;border:none;color:#dc2626;font-size:.875rem;cu
 <div class="nav">
   <a href="/">← Back</a>
   <span style="color:#d1d5db">|</span>
+  <a href="/inkay/my/patreon">🪙 Coins &amp; Patreon</a>
+  <span style="color:#d1d5db">|</span>
+  <a href="/inkay/my/account">Account</a>
+  <span style="color:#d1d5db">|</span>
+  <a href="/inkay/my/discord">Discord{{if .DiscordLinked}} ✓{{end}}</a>
+  <span style="color:#d1d5db">|</span>
   <form class="logout-form" method="post" action="/inkay/my/logout">
     <button class="logout-btn" type="submit">Sign out</button>
   </form>
-  <span class="refresh" id="refresh-label">refreshes in 30s</span>
+  {{if .ShowWiiU}}<span class="refresh" id="refresh-label">refreshes in 30s</span>{{end}}
 </div>
 <h1>My Status</h1>
 <div class="me">
@@ -4080,12 +4116,23 @@ button.logout-btn{background:none;border:none;color:#dc2626;font-size:.875rem;cu
   <div class="me-info">
     <div class="me-name">{{if .MiiName}}{{.MiiName}}{{else}}{{.PNID}}{{end}}</div>
     <div class="me-pnid">@{{.PNID}}</div>
+    {{if .ShowWiiU}}
     <div class="status-line">
       <span class="dot {{if .IsOnline}}dot-on{{else}}dot-off{{end}}"></span>
       {{if .IsOnline}}Online{{with resolveGameName .TitleID .GameServerHex}} · <span class="game">{{.}}</span>{{end}}{{else}}Offline{{end}}
     </div>
+    {{end}}
   </div>
 </div>
+{{if .ShowWallet}}
+<div class="me">
+  <div class="me-info">
+    <div class="me-name">{{.WalletBalance}} RevivetendoCoin</div>
+    <div class="me-pnid">Badge Arcade wallet · <a href="/inkay/my/patreon">manage coins</a></div>
+  </div>
+</div>
+{{end}}
+{{if .ShowWiiU}}
 <h2>Friends ({{len .Friends}})</h2>
 {{if .Friends}}
 <table>
@@ -4104,7 +4151,8 @@ button.logout-btn{background:none;border:none;color:#dc2626;font-size:.875rem;cu
 {{end}}
 </table>
 {{else}}<p class="empty">No friends yet.</p>{{end}}
-<script>
+{{end}}
+{{if .ShowWiiU}}<script>
 var countdown = 30;
 function tick() {
   countdown--;
@@ -4112,7 +4160,7 @@ function tick() {
   document.getElementById('refresh-label').textContent = 'refreshes in ' + countdown + 's';
 }
 setInterval(tick, 1000);
-</script>
+</script>{{end}}
 ` + localTimeScript + `
 </body>
 </html>`))
@@ -4137,7 +4185,9 @@ func myHandler(w http.ResponseWriter, r *http.Request) {
 	// restarts instead of every restart resetting everyone's rate limit.
 	const syncInterval = 60 * time.Second
 	syncCtx := context.Background()
-	if _, ok := runtimeCacheGet(syncCtx, "mysync:"+strconv.FormatInt(pid, 10)); !ok {
+	var canSyncFriends bool
+	db.QueryRow(`SELECT EXISTS(SELECT 1 FROM nex_accounts WHERE pid = $1 AND friends_nex_password IS NOT NULL AND last_auth_host IS NOT NULL)`, pid).Scan(&canSyncFriends)
+	if _, ok := runtimeCacheGet(syncCtx, "mysync:"+strconv.FormatInt(pid, 10)); !ok && canSyncFriends {
 		runtimeCacheSet(syncCtx, "mysync:"+strconv.FormatInt(pid, 10), "1", syncInterval)
 		go func() {
 			resp, err := http.Post("http://127.0.0.1:9191/internal/sync/"+strconv.FormatInt(pid, 10), "", nil)
@@ -4152,13 +4202,26 @@ func myHandler(w http.ResponseWriter, r *http.Request) {
 	var isOnline bool
 	var titleID int64
 	db.QueryRow(`
-		SELECT COALESCE(NULLIF(p.pnid,''), ''), COALESCE(NULLIF(s.mii_name,''), ''),
+		SELECT COALESCE(NULLIF(p.pnid,''), ''), COALESCE(NULLIF(s.mii_name,''), NULLIF(m.mii_name,''), ''),
 		       (s.is_online IS TRUE),
 		       COALESCE(s.presence_title_id, 0),
 		       COALESCE(LPAD(UPPER(TO_HEX(NULLIF(s.presence_game_server_id, 0))), 8, '0'), '')
 		FROM pnid_cache p
 		LEFT JOIN user_settings s ON s.pid = p.pid
+		LEFT JOIN mii_names m ON m.pid = p.pid
 		WHERE p.pid = $1`, pid).Scan(&pnid, &miiName, &isOnline, &titleID, &gameServerHex)
+
+	var hasWiiUCert, has3DS bool
+	db.QueryRow(`SELECT EXISTS(SELECT 1 FROM wii_devices WHERE username = $1 AND device_cert != '')`, pnid).Scan(&hasWiiUCert)
+	db.QueryRow(`SELECT EXISTS(SELECT 1 FROM n3ds_devices WHERE username = $1)`, pnid).Scan(&has3DS)
+	showWiiU := canSyncFriends || hasWiiUCert
+	var walletBalance int
+	showWallet := false
+	if has3DS {
+		if err := db.QueryRow(`SELECT balance FROM coin_wallets WHERE pid = $1`, pid).Scan(&walletBalance); err == nil {
+			showWallet = true
+		}
+	}
 
 	rows, err := db.Query(`
 		SELECT f.friend_pid,
@@ -4189,8 +4252,7 @@ func myHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var discordID string
-	db.QueryRow(`SELECT COALESCE(wd.discord_id, '') FROM wii_devices wd WHERE wd.username = $1`, pnid).Scan(&discordID)
+	discordID := discordIDForPNID(pnid)
 
 	w.Header().Set("Content-Type", "text/html")
 	myStatusTmpl.Execute(w, myStatusData{
@@ -4202,6 +4264,9 @@ func myHandler(w http.ResponseWriter, r *http.Request) {
 		GameServerHex: gameServerHex,
 		Friends:       friends,
 		DiscordLinked: discordID != "",
+		ShowWiiU:      showWiiU,
+		ShowWallet:    showWallet,
+		WalletBalance: walletBalance,
 	})
 }
 
@@ -4223,8 +4288,8 @@ func myLoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var storedHash string
-	if err := db.QueryRow(`SELECT web_password_hash FROM wii_devices WHERE username = $1`, pnid).Scan(&storedHash); err != nil || storedHash == "" {
+	storedHash := webPasswordHash(pnid)
+	if storedHash == "" {
 		fail("Invalid PNID or no web password set.")
 		return
 	}
@@ -4345,8 +4410,8 @@ func myAccountHandler(w http.ResponseWriter, r *http.Request) {
 	newPassword := r.FormValue("new_password")
 	confirm := r.FormValue("confirm_password")
 
-	var storedHash string
-	if err := db.QueryRow(`SELECT web_password_hash FROM wii_devices WHERE username = $1`, pnid).Scan(&storedHash); err != nil || storedHash == "" {
+	storedHash := webPasswordHash(pnid)
+	if storedHash == "" {
 		myAccountTmpl.Execute(w, myAccountData{Error: "No web password set for this account."})
 		return
 	}
@@ -4367,7 +4432,7 @@ func myAccountHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	newHash := sha256.Sum256([]byte(newPassword))
-	if _, err := db.Exec(`UPDATE wii_devices SET web_password_hash = $1 WHERE username = $2`, hex.EncodeToString(newHash[:]), pnid); err != nil {
+	if err := setWebPasswordHash(pnid, hex.EncodeToString(newHash[:])); err != nil {
 		log.Printf("myAccountHandler: db error updating password for %q: %v", pnid, err)
 		myAccountTmpl.Execute(w, myAccountData{Error: "Failed to update password, try again later."})
 		return
