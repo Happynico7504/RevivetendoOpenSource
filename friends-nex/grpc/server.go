@@ -7,21 +7,21 @@ import (
 	"net"
 	"os"
 
+	"bytes"
+	"encoding/json"
+	"github.com/PretendoNetwork/friends-nex/database"
+	"github.com/PretendoNetwork/friends-nex/globals"
 	pb "github.com/PretendoNetwork/grpc-go/friends"
-	"github.com/golang/protobuf/ptypes/empty"
 	nex "github.com/PretendoNetwork/nex-go/v2"
 	"github.com/PretendoNetwork/nex-go/v2/constants"
 	nintendo_notifications "github.com/PretendoNetwork/nex-protocols-go/v2/nintendo-notifications"
 	nintendo_notifications_types "github.com/PretendoNetwork/nex-protocols-go/v2/nintendo-notifications/types"
-	"bytes"
-	"encoding/json"
-	"net/http"
-	"github.com/PretendoNetwork/friends-nex/database"
-	"github.com/PretendoNetwork/friends-nex/globals"
+	"github.com/golang/protobuf/ptypes/empty"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"net/http"
 )
 
 type friendsServer struct {

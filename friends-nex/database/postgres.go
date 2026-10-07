@@ -61,6 +61,17 @@ func Connect() {
 		log.Fatalf("friends-nex: create pending_pretendo_commands: %v", err)
 	}
 
+	// Users each player blocked (AddBlackList, DenyFriendRequest), for the block
+	// list in UpdateAndGetAllInformation; Pretendo keeps its own copy.
+	db.Exec(`CREATE TABLE IF NOT EXISTS friends_blacklist (
+		owner_pid     BIGINT      NOT NULL,
+		blocked_pid   BIGINT      NOT NULL,
+		title_id      BIGINT      NOT NULL DEFAULT 0,
+		title_version INTEGER     NOT NULL DEFAULT 0,
+		since         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		PRIMARY KEY (owner_pid, blocked_pid)
+	)`)
+
 	// Clear stale online flags from a previous run — disconnect events won't fire on crash.
 	db.Exec(`UPDATE user_settings SET is_online = FALSE WHERE is_online = TRUE`)
 
@@ -85,20 +96,20 @@ func Connect() {
 }
 
 type FriendRequestRow struct {
-	ID            uint64
-	RequesterPID  uint64
-	NNID          string
-	MiiName       string
-	MiiData       []byte
-	Message       string
-	Unk1          uint8
-	Unk2          uint8
-	Unk3          uint8
-	StrField      string
-	TitleID       uint64
-	TitleVersion  uint16
-	SentOn        time.Time
-	ExpiresOn     time.Time
+	ID           uint64
+	RequesterPID uint64
+	NNID         string
+	MiiName      string
+	MiiData      []byte
+	Message      string
+	Unk1         uint8
+	Unk2         uint8
+	Unk3         uint8
+	StrField     string
+	TitleID      uint64
+	TitleVersion uint16
+	SentOn       time.Time
+	ExpiresOn    time.Time
 }
 
 func GetIncomingFriendRequests(ownerPID uint64) []FriendRequestRow {
@@ -140,13 +151,54 @@ func DeleteIncomingFriendRequestByID(ownerPID uint64, requestID uint64) {
 	Postgres.Exec(`DELETE FROM pretendo_friend_requests WHERE owner_pid = $1 AND id = $2`, ownerPID, requestID)
 }
 
+type BlacklistRow struct {
+	BlockedPID   uint64
+	TitleID      uint64
+	TitleVersion uint16
+	Since        time.Time
+}
+
+// AddBlocked records that ownerPID blocked blockedPID (keeping the first date).
+func AddBlocked(ownerPID, blockedPID, titleID uint64, titleVersion uint16) {
+	Postgres.Exec(`INSERT INTO friends_blacklist (owner_pid, blocked_pid, title_id, title_version)
+		VALUES ($1, $2, $3, $4) ON CONFLICT (owner_pid, blocked_pid) DO NOTHING`,
+		ownerPID, blockedPID, titleID, titleVersion)
+}
+
+// RemoveBlocked unblocks blockedPID; false if it wasn't in ownerPID's list.
+func RemoveBlocked(ownerPID, blockedPID uint64) bool {
+	res, err := Postgres.Exec(`DELETE FROM friends_blacklist WHERE owner_pid = $1 AND blocked_pid = $2`, ownerPID, blockedPID)
+	if err != nil {
+		return false
+	}
+	n, _ := res.RowsAffected()
+	return n > 0
+}
+
+func GetBlocked(ownerPID uint64) []BlacklistRow {
+	rows, err := Postgres.Query(`SELECT blocked_pid, title_id, title_version, since
+		FROM friends_blacklist WHERE owner_pid = $1 ORDER BY since`, ownerPID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []BlacklistRow
+	for rows.Next() {
+		var r BlacklistRow
+		if rows.Scan(&r.BlockedPID, &r.TitleID, &r.TitleVersion, &r.Since) == nil {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 type UserSettings struct {
-	ShowOnlinePresence   bool
-	ShowCurrentTitle     bool
-	BlockFriendRequests  bool
-	CommentUnknown       uint8
-	CommentText          string
-	CommentChangedAt     time.Time
+	ShowOnlinePresence  bool
+	ShowCurrentTitle    bool
+	BlockFriendRequests bool
+	CommentUnknown      uint8
+	CommentText         string
+	CommentChangedAt    time.Time
 }
 
 func GetUserSettings(pid uint64) UserSettings {
@@ -197,25 +249,25 @@ func GetNEXPassword(pidInt uint64) (string, bool) {
 }
 
 type FriendRow struct {
-	FriendPID          uint32
-	FriendNNID         string
-	MiiName            string
-	MiiData            []byte
-	IsOnline           bool
-	GameServerID       uint32
-	TitleID            uint64
-	TitleVersion       uint16
-	PresenceFlags      uint32
-	PresencePID        uint64
-	GatheringID        uint32
-	PresenceUnk5       uint8
-	PresenceUnk6       uint8
-	PresenceUnk7       uint8
-	BecameFriend       time.Time
-	LastOnline         time.Time
-	CommentText        string
-	CommentUnknown     uint8
-	CommentChangedAt   time.Time
+	FriendPID        uint32
+	FriendNNID       string
+	MiiName          string
+	MiiData          []byte
+	IsOnline         bool
+	GameServerID     uint32
+	TitleID          uint64
+	TitleVersion     uint16
+	PresenceFlags    uint32
+	PresencePID      uint64
+	GatheringID      uint32
+	PresenceUnk5     uint8
+	PresenceUnk6     uint8
+	PresenceUnk7     uint8
+	BecameFriend     time.Time
+	LastOnline       time.Time
+	CommentText      string
+	CommentUnknown   uint8
+	CommentChangedAt time.Time
 }
 
 func GetFriends(ownerPID uint64) []FriendRow {
@@ -293,6 +345,23 @@ func GetBasicInfoForPID(pid uint64) (nnid, miiName string, miiData []byte) {
 	Postgres.QueryRow(`SELECT mii_data FROM pretendo_friends WHERE friend_pid = $1 AND mii_data IS NOT NULL LIMIT 1`, pid).Scan(&miiData)
 
 	return
+}
+
+// PIDForNNID resolves an NNID/PNID (case-insensitive) to a PID from the same
+// local sources as GetBasicInfoForPID; 0 if unknown.
+func PIDForNNID(nnid string) uint64 {
+	if nnid == "" {
+		return 0
+	}
+	var pid uint64
+	Postgres.QueryRow(`SELECT pid FROM nex_accounts WHERE lower(username) = lower($1) AND username !~ '^[0-9]+$' LIMIT 1`, nnid).Scan(&pid)
+	if pid == 0 {
+		Postgres.QueryRow(`SELECT pid FROM pnid_cache WHERE lower(pnid) = lower($1) LIMIT 1`, nnid).Scan(&pid)
+	}
+	if pid == 0 {
+		Postgres.QueryRow(`SELECT friend_pid FROM pretendo_friends WHERE lower(friend_nnid) = lower($1) LIMIT 1`, nnid).Scan(&pid)
+	}
+	return pid
 }
 
 func SaveLocalNNAAndPresence(pid uint64, nnid, miiName string, miiData []byte, isOnline bool, titleID uint64, titleVersion uint16, gameServerID uint32) {

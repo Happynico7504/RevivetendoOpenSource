@@ -6,14 +6,13 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/PretendoNetwork/friends-nex/database"
+	"github.com/PretendoNetwork/friends-nex/globals"
 	nex "github.com/PretendoNetwork/nex-go/v2"
 	"github.com/PretendoNetwork/nex-go/v2/types"
 	friends_wiiu "github.com/PretendoNetwork/nex-protocols-go/v2/friends-wiiu"
 	friends_wiiu_types "github.com/PretendoNetwork/nex-protocols-go/v2/friends-wiiu/types"
-	"github.com/PretendoNetwork/friends-nex/database"
-	"github.com/PretendoNetwork/friends-nex/globals"
 )
-
 
 func UpdatePresence(
 	err error, packet nex.PacketInterface, callID uint32,
@@ -96,6 +95,30 @@ func AddFriend(
 	rmcResponse.CallID = callID
 	rmcResponse.MethodID = friends_wiiu.MethodAddFriend
 	return rmcResponse, nil
+}
+
+// AddFriendByName is AddFriend by NNID, used by in-game friend requests.
+// Pretendo's own Friends server doesn't implement it; the "not implemented"
+// error made the console drop its Friends connection (everyone offline, no
+// friend sessions). The NNID is resolved locally, then handled like AddFriend.
+func AddFriendByName(
+	err error, packet nex.PacketInterface, callID uint32,
+	username types.String,
+) (*nex.RMCMessage, *nex.Error) {
+	if err != nil {
+		return nil, nex.NewError(nex.ResultCodes.Core.InvalidArgument, err.Error())
+	}
+	targetPID := database.PIDForNNID(string(username))
+	if targetPID == 0 {
+		globals.Logger.Infof("[FRIENDS] AddFriendByName: PID=%d asked for unknown NNID %q", uint64(packet.Sender().PID()), string(username))
+		return nil, nex.NewError(nex.ResultCodes.FPD.InvalidAccount, "unknown NNID")
+	}
+	globals.Logger.Infof("[FRIENDS] AddFriendByName: PID=%d -> %q (PID=%d)", uint64(packet.Sender().PID()), string(username), targetPID)
+	rmcResponse, rmcError := AddFriend(nil, packet, callID, types.NewPID(targetPID))
+	if rmcResponse != nil {
+		rmcResponse.MethodID = friends_wiiu.MethodAddFriendByName
+	}
+	return rmcResponse, rmcError
 }
 
 func RemoveFriend(

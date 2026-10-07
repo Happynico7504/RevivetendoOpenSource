@@ -5,8 +5,8 @@ import (
 	"os"
 	"strconv"
 
-	nex "github.com/PretendoNetwork/nex-go/v2"
 	"github.com/PretendoNetwork/friends-nex/globals"
+	nex "github.com/PretendoNetwork/nex-go/v2"
 )
 
 func StartAuthenticationServer() {

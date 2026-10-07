@@ -1,13 +1,13 @@
 package nex_friends_wiiu
 
 import (
+	"github.com/PretendoNetwork/friends-nex/database"
+	"github.com/PretendoNetwork/friends-nex/globals"
 	nex "github.com/PretendoNetwork/nex-go/v2"
 	"github.com/PretendoNetwork/nex-go/v2/types"
 	friends_wiiu "github.com/PretendoNetwork/nex-protocols-go/v2/friends-wiiu"
 	friends_wiiu_constants "github.com/PretendoNetwork/nex-protocols-go/v2/friends-wiiu/constants"
 	friends_wiiu_types "github.com/PretendoNetwork/nex-protocols-go/v2/friends-wiiu/types"
-	"github.com/PretendoNetwork/friends-nex/database"
-	"github.com/PretendoNetwork/friends-nex/globals"
 )
 
 func UpdateAndGetAllInformation(
@@ -120,8 +120,8 @@ func UpdateAndGetAllInformation(
 		incomingList = append(incomingList, fr)
 	}
 	incomingList.WriteTo(rmcResponseStream)
-	// Block list (empty)
-	rmcResponseStream.WriteUInt32LE(0)
+	// Block list
+	blacklistFor(pid).WriteTo(rmcResponseStream)
 	// Unknown bool
 	rmcResponseStream.WriteBool(false)
 	// Persistent notifications (empty)

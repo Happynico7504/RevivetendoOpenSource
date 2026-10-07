@@ -5,12 +5,12 @@ import (
 	"encoding/hex"
 	"sync"
 
-	nex "github.com/PretendoNetwork/nex-go/v2"
-	"github.com/PretendoNetwork/nex-go/v2/types"
 	"github.com/PretendoNetwork/friends-nex/database"
 	"github.com/PretendoNetwork/friends-nex/globals"
 	"github.com/PretendoNetwork/friends-nex/grpc"
 	nexserver "github.com/PretendoNetwork/friends-nex/nex"
+	nex "github.com/PretendoNetwork/nex-go/v2"
+	"github.com/PretendoNetwork/nex-go/v2/types"
 	"github.com/PretendoNetwork/plogger-go"
 	"github.com/joho/godotenv"
 )

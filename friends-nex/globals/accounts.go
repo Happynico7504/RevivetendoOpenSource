@@ -3,9 +3,9 @@ package globals
 import (
 	"strconv"
 
+	"github.com/PretendoNetwork/friends-nex/database"
 	nex "github.com/PretendoNetwork/nex-go/v2"
 	"github.com/PretendoNetwork/nex-go/v2/types"
-	"github.com/PretendoNetwork/friends-nex/database"
 )
 
 func AccountDetailsByPID(pid types.PID) (*nex.Account, *nex.Error) {

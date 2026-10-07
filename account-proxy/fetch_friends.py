@@ -394,6 +394,8 @@ async def fetch_friends(pid: int, nex_password: str, auth_host: str, auth_port: 
                         elif method == "remove_friend":
                             await friends_client.remove_friend(args["target_pid"])
                             print(f"  forwarded remove_friend target_pid={args['target_pid']}", flush=True)
+                        elif await run_request_blacklist_command(friends_client, method, args):
+                            print(f"  forwarded {method} {args}", flush=True)
                         else:
                             print(f"  unknown pending command: {method}", flush=True)
                         processed_ids.append(cmd_id)
@@ -482,7 +484,7 @@ async def fetch_friends(pid: int, nex_password: str, auth_host: str, auth_port: 
                             pref.show_current_title = bool(cmd.get("show_title", True))
                             pref.block_friend_requests = bool(cmd.get("block_requests", False))
                             await friends_client.update_preference(pref)
-                        else:
+                        elif not await run_request_blacklist_command(friends_client, c, cmd):
                             raise ValueError(f"unknown command: {c}")
                         writer.write(b'{"ok":true}\n')
                     except Exception as e:
@@ -500,6 +502,36 @@ async def fetch_friends(pid: int, nex_password: str, auth_host: str, auth_port: 
                         os.unlink(socket_path)
                     except FileNotFoundError:
                         pass
+
+
+async def run_request_blacklist_command(friends_client, name, args):
+    """Friend request and block list commands forwarded by friends-nex.
+    Returns False for names it doesn't handle."""
+    if name == "deny_friend_request":
+        await friends_client.deny_friend_request(int(args["request_id"]))
+    elif name == "delete_friend_request":
+        await friends_client.delete_friend_request(int(args["request_id"]))
+    elif name == "mark_friend_requests_as_received":
+        await friends_client.mark_friend_requests_as_received([int(i) for i in args["request_ids"]])
+    elif name == "add_black_list":
+        # Pretendo fills in the user's info itself; only the PID and game matter.
+        bp = friends_lib.BlacklistedPrincipal()
+        bp.principal_info.pid = int(args["target_pid"])
+        bp.principal_info.nnid = ""
+        bp.principal_info.mii.name = ""
+        bp.principal_info.mii.unk1 = 0
+        bp.principal_info.mii.unk2 = 0
+        bp.principal_info.mii.data = b""
+        bp.principal_info.mii.datetime = common.DateTime(0)
+        bp.game_key.title_id = int(args.get("title_id", 0))
+        bp.game_key.title_version = int(args.get("title_version", 0))
+        bp.since = common.DateTime(0)
+        await friends_client.add_black_list(bp)
+    elif name == "remove_black_list":
+        await friends_client.remove_black_list(int(args["target_pid"]))
+    else:
+        return False
+    return True
 
 
 def main():

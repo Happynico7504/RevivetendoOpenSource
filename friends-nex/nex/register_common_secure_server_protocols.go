@@ -4,15 +4,15 @@ import (
 	"fmt"
 	"net"
 
+	"github.com/PretendoNetwork/friends-nex/database"
+	"github.com/PretendoNetwork/friends-nex/globals"
+	nex_friends_wiiu "github.com/PretendoNetwork/friends-nex/nex/friends-wiiu"
 	nex "github.com/PretendoNetwork/nex-go/v2"
 	"github.com/PretendoNetwork/nex-go/v2/constants"
 	"github.com/PretendoNetwork/nex-go/v2/types"
 	common_secure "github.com/PretendoNetwork/nex-protocols-common-go/v2/secure-connection"
 	friends_wiiu "github.com/PretendoNetwork/nex-protocols-go/v2/friends-wiiu"
 	secure "github.com/PretendoNetwork/nex-protocols-go/v2/secure-connection"
-	"github.com/PretendoNetwork/friends-nex/database"
-	"github.com/PretendoNetwork/friends-nex/globals"
-	nex_friends_wiiu "github.com/PretendoNetwork/friends-nex/nex/friends-wiiu"
 )
 
 func registerEx(err error, packet nex.PacketInterface, callID uint32, vecMyURLs types.List[types.StationURL], hCustomData types.DataHolder) (*nex.RMCMessage, *nex.Error) {
@@ -129,6 +129,7 @@ func registerCommonSecureServerProtocols() {
 	globals.SecureEndpoint.RegisterServiceProtocol(friendsProtocol)
 	friendsProtocol.SetHandlerUpdateAndGetAllInformation(nex_friends_wiiu.UpdateAndGetAllInformation)
 	friendsProtocol.SetHandlerAddFriend(nex_friends_wiiu.AddFriend)
+	friendsProtocol.SetHandlerAddFriendByName(nex_friends_wiiu.AddFriendByName)
 	friendsProtocol.SetHandlerAddFriendRequest(nex_friends_wiiu.AddFriendRequest)
 	friendsProtocol.SetHandlerAcceptFriendRequest(nex_friends_wiiu.AcceptFriendRequest)
 	friendsProtocol.SetHandlerCancelFriendRequest(nex_friends_wiiu.CancelFriendRequest)
@@ -141,4 +142,9 @@ func registerCommonSecureServerProtocols() {
 	friendsProtocol.SetHandlerGetRequestBlockSettings(nex_friends_wiiu.GetRequestBlockSettings)
 	friendsProtocol.SetHandlerDeletePersistentNotification(nex_friends_wiiu.DeletePersistentNotification)
 	friendsProtocol.SetHandlerGetBasicInfo(nex_friends_wiiu.GetBasicInfo)
+	friendsProtocol.SetHandlerDenyFriendRequest(nex_friends_wiiu.DenyFriendRequest)
+	friendsProtocol.SetHandlerDeleteFriendRequest(nex_friends_wiiu.DeleteFriendRequest)
+	friendsProtocol.SetHandlerMarkFriendRequestsAsReceived(nex_friends_wiiu.MarkFriendRequestsAsReceived)
+	friendsProtocol.SetHandlerAddBlackList(nex_friends_wiiu.AddBlackList)
+	friendsProtocol.SetHandlerRemoveBlackList(nex_friends_wiiu.RemoveBlackList)
 }
