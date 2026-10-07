@@ -57,6 +57,11 @@ class NotificationForwarder(NintendoNotificationServer):
     def __init__(self, owner_pid: int):
         super().__init__()
         self.owner_pid = owner_pid
+        self.closed = asyncio.Event()
+
+    async def logout(self, client):
+        # Called by the RMC client when the Pretendo connection ends.
+        self.closed.set()
 
     async def _forward(self, sender_pid: int, mode: str, *extra: str):
         try:
@@ -124,7 +129,7 @@ async def _load_local(db_uri: str, pid: int):
     """The player's NNAInfo and presence from user_settings, retried while the
     database is busy. Returns (loaded, values)."""
     local = {"nnid": "", "mii_name": "", "mii_data": b"", "is_online": False,
-             "title_id": 0, "title_version": 0, "game_server_id": 0}
+             "title_id": 0, "title_version": 0, "game_server_id": 0, "full_presence": ""}
     for attempt in range(4):
         try:
             conn_pre = psycopg2.connect(db_uri)
@@ -132,7 +137,8 @@ async def _load_local(db_uri: str, pid: int):
                 cur_pre = conn_pre.cursor()
                 cur_pre.execute(
                     "SELECT nnid, mii_name, mii_data, is_online, "
-                    "presence_title_id, presence_title_version, presence_game_server_id "
+                    "presence_title_id, presence_title_version, presence_game_server_id, "
+                    "presence_full_json "
                     "FROM user_settings WHERE pid = %s", (pid,)
                 )
                 row = cur_pre.fetchone()
@@ -142,12 +148,36 @@ async def _load_local(db_uri: str, pid: int):
                 local.update(nnid=row[0] or "", mii_name=row[1] or "",
                              mii_data=bytes(row[2]) if row[2] else b"", is_online=bool(row[3]),
                              title_id=int(row[4] or 0), title_version=int(row[5] or 0),
-                             game_server_id=int(row[6] or 0))
+                             game_server_id=int(row[6] or 0), full_presence=row[7] or "")
             return True, local
         except Exception as e:
             print(f"  warning: could not load local NNA/presence (attempt {attempt + 1}): {e}", flush=True)
             await asyncio.sleep(2 * (attempt + 1))
     return False, local
+
+
+def _presence_from_fields(fields: dict, pid: int):
+    """A NintendoPresenceV2 from the update_presence command's fields (as sent
+    by friends-nex and stored as the console's last full presence)."""
+    p = friends_lib.NintendoPresenceV2()
+    p.flags = int(fields.get("flags", 0x1 | 0x4 | 0x10))
+    p.is_online = bool(fields.get("is_online", False))
+    p.game_key = friends_lib.GameKey()
+    p.game_key.title_id = int(fields.get("title_id", 0))
+    p.game_key.title_version = int(fields.get("title_version", 0))
+    p.game_server_id = int(fields.get("game_server_id", 0))
+    p.unk1 = int(fields.get("unk1", 0))
+    p.message = fields.get("message", "")
+    p.unk2 = int(fields.get("unk2", 0))
+    p.unk3 = int(fields.get("unk3", 0))
+    p.pid = pid
+    p.gathering_id = int(fields.get("gathering_id", 0))
+    p.application_data = bytes.fromhex(fields.get("app_data_hex", ""))
+    p.unk4 = int(fields.get("unk4", 0))
+    p.unk5 = int(fields.get("unk5", 3))
+    p.unk6 = int(fields.get("unk6", 3))
+    p.unk7 = int(fields.get("unk7", 3))
+    return p
 
 
 def _nna_complete(loaded: bool, local: dict) -> bool:
@@ -172,6 +202,7 @@ async def fetch_friends(pid: int, nex_password: str, auth_host: str, auth_port: 
     local_nnid, local_mii_name, local_mii_data = local["nnid"], local["mii_name"], local["mii_data"]
     local_is_online, local_title_id = local["is_online"], local["title_id"]
     local_title_version, local_game_server_id = local["title_version"], local["game_server_id"]
+    local_full_presence = local["full_presence"]
 
     # Pretendo's UpdateAndGetAllInformation stores the NNAInfo we send as the
     # user's PNID and Mii, unconditionally. Sending it empty (database
@@ -195,7 +226,7 @@ async def fetch_friends(pid: int, nex_password: str, auth_host: str, auth_port: 
             # all friends the user went offline.
             async def do_sync(full_presence=None, reload=False):
                 nonlocal local_nnid, local_mii_name, local_mii_data, local_is_online
-                nonlocal local_title_id, local_title_version, local_game_server_id
+                nonlocal local_title_id, local_title_version, local_game_server_id, local_full_presence
                 if reload:
                     # Repeat on the keep-alive: reload, the Mii may have changed since.
                     ok, fresh = await _load_local(db_uri, pid)
@@ -204,6 +235,7 @@ async def fetch_friends(pid: int, nex_password: str, auth_host: str, auth_port: 
                     local_nnid, local_mii_name, local_mii_data = fresh["nnid"], fresh["mii_name"], fresh["mii_data"]
                     local_is_online, local_title_id = fresh["is_online"], fresh["title_id"]
                     local_title_version, local_game_server_id = fresh["title_version"], fresh["game_server_id"]
+                    local_full_presence = fresh["full_presence"]
 
                 # Build NNAInfo using data received from the Wii U (so Pretendo sees our real Mii).
                 nna_info = friends_lib.NNAInfo()
@@ -241,6 +273,14 @@ async def fetch_friends(pid: int, nex_password: str, auth_host: str, auth_port: 
 
                 if full_presence is not None:
                     presence = full_presence  # the console's last full presence (keep-alive)
+                elif local_full_presence:
+                    # The console's complete last presence (session, activity), as
+                    # stored by friends-nex; online state from the connection itself.
+                    try:
+                        presence = _presence_from_fields(json.loads(local_full_presence), pid)
+                        presence.is_online = local_is_online
+                    except Exception as e:
+                        print(f"  warning: stored presence unusable: {e}", flush=True)
 
                 birthday = common.DateTime(0)
 
@@ -520,7 +560,8 @@ async def fetch_friends(pid: int, nex_password: str, auth_host: str, auth_port: 
 
             if keep_alive:
                 print(f"  keep-alive PID={pid}: holding Pretendo connection open", flush=True)
-                client.register_server(NotificationForwarder(pid))
+                forwarder = NotificationForwarder(pid)
+                client.register_server(forwarder)
                 socket_path = f"/tmp/pretendo-presence-{pid}.sock"
                 try:
                     os.unlink(socket_path)
@@ -537,24 +578,7 @@ async def fetch_friends(pid: int, nex_password: str, auth_host: str, auth_port: 
                         if c == "update_presence":
                             # friends-nex sends the console's full presence; the
                             # defaults cover older senders that only had the title.
-                            p = friends_lib.NintendoPresenceV2()
-                            p.flags = int(cmd.get("flags", 0x1 | 0x4 | 0x10))
-                            p.is_online = bool(cmd.get("is_online", False))
-                            p.game_key = friends_lib.GameKey()
-                            p.game_key.title_id = int(cmd.get("title_id", 0))
-                            p.game_key.title_version = int(cmd.get("title_version", 0))
-                            p.game_server_id = int(cmd.get("game_server_id", 0))
-                            p.unk1 = int(cmd.get("unk1", 0))
-                            p.message = cmd.get("message", "")
-                            p.unk2 = int(cmd.get("unk2", 0))
-                            p.unk3 = int(cmd.get("unk3", 0))
-                            p.pid = pid
-                            p.gathering_id = int(cmd.get("gathering_id", 0))
-                            p.application_data = bytes.fromhex(cmd.get("app_data_hex", ""))
-                            p.unk4 = int(cmd.get("unk4", 0))
-                            p.unk5 = int(cmd.get("unk5", 3))
-                            p.unk6 = int(cmd.get("unk6", 3))
-                            p.unk7 = int(cmd.get("unk7", 3))
+                            p = _presence_from_fields(cmd, pid)
                             await friends_client.update_presence(p)
                             state["presence"] = p
                         elif c == "sync":
@@ -601,7 +625,17 @@ async def fetch_friends(pid: int, nex_password: str, auth_host: str, auth_port: 
 
                 server = await asyncio.start_unix_server(_handle_cmd, socket_path)
                 try:
-                    await asyncio.sleep(86400)  # 24 h; PRUDP pings run in the background
+                    # Hold the connection (PRUDP pings run in the background) for
+                    # 24 h, but end as soon as Pretendo closes it: a dead keep-alive
+                    # gets no notifications and every forwarded command fails.
+                    # fetch_friends_loop reconnects 5 s after the error.
+                    try:
+                        await asyncio.wait_for(forwarder.closed.wait(), timeout=86400)
+                    except asyncio.TimeoutError:
+                        pass
+                    else:
+                        print(f"  keep-alive PID={pid}: Pretendo closed the connection, reconnecting", flush=True)
+                        raise RuntimeError("Pretendo connection closed")
                 finally:
                     server.close()
                     try:

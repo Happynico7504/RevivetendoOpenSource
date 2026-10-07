@@ -44,6 +44,9 @@ func Connect() {
 		`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS presence_title_id BIGINT NOT NULL DEFAULT 0`,
 		`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS presence_title_version SMALLINT NOT NULL DEFAULT 0`,
 		`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS presence_game_server_id INT NOT NULL DEFAULT 0`,
+		// The console's complete last presence (JSON, the update_presence command's
+		// fields), so syncs send Pretendo the real presence incl. session and activity.
+		`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS presence_full_json TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS last_online_at TIMESTAMPTZ`,
 		`ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS last_heartbeat_at TIMESTAMPTZ`,
 	} {
@@ -414,6 +417,12 @@ func SaveLocalPresence(pid uint64, _ bool, titleID uint64, titleVersion uint16, 
 			presence_game_server_id = EXCLUDED.presence_game_server_id,
 			last_heartbeat_at       = NOW()`,
 		pid, titleID, titleVersion, gameServerID)
+}
+
+// SaveLocalPresenceJSON stores the console's complete last presence.
+func SaveLocalPresenceJSON(pid uint64, presenceJSON string) {
+	Postgres.Exec(`INSERT INTO user_settings (pid, presence_full_json) VALUES ($1, $2)
+		ON CONFLICT (pid) DO UPDATE SET presence_full_json = EXCLUDED.presence_full_json`, pid, presenceJSON)
 }
 
 func SaveLocalMii(pid uint64, miiName string, miiData []byte) {

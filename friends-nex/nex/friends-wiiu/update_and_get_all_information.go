@@ -32,6 +32,7 @@ func UpdateAndGetAllInformation(
 		uint16(presence.GameKey.TitleVersion),
 		uint32(presence.GameServerID),
 	)
+	database.SaveLocalPresenceJSON(pid, presenceJSONString(presenceFields(presence)))
 	go database.StartPretendoPresence(pid)
 
 	settings := database.GetUserSettings(pid)
