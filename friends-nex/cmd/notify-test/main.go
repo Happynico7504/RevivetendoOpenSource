@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -21,7 +23,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		log.Fatalf("usage: notify-test <target-pid> <caller-pid> <mode>\n  modes: online, offline, ring")
+		log.Fatalf("usage: notify-test <target-pid> <caller-pid> <mode>\n  modes: online, offline, presence <json>, ring")
 	}
 	targetPIDInt, err := strconv.ParseUint(os.Args[1], 10, 32)
 	if err != nil {
@@ -73,6 +75,58 @@ func main() {
 		eventObject.Type = nintendo_notifications_constants.NotificationType(10)
 		presence.Online = false
 		presence.ChangedFlags = friends_wiiu_constants.PresenceChangedFlagNone
+
+	case "presence":
+		// A friend's real presence, forwarded from Pretendo by fetch_friends.py's
+		// NotificationForwarder as JSON (argument 4), so games see the actual
+		// title, session and in-game activity.
+		if len(os.Args) < 5 {
+			log.Fatalf("presence mode needs the presence JSON as 4th argument")
+		}
+		var p struct {
+			Flags        uint32 `json:"flags"`
+			Online       bool   `json:"is_online"`
+			TitleID      uint64 `json:"title_id"`
+			TitleVersion uint16 `json:"title_version"`
+			Unk1         uint8  `json:"unk1"`
+			Message      string `json:"message"`
+			Unk2         uint32 `json:"unk2"`
+			Unk3         uint8  `json:"unk3"`
+			GameServerID uint32 `json:"game_server_id"`
+			Unk4         uint32 `json:"unk4"`
+			PID          uint64 `json:"pid"`
+			GatheringID  uint32 `json:"gathering_id"`
+			AppDataHex   string `json:"app_data_hex"`
+			Unk5         uint8  `json:"unk5"`
+			Unk6         uint8  `json:"unk6"`
+			Unk7         uint8  `json:"unk7"`
+		}
+		if err := json.Unmarshal([]byte(os.Args[4]), &p); err != nil {
+			log.Fatalf("presence JSON: %v", err)
+		}
+		appData, err := hex.DecodeString(p.AppDataHex)
+		if err != nil {
+			log.Fatalf("presence app data: %v", err)
+		}
+		eventObject.Type = nintendo_notifications_constants.NotificationType(24)
+		presence.ChangedFlags = friends_wiiu_constants.PresenceChangedFlag(p.Flags)
+		presence.Online = types.NewBool(p.Online)
+		presence.GameKey.TitleID = types.NewUInt64(p.TitleID)
+		presence.GameKey.TitleVersion = types.NewUInt16(p.TitleVersion)
+		presence.Unknown1 = types.NewUInt8(p.Unk1)
+		presence.Message = types.NewString(p.Message)
+		presence.Unknown2 = types.NewUInt32(p.Unk2)
+		presence.Unknown3 = types.NewUInt8(p.Unk3)
+		presence.GameServerID = types.NewUInt32(p.GameServerID)
+		presence.Unknown4 = types.NewUInt32(p.Unk4)
+		if p.PID != 0 {
+			presence.PID = types.NewPID(p.PID)
+		}
+		presence.GatheringID = types.NewUInt32(p.GatheringID)
+		presence.ApplicationData = types.NewBuffer(appData)
+		presence.Unknown5 = types.NewUInt8(p.Unk5)
+		presence.Unknown6 = types.NewUInt8(p.Unk6)
+		presence.Unknown7 = types.NewUInt8(p.Unk7)
 
 	case "ring":
 		// Mirrors send_friends_notification.go exactly: type=0 (unset), PID=1 (count), no ChangedFlags.

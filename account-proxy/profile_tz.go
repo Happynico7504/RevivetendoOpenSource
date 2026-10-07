@@ -12,6 +12,7 @@ package main
 // database, so it also follows the next DST change by itself.
 
 import (
+	"encoding/base64"
 	"fmt"
 	"log"
 	"net/http"
@@ -200,5 +201,24 @@ func storeAccountProfile(pid uint32, body []byte) {
 			country = EXCLUDED.country, language = EXCLUDED.language, updated_at = NOW()`,
 		pid, f["birth_date"], f["gender"], f["country"], f["language"]); err != nil {
 		log.Printf("profile: storing account profile for PID=%d: %v", pid, err)
+	}
+}
+
+// storeFriendsNNA keeps the account's PNID and Mii (from its profile) in
+// user_settings, where fetch_friends.py takes the NNAInfo it sends to
+// Pretendo's Friends server. Pretendo stores that NNAInfo unconditionally, so a
+// sync for a player whose Wii U never connected to our Friends server used to
+// send an empty Mii and PNID and left them as "???" on stock Pretendo. Empty
+// values never replace stored ones.
+func storeFriendsNNA(pid uint32, pnid, miiName, miiDataB64 string) {
+	miiData, err := base64.StdEncoding.DecodeString(strings.TrimSpace(miiDataB64))
+	if err != nil || len(miiData) == 0 || pnid == "" || miiName == "" {
+		return
+	}
+	if _, err := db.Exec(`INSERT INTO user_settings (pid, nnid, mii_name, mii_data)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (pid) DO UPDATE SET nnid = EXCLUDED.nnid, mii_name = EXCLUDED.mii_name, mii_data = EXCLUDED.mii_data`,
+		pid, pnid, miiName, miiData); err != nil {
+		log.Printf("profile: storing friends NNA info for PID=%d: %v", pid, err)
 	}
 }

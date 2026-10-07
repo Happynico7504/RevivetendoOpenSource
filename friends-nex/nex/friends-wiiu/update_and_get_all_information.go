@@ -57,6 +57,12 @@ func UpdateAndGetAllInformation(
 		fi.Presence.Unknown5 = types.NewUInt8(row.PresenceUnk5)
 		fi.Presence.Unknown6 = types.NewUInt8(row.PresenceUnk6)
 		fi.Presence.Unknown7 = types.NewUInt8(row.PresenceUnk7)
+		fi.Presence.Unknown1 = types.NewUInt8(row.PresenceUnk1)
+		fi.Presence.Message = types.NewString(row.PresenceMessage)
+		fi.Presence.Unknown2 = types.NewUInt32(row.PresenceUnk2)
+		fi.Presence.Unknown3 = types.NewUInt8(row.PresenceUnk3)
+		fi.Presence.Unknown4 = types.NewUInt32(row.PresenceUnk4)
+		fi.Presence.ApplicationData = types.NewBuffer(row.PresenceAppData) // in-game activity, e.g. MK8's "Worldwide Race"
 
 		fi.Status.Unknown = types.NewUInt8(row.CommentUnknown)
 		fi.Status.Contents = types.NewString(row.CommentText)

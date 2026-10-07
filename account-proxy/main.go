@@ -458,6 +458,14 @@ func main() {
 	db.Exec(`ALTER TABLE pretendo_friends ADD COLUMN IF NOT EXISTS presence_unk5 SMALLINT NOT NULL DEFAULT 3`)
 	db.Exec(`ALTER TABLE pretendo_friends ADD COLUMN IF NOT EXISTS presence_unk6 SMALLINT NOT NULL DEFAULT 3`)
 	db.Exec(`ALTER TABLE pretendo_friends ADD COLUMN IF NOT EXISTS presence_unk7 SMALLINT NOT NULL DEFAULT 3`)
+	// The rest of the friend's presence (application data = in-game activity like
+	// MK8's "Worldwide Race"), so the console's friend list shows it.
+	db.Exec(`ALTER TABLE pretendo_friends ADD COLUMN IF NOT EXISTS presence_unk1 SMALLINT NOT NULL DEFAULT 0`)
+	db.Exec(`ALTER TABLE pretendo_friends ADD COLUMN IF NOT EXISTS presence_message TEXT NOT NULL DEFAULT ''`)
+	db.Exec(`ALTER TABLE pretendo_friends ADD COLUMN IF NOT EXISTS presence_unk2 BIGINT NOT NULL DEFAULT 0`)
+	db.Exec(`ALTER TABLE pretendo_friends ADD COLUMN IF NOT EXISTS presence_unk3 SMALLINT NOT NULL DEFAULT 0`)
+	db.Exec(`ALTER TABLE pretendo_friends ADD COLUMN IF NOT EXISTS presence_unk4 BIGINT NOT NULL DEFAULT 0`)
+	db.Exec(`ALTER TABLE pretendo_friends ADD COLUMN IF NOT EXISTS presence_app_data BYTEA`)
 	db.Exec(`CREATE TABLE IF NOT EXISTS mii_cache (
 		pid        BIGINT PRIMARY KEY,
 		pnid       TEXT NOT NULL DEFAULT '',
@@ -890,6 +898,7 @@ func handle(w http.ResponseWriter, r *http.Request) {
 				}
 				log.Printf("profile: captured PID=%d PNID=%q for %s (%s; console %s)", p.PID, p.PNID, ip, profileLocaleSummary(body), consoleLocaleHeaders(r))
 				storeAccountProfile(p.PID, body) // before the region correction below: the account's own values
+				storeFriendsNNA(p.PID, p.PNID, p.Mii.Name, p.Mii.Data)
 				if b, changed := matchProfileToConsoleRegion(r, body); changed {
 					body = b
 					log.Printf("profile: PID=%d account region doesn't fit the console, reporting -> %s", p.PID, profileLocaleSummary(body))
@@ -2326,7 +2335,34 @@ func periodicFriendSync() {
 	}
 }
 
+// syncViaKeepAlive runs a friend sync on the player's running keep-alive
+// connection instead of a second Pretendo login. Pretendo keeps one connection
+// per PID: when another one ends it drops the PID from its notification list
+// (live presence updates stop reaching the keep-alive) and tells every friend
+// the player went offline. False if there is no keep-alive or the sync failed.
+func syncViaKeepAlive(pid uint32) bool {
+	conn, err := net.DialTimeout("unix", fmt.Sprintf("/tmp/pretendo-presence-%d.sock", pid), 2*time.Second)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(90 * time.Second))
+	if _, err := conn.Write([]byte(`{"cmd":"sync"}` + "\n")); err != nil {
+		return false
+	}
+	resp, _ := io.ReadAll(conn)
+	if !bytes.Contains(resp, []byte(`"ok":true`)) {
+		log.Printf("fetchFriendsPRUDP PID=%d: keep-alive sync failed (%s), using a separate login", pid, bytes.TrimSpace(resp))
+		return false
+	}
+	log.Printf("fetchFriendsPRUDP PID=%d: synced on the keep-alive connection", pid)
+	return true
+}
+
 func fetchFriendsPRUDP(ownerPID uint32, nexPassword, authHost string, authPort uint16) {
+	if syncViaKeepAlive(ownerPID) {
+		return
+	}
 	script := "/nico-pretendo-bridge/account-proxy/fetch_friends.py"
 	dbURI := os.Getenv("PN_WUC_POSTGRES_URI")
 	cmd := exec.Command("python3", script,

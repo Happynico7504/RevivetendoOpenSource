@@ -72,6 +72,15 @@ func Connect() {
 		PRIMARY KEY (owner_pid, blocked_pid)
 	)`)
 
+	// Full friend presence (pretendo_friends is created by account-proxy; these may
+	// run first, so the table is guaranteed by then or the ALTERs are no-ops).
+	db.Exec(`ALTER TABLE pretendo_friends ADD COLUMN IF NOT EXISTS presence_unk1 SMALLINT NOT NULL DEFAULT 0`)
+	db.Exec(`ALTER TABLE pretendo_friends ADD COLUMN IF NOT EXISTS presence_message TEXT NOT NULL DEFAULT ''`)
+	db.Exec(`ALTER TABLE pretendo_friends ADD COLUMN IF NOT EXISTS presence_unk2 BIGINT NOT NULL DEFAULT 0`)
+	db.Exec(`ALTER TABLE pretendo_friends ADD COLUMN IF NOT EXISTS presence_unk3 SMALLINT NOT NULL DEFAULT 0`)
+	db.Exec(`ALTER TABLE pretendo_friends ADD COLUMN IF NOT EXISTS presence_unk4 BIGINT NOT NULL DEFAULT 0`)
+	db.Exec(`ALTER TABLE pretendo_friends ADD COLUMN IF NOT EXISTS presence_app_data BYTEA`)
+
 	// Clear stale online flags from a previous run — disconnect events won't fire on crash.
 	db.Exec(`UPDATE user_settings SET is_online = FALSE WHERE is_online = TRUE`)
 
@@ -263,6 +272,12 @@ type FriendRow struct {
 	PresenceUnk5     uint8
 	PresenceUnk6     uint8
 	PresenceUnk7     uint8
+	PresenceUnk1     uint8
+	PresenceMessage  string
+	PresenceUnk2     uint32
+	PresenceUnk3     uint8
+	PresenceUnk4     uint32
+	PresenceAppData  []byte
 	BecameFriend     time.Time
 	LastOnline       time.Time
 	CommentText      string
@@ -282,6 +297,8 @@ func GetFriends(ownerPID uint64) []FriendRow {
 		       COALESCE(f.presence_flags, 0), COALESCE(f.presence_pid, 0),
 		       COALESCE(f.presence_gathering_id, 0),
 		       COALESCE(f.presence_unk5, 3), COALESCE(f.presence_unk6, 3), COALESCE(f.presence_unk7, 3),
+		       COALESCE(f.presence_unk1, 0), COALESCE(f.presence_message, ''), COALESCE(f.presence_unk2, 0),
+		       COALESCE(f.presence_unk3, 0), COALESCE(f.presence_unk4, 0), COALESCE(f.presence_app_data, ''::bytea),
 		       f.befriended_at, f.last_online,
 		       COALESCE(s.comment_text, ''), COALESCE(s.comment_unknown, 0),
 		       COALESCE(s.comment_changed_at, NOW())
@@ -303,6 +320,8 @@ func GetFriends(ownerPID uint64) []FriendRow {
 			&f.IsOnline, &f.GameServerID, &f.TitleID, &f.TitleVersion,
 			&f.PresenceFlags, &f.PresencePID, &f.GatheringID,
 			&f.PresenceUnk5, &f.PresenceUnk6, &f.PresenceUnk7,
+			&f.PresenceUnk1, &f.PresenceMessage, &f.PresenceUnk2,
+			&f.PresenceUnk3, &f.PresenceUnk4, &f.PresenceAppData,
 			&befriendedAt, &lastOnlineAt,
 			&f.CommentText, &f.CommentUnknown, &commentChangedAt); err == nil {
 			if commentChangedAt.Valid {

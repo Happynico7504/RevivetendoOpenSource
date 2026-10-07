@@ -26,9 +26,27 @@ func UpdatePresence(
 		uint32(presence.GameServerID),
 	)
 	go func() {
-		cmd := fmt.Sprintf(`{"cmd":"update_presence","is_online":%t,"title_id":%d,"title_version":%d,"game_server_id":%d}`,
-			bool(presence.Online), uint64(presence.GameKey.TitleID),
-			uint16(presence.GameKey.TitleVersion), uint32(presence.GameServerID))
+		// Every field, so friends on Pretendo see the session and in-game activity
+		// (application data, e.g. MK8's "Worldwide Race"), not just the title.
+		b, _ := json.Marshal(map[string]any{
+			"cmd":            "update_presence",
+			"is_online":      bool(presence.Online),
+			"title_id":       uint64(presence.GameKey.TitleID),
+			"title_version":  uint16(presence.GameKey.TitleVersion),
+			"game_server_id": uint32(presence.GameServerID),
+			"flags":          uint32(presence.ChangedFlags),
+			"unk1":           uint8(presence.Unknown1),
+			"message":        string(presence.Message),
+			"unk2":           uint32(presence.Unknown2),
+			"unk3":           uint8(presence.Unknown3),
+			"unk4":           uint32(presence.Unknown4),
+			"gathering_id":   uint32(presence.GatheringID),
+			"app_data_hex":   fmt.Sprintf("%x", []byte(presence.ApplicationData)),
+			"unk5":           uint8(presence.Unknown5),
+			"unk6":           uint8(presence.Unknown6),
+			"unk7":           uint8(presence.Unknown7),
+		})
+		cmd := string(b)
 		if !database.ForwardPresenceCommand(pid, cmd) {
 			database.TriggerPretendoSync(pid)
 		}
