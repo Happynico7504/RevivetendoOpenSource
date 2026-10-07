@@ -191,7 +191,21 @@ func (s *accountServer) GetUserData(ctx context.Context, req *pb.GetUserDataRequ
 	if miiName != "" {
 		resp.Mii = &pb.Mii{Name: miiName}
 	}
+	p := s.accountProfile(ctx, req.Pid)
+	resp.Birthdate, resp.Gender, resp.Country, resp.Language = p.birthdate, p.gender, p.country, p.language
 	return resp, nil
+}
+
+type accountProfile struct{ birthdate, gender, country, language string }
+
+// accountProfile reads the account's own profile fields, which account-proxy
+// stores from Pretendo's profile response at login (empty if never seen). Juxt
+// shows birthday and country on user pages when the user enables them.
+func (s *accountServer) accountProfile(ctx context.Context, pid uint32) accountProfile {
+	var p accountProfile
+	s.db.QueryRowContext(ctx, `SELECT birth_date, gender, country, language FROM account_profiles WHERE pid = $1`, pid).
+		Scan(&p.birthdate, &p.gender, &p.country, &p.language)
+	return p
 }
 
 // lookupPID resolves a PID to (username, miiName) using a four-level chain:
@@ -370,12 +384,16 @@ func (*TokenInfoMsg) ProtoMessage()    {}
 
 // GetPNIDResponse (account.v2.GetPNIDResponse) — minimal fields Juxt needs.
 type PNIDResponse struct {
-	Deleted           bool     `protobuf:"varint,1,opt,name=deleted,proto3"`
-	Pid               uint32   `protobuf:"varint,2,opt,name=pid,proto3"`
-	Username          string   `protobuf:"bytes,3,opt,name=username,proto3"`
-	AccessLevel       int32    `protobuf:"varint,4,opt,name=access_level,json=accessLevel,proto3"`
-	ServerAccessLevel string   `protobuf:"bytes,5,opt,name=server_access_level,json=serverAccessLevel,proto3"`
+	Deleted           bool    `protobuf:"varint,1,opt,name=deleted,proto3"`
+	Pid               uint32  `protobuf:"varint,2,opt,name=pid,proto3"`
+	Username          string  `protobuf:"bytes,3,opt,name=username,proto3"`
+	AccessLevel       int32   `protobuf:"varint,4,opt,name=access_level,json=accessLevel,proto3"`
+	ServerAccessLevel string  `protobuf:"bytes,5,opt,name=server_access_level,json=serverAccessLevel,proto3"`
 	Mii               *pb.Mii `protobuf:"bytes,6,opt,name=mii,proto3"`
+	Birthdate         string  `protobuf:"bytes,8,opt,name=birthdate,proto3"`
+	Gender            string  `protobuf:"bytes,9,opt,name=gender,proto3"`
+	Country           string  `protobuf:"bytes,10,opt,name=country,proto3"`
+	Language          string  `protobuf:"bytes,11,opt,name=language,proto3"`
 }
 
 func (x *PNIDResponse) Reset()         { *x = PNIDResponse{} }
@@ -468,6 +486,7 @@ func (s *accountServer) ExchangeIndependentServiceTokenForUserData(ctx context.C
 	var miiData []byte
 	s.db.QueryRowContext(ctx, `SELECT mii_data FROM user_settings WHERE pid = $1`, pid).Scan(&miiData)
 	miiDataB64 := base64.StdEncoding.EncodeToString(miiData)
+	profile := s.accountProfile(ctx, pid)
 
 	issueTimeProto := &ProtoTimestamp{
 		Seconds: issued.Unix(),
@@ -481,6 +500,10 @@ func (s *accountServer) ExchangeIndependentServiceTokenForUserData(ctx context.C
 			AccessLevel:       int32(accessLevelForPID(pid)),
 			ServerAccessLevel: "prod",
 			Mii:               &pb.Mii{Name: miiName, Data: miiDataB64},
+			Birthdate:         profile.birthdate,
+			Gender:            profile.gender,
+			Country:           profile.country,
+			Language:          profile.language,
 		},
 		TokenInfo: &TokenInfoMsg{
 			SystemType: int32(systemType),
