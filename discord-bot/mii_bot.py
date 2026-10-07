@@ -92,7 +92,11 @@ async def revivetendo_mii_cmd(interaction: discord.Interaction, pnid: str = ""):
     with db_conn() as conn:
         with conn.cursor() as cur:
             if not pnid:
-                cur.execute("SELECT username FROM wii_devices WHERE discord_id = %s", (str(interaction.user.id),))
+                cur.execute(
+                    "SELECT username FROM wii_devices WHERE discord_id = %s "
+                    "UNION ALL SELECT username FROM n3ds_devices WHERE discord_id = %s LIMIT 1",
+                    (str(interaction.user.id), str(interaction.user.id)),
+                )
                 row = cur.fetchone()
                 if not row:
                     await interaction.followup.send(

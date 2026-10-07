@@ -83,11 +83,36 @@ RING_PORT       = int(os.environ.get("RING_HTTP_PORT", "9203"))
 def db_conn():
     return psycopg2.connect(DB_URL)
 
+def linked_pnid(cur, discord_id):
+    """PNID linked to a Discord user, from either console table (Wii U or 3DS-only), or None."""
+    cur.execute(
+        "SELECT username FROM wii_devices WHERE discord_id = %s "
+        "UNION ALL SELECT username FROM n3ds_devices WHERE discord_id = %s LIMIT 1",
+        (discord_id, discord_id),
+    )
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def account_web_password_hash(cur, pnid):
+    """The account's web password hash: the Wii U row's if set, otherwise the 3DS row's."""
+    cur.execute(
+        "SELECT COALESCE(NULLIF(w.web_password_hash,''), n.web_password_hash, '') "
+        "FROM (SELECT %s::text AS u) x "
+        "LEFT JOIN wii_devices w ON w.username = x.u "
+        "LEFT JOIN n3ds_devices n ON n.username = x.u",
+        (pnid,),
+    )
+    row = cur.fetchone()
+    return row[0] if row else ""
+
+
 def db_init():
     with db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
                 ALTER TABLE wii_devices ADD COLUMN IF NOT EXISTS discord_id TEXT;
+                ALTER TABLE IF EXISTS n3ds_devices ADD COLUMN IF NOT EXISTS discord_id TEXT;
 
                 CREATE TABLE IF NOT EXISTS discord_link_codes (
                     code       TEXT PRIMARY KEY,
@@ -252,10 +277,19 @@ async def link_pnid(interaction: discord.Interaction, code: str):
                 return
             pnid = row[0]
             cur.execute("UPDATE wii_devices SET discord_id = %s WHERE username = %s", (str(interaction.user.id), pnid))
+            linked_rows = cur.rowcount
+            cur.execute("UPDATE n3ds_devices SET discord_id = %s WHERE username = %s", (str(interaction.user.id), pnid))
+            linked_rows += cur.rowcount
+            if linked_rows == 0:
+                await interaction.response.send_message(
+                    f"❌ No Wii U or 3DS has connected to Revivetendo with PNID **{pnid}** yet, so there's nothing to link. Connect a console first.",
+                    ephemeral=True,
+                )
+                return
             cur.execute("DELETE FROM discord_link_codes WHERE code = %s", (code,))
         conn.commit()
     await interaction.response.send_message(
-        f"✅ Your Discord is now linked to PNID **{pnid}**.\nYou'll receive WiiU Chat call notifications here when someone calls you.",
+        f"✅ Your Discord is now linked to PNID **{pnid}**.\nYou can now use `/reset_web_password` here, and Wii U owners get WiiU Chat call notifications as DMs.",
         ephemeral=True,
     )
     print(f"[bot] linked discord_id={interaction.user.id} ({interaction.user}) → pnid={pnid}", flush=True)
@@ -269,12 +303,11 @@ async def reset_web_password(interaction: discord.Interaction):
 
     with db_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT username, web_password_hash FROM wii_devices WHERE discord_id = %s", (str(interaction.user.id),))
-            row = cur.fetchone()
-    if not row:
+            pnid = linked_pnid(cur, str(interaction.user.id))
+            web_password_hash = account_web_password_hash(cur, pnid) if pnid else ""
+    if not pnid:
         await interaction.followup.send("❌ No PNID linked. Use `/link_pnid` first.", ephemeral=True)
         return
-    pnid, web_password_hash = row
     if not web_password_hash:
         await interaction.followup.send(
             "❌ You don't have a web password set yet — this command only resets an existing one. Ask an admin to set one for you first.",
@@ -369,12 +402,10 @@ async def mii_cmd(interaction: discord.Interaction, pnid: str = ""):
     with db_conn() as conn:
         with conn.cursor() as cur:
             if not pnid:
-                cur.execute("SELECT username FROM wii_devices WHERE discord_id = %s", (str(interaction.user.id),))
-                row = cur.fetchone()
-                if not row:
+                pnid = linked_pnid(cur, str(interaction.user.id))
+                if not pnid:
                     await interaction.followup.send("❌ No PNID linked. Use `/link_pnid` or provide a PNID.", ephemeral=True)
                     return
-                pnid = row[0]
 
             # Local user — user_settings
             cur.execute("SELECT mii_data, mii_name FROM user_settings WHERE nnid = %s AND mii_data IS NOT NULL", (pnid,))
@@ -1020,10 +1051,9 @@ async def leavevc(interaction: discord.Interaction):
 async def whois(interaction: discord.Interaction, user: discord.Member):
     with db_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT username FROM wii_devices WHERE discord_id = %s", (str(user.id),))
-            row = cur.fetchone()
-    if row:
-        await interaction.response.send_message(f"🎮 {user.mention} → PNID **{row[0]}**", ephemeral=True)
+            pnid = linked_pnid(cur, str(user.id))
+    if pnid:
+        await interaction.response.send_message(f"🎮 {user.mention} → PNID **{pnid}**", ephemeral=True)
     else:
         await interaction.response.send_message(f"❓ {user.mention} has no linked PNID.", ephemeral=True)
 
