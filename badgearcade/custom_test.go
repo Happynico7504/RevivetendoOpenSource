@@ -73,7 +73,7 @@ func TestAddCustomContent(t *testing.T) {
 		t.Fatal("prize count not updated")
 	}
 	// Registering again changes nothing.
-	again, _ := RegisterInPrizeCollection(xml, []string{"Pr_Test_000"}, []string{"Test_000"})
+	again, _ := RegisterInPrizeCollection(xml, map[string][]string{"Prize": {"Pr_Test_000"}, "CraneInstance": {"Test_000"}})
 	if again != xml {
 		t.Fatal("registration is not idempotent")
 	}

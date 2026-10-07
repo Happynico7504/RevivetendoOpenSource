@@ -55,8 +55,9 @@ func registerBadgeArcadeDeploy() {
 // --- templates (Nintendo machines to copy layouts from) ---
 
 // badgeArcadeDeployTemplate is a template machine plus the regions whose
-// weekly archive contains it (a deployment only appears where its template
-// exists; Nintendo's EUR, USA and JPN archives hold different machines).
+// weekly archive contains it. Nintendo's EUR, USA and JPN archives hold
+// different machines; account-proxy copies a template (and the parts it
+// needs) into the regions that lack it, so deployments reach every region.
 type badgeArcadeDeployTemplate struct {
 	badgearcade.CraneTemplate
 	Regions []string
@@ -421,9 +422,9 @@ input[type=text],input[type=date],select{font:inherit;font-size:.9rem;border:1px
 <div class="note">
 A deployment is one machine: a copy of a Nintendo layout filled with approved badges, for an inclusive UTC date range,
 either in the <strong>hall</strong> or as the daily <strong>training crane</strong> (one free try per day).
-Nintendo's EUR, USA and JPN packages contain different machines, so a deployment only appears in the regions whose package has its template (shown in the list).
+Deployments appear in all three regions (EUR, USA, JPN): when a region's package lacks the template machine, it is copied in from a region that has it, together with the stage and objects it needs.
 <strong>test</strong> = only consoles in <code>test-consoles.txt</code> (experimental package), <strong>live</strong> = everyone, <strong>off</strong> = disabled.<br>
-While any deployment applies, that package's hall uses Nintendo's archived week as a rotating lineup, with deployed machines in the first slots. Changes apply at the next daily build (00:02 UTC) or right away with <em>Publish now</em>.
+The weekly lineup is the same in every region: <strong>Monday–Thursday</strong> show 30 random official machines a day (from all regions), <strong>Friday–Sunday</strong> only the deployments active that day, in random order (the hall can hold at most 30). A deployment's date range decides which weekends it appears on; training deployments also only run Friday–Sunday. Changes apply at the next daily build (00:02 UTC) or right away with <em>Publish now</em>.
 </div>
 
 <form method="post" action="/inkay/admin/badge-arcade/deployments/publish" style="margin-bottom:1rem"><button class="primary">Publish now</button> <span class="muted">rebuilds today's packages with the current deployments</span></form>
@@ -458,7 +459,7 @@ While any deployment applies, that package's hall uses Nintendo's archived week 
 <div class="row">
   <label>From (UTC)<input type="date" name="start" value="{{date .Form.Start}}" required></label>
   <label>To (UTC, inclusive)<input type="date" name="end" value="{{date .Form.End}}" required></label>
-  <label>Template machine<select name="template">{{$ft := .Form.Template}}{{range .Templates}}<option value="{{.Name}}" {{if eq .Name $ft}}selected{{end}}>{{.Name}} — {{.PrizeSlots}} spots · {{if .AllRegions}}all regions{{else}}{{range $i, $r := .Regions}}{{if $i}}+{{end}}{{$r}}{{end}} only{{end}}{{if .Difficult}} · ⚠ difficult{{end}}</option>{{end}}</select></label>
+  <label>Template machine<select name="template">{{$ft := .Form.Template}}{{range .Templates}}<option value="{{.Name}}" {{if eq .Name $ft}}selected{{end}}>{{.Name}} — {{.PrizeSlots}} spots · {{if .AllRegions}}Nintendo used it in all regions{{else}}from {{range $i, $r := .Regions}}{{if $i}}+{{end}}{{$r}}{{end}}{{end}}{{if .Difficult}} · ⚠ difficult{{end}}</option>{{end}}</select></label>
 </div>
 <div class="muted">Approved badges (they fill the template's prize spots in turn; one badge fills every spot):</div>
 <div class="badges">

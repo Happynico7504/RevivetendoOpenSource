@@ -458,9 +458,11 @@ func generateBadgeArcadeGallery(ctx context.Context, prefix string, dayStart tim
 	if err != nil {
 		return nil, nil, err
 	}
-	if len(deps) > 0 {
-		newSchedule = redateCraneSchedule(newSchedule, dayStart)
-		if newSchedule, err = applyBadgeArcadeDeployments(prefix, kept, newSchedule, dayStart, deps); err != nil {
+	// Today's lineup: the weekly lineup (test consoles until enabled for
+	// everyone), or Nintendo's archived week with deployments in front.
+	lineup := badgeArcadeLineupForEveryone || variant.IncludeTest
+	if len(deps) > 0 || lineup {
+		if newSchedule, err = applyBadgeArcadeDeployments(prefix, kept, newSchedule, dayStart, deps, lineup); err != nil {
 			return nil, nil, err
 		}
 	}
