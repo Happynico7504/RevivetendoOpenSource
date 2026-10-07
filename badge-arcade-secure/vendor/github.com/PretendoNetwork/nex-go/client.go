@@ -12,6 +12,7 @@ type Client struct {
 	address                   *net.UDPAddr
 	server                    *Server
 	mu                        sync.Mutex // protects cipher and decipher (RC4 is not goroutine-safe)
+	sendMu                    sync.Mutex // serializes outgoing packets: sequence ID + RC4 keystream position must stay in step
 	cipher                    *rc4.Cipher
 	decipher                  *rc4.Cipher
 	prudpProtocolMinorVersion int

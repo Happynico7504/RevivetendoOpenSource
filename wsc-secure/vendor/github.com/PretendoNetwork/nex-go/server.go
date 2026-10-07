@@ -578,6 +578,13 @@ func (server *Server) SendFragment(packet PacketInterface, fragmentID uint8) {
 
 	packet.SetFragmentID(fragmentID)
 	packet.SetPayload(data)
+
+	// The console decrypts reliable packets in sequence-ID order, so each packet's
+	// sequence ID and its position in the client's RC4 keystream must be assigned
+	// together. Handlers send from their own goroutines; without this lock two
+	// responses to one client could take IDs 10 and 11 but encrypt 11 first, and
+	// the console would decrypt garbage and drop the connection.
+	client.sendMu.Lock()
 	packet.SetSequenceID(uint16(client.SequenceIDCounterOut().Increment()))
 
 	// packet.Bytes() encrypts the payload in place via the client's RC4 cipher, advancing
@@ -588,6 +595,7 @@ func (server *Server) SendFragment(packet PacketInterface, fragmentID uint8) {
 	if packet.Type() == DataPacket && packet.HasFlag(FlagReliable) && !packet.HasFlag(FlagAck) && !packet.HasFlag(FlagMultiAck) {
 		client.TrackPending(packet.SequenceID(), encodedPacket)
 	}
+	client.sendMu.Unlock()
 
 	server.SendRaw(client.Address(), encodedPacket)
 }

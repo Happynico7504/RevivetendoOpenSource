@@ -764,9 +764,14 @@ func (server *Server) SendFragment(packet PacketInterface, fragmentID uint8) {
 
 	packet.SetFragmentID(fragmentID)
 	packet.SetPayload(data)
-	packet.SetSequenceID(uint16(client.SequenceIDCounterOut().Increment()))
 
+	// The console decrypts reliable packets in sequence-ID order, so a packet's
+	// sequence ID and its RC4 keystream position must be assigned together;
+	// handlers send from their own goroutines.
+	client.sendMu.Lock()
+	packet.SetSequenceID(uint16(client.SequenceIDCounterOut().Increment()))
 	encodedPacket := packet.Bytes()
+	client.sendMu.Unlock()
 
 	server.SendRaw(client.Address(), encodedPacket)
 }
