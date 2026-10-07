@@ -358,6 +358,18 @@ func main() {
 	)`); err != nil {
 		log.Fatalf("schema: %v", err)
 	}
+	// account_profiles: the account's own profile fields (from Pretendo's
+	// profile response at login), served to Juxt by account-grpc.
+	if _, err = db.Exec(`CREATE TABLE IF NOT EXISTS account_profiles (
+		pid        BIGINT      PRIMARY KEY,
+		birth_date TEXT        NOT NULL DEFAULT '',
+		gender     TEXT        NOT NULL DEFAULT '',
+		country    TEXT        NOT NULL DEFAULT '',
+		language   TEXT        NOT NULL DEFAULT '',
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`); err != nil {
+		log.Fatalf("schema: %v", err)
+	}
 	if _, err = db.Exec(`CREATE TABLE IF NOT EXISTS wii_devices (
 		username          TEXT        PRIMARY KEY,
 		device_id         TEXT        NOT NULL DEFAULT '',
@@ -876,7 +888,16 @@ func handle(w http.ResponseWriter, r *http.Request) {
 						p.PID, p.PNID)
 					cachePNIDMapping(p.PID, p.PNID)
 				}
-				log.Printf("profile: captured PID=%d PNID=%q for %s", p.PID, p.PNID, ip)
+				log.Printf("profile: captured PID=%d PNID=%q for %s (%s; console %s)", p.PID, p.PNID, ip, profileLocaleSummary(body), consoleLocaleHeaders(r))
+				storeAccountProfile(p.PID, body) // before the region correction below: the account's own values
+				if b, changed := matchProfileToConsoleRegion(r, body); changed {
+					body = b
+					log.Printf("profile: PID=%d account region doesn't fit the console, reporting -> %s", p.PID, profileLocaleSummary(body))
+				}
+				if b := applyProfileLocaleOverride(p.PID, body); !bytes.Equal(b, body) {
+					body = b
+					log.Printf("profile: PID=%d locale overridden for testing -> %s", p.PID, profileLocaleSummary(body))
+				}
 			}
 			body = fixProfileUTCOffset(body)
 		}

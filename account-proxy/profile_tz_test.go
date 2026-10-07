@@ -1,6 +1,9 @@
 package main
 
 import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
@@ -43,5 +46,47 @@ func TestFixProfileUTCOffset(t *testing.T) {
 	}
 	if string(fixProfileUTCOffset([]byte("<person/>"))) != "<person/>" {
 		t.Fatal("profile without timezone changed")
+	}
+}
+
+func TestMatchProfileToConsoleRegion(t *testing.T) {
+	profile := func(country string, region uint32) []byte {
+		return []byte(fmt.Sprintf(`<person><country>%s</country><language>en</language><region>%d</region><tz_name>America/Bogota</tz_name></person>`, country, region))
+	}
+	req := func(platform, region, country string) *http.Request {
+		r := httptest.NewRequest("GET", "/v1/api/people/@me/profile", nil)
+		r.Header.Set("X-Nintendo-Platform-Id", platform)
+		r.Header.Set("X-Nintendo-Region", region)
+		r.Header.Set("X-Nintendo-Country", country)
+		return r
+	}
+	// Real samples from 2026-10-07: a CO account (0x15020000) and a US account
+	// (0x310B0000) on a European 3DS set to Spain.
+	for _, in := range [][]byte{profile("CO", 352518144), profile("US", 822804480)} {
+		out, changed := matchProfileToConsoleRegion(req("0", "4", "ES"), in)
+		if !changed || profileLocaleSummary(out) != "country=ES language=en region=1761673216 tz_name=America/Bogota" {
+			t.Fatalf("%s -> changed=%v %s", in, changed, profileLocaleSummary(out))
+		}
+	}
+	for name, c := range map[string]struct {
+		r    *http.Request
+		body []byte
+	}{
+		"same region (DE account, Spanish console)": {req("0", "4", "ES"), profile("DE", 1309343744)},
+		"Wii U":                        {req("1", "4", "ES"), profile("US", 822804480)},
+		"unknown console country":      {req("0", "4", "XX"), profile("US", 822804480)},
+		"console country/region clash": {req("0", "2", "ES"), profile("DE", 1309343744)},
+	} {
+		if out, changed := matchProfileToConsoleRegion(c.r, c.body); changed || string(out) != string(c.body) {
+			t.Fatalf("%s: changed", name)
+		}
+	}
+}
+
+func TestAccountProfileFields(t *testing.T) {
+	body := []byte(`<person><birth_date>1999-04-01</birth_date><country>CO</country><gender>M</gender><language>en</language><mii><name>X</name></mii></person>`)
+	f := accountProfileFields(body)
+	if f["birth_date"] != "1999-04-01" || f["country"] != "CO" || f["gender"] != "M" || f["language"] != "en" {
+		t.Fatalf("%v", f)
 	}
 }
