@@ -156,7 +156,7 @@ var (
 
 // AssignTTL is how long a credential pushed to a relay (and the right of that
 // relay to pull it) stays valid: enough for a console to connect, no more.
-const AssignTTL = 10 * time.Minute
+const AssignTTL = 720 * time.Minute
 
 type assignment struct {
 	relayID  string
