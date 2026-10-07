@@ -157,6 +157,21 @@ handle_restart_request() {
 	return 0
 }
 
+# Prefix every output line with a millisecond timestamp before appending it to
+# the log; lines that already start with a date (Go's log package, the nex
+# logger) are kept as they are. Used through a process substitution, so the
+# supervised process itself stays the background job ($!) and its exit code
+# and signals are still seen.
+# Usage: stamp_log <logfile>
+stamp_log() {
+	perl -MTime::HiRes=time -MPOSIX=strftime -ne '
+		BEGIN { $| = 1 }
+		if (/^\[?\d{4}[-\/]\d\d[-\/]\d\d/) { print; next }
+		my $t = time;
+		printf "%s.%03d %s", strftime("%Y-%m-%dT%H:%M:%S", localtime $t), ($t - int $t) * 1000, $_;
+	' >>"$1"
+}
+
 # Helper: run a command in a restart loop, appending to a log file, and restart
 # it early when a restart request for <service> shows up.
 # Usage: autostart <service> <logfile> <cmd...>
@@ -164,10 +179,11 @@ autostart() {
 	local name="$1" log="$2"
 	shift 2
 	local code child requested waited req="$RUN/requests/$name" delay="${RESTART_DELAY:-45}"
+	local request_delay="${REQUEST_RESTART_DELAY:-15}"
 	while true; do
 		# Run the command in the background so this loop can watch for restart
 		# requests while it runs.
-		"$@" >>"$log" 2>&1 &
+		"$@" > >(stamp_log "$log") 2>&1 &
 		child=$!
 		printf '%s\n' "$child" >"$RUN/pids/$name"
 		set_status "$name" running
@@ -195,6 +211,12 @@ autostart() {
 		fi
 		rm -f "$RUN/pids/$name"
 		if [ "$requested" -eq 1 ]; then
+			# A requested restart (restartd, deploys) pauses before starting again,
+			# so connected consoles notice the old instance is gone and drop their
+			# sessions instead of racing the new one.
+			echo "[$(date -Iseconds)] stopped on request, starting again in ${request_delay}s" >>"$log"
+			set_status "$name" restarting "starting again in ${request_delay}s"
+			sleep "$request_delay"
 			echo "[$(date -Iseconds)] restarted on request" >>"$log"
 			continue
 		fi
