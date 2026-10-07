@@ -1,16 +1,16 @@
 package nex
 
 import (
+	"github.com/PretendoNetwork/nex-go"
+	datastore_nintendo_badge_arcade "github.com/PretendoNetwork/nex-protocols-go/datastore/nintendo-badge-arcade"
+	secure_connection_nintendo_badge_arcade "github.com/PretendoNetwork/nex-protocols-go/secure-connection/nintendo-badge-arcade"
+	shop_nintendo_badge_arcade "github.com/PretendoNetwork/nex-protocols-go/shop/nintendo-badge-arcade"
 	"github.com/PretendoNetwork/nintendo-badge-arcade-secure/globals"
 	nex_datastore "github.com/PretendoNetwork/nintendo-badge-arcade-secure/nex/datastore"
 	nex_datastore_nintendo_badge_arcade "github.com/PretendoNetwork/nintendo-badge-arcade-secure/nex/datastore/nintendo-badge-arcade"
 	nex_secure_connection "github.com/PretendoNetwork/nintendo-badge-arcade-secure/nex/secure-connection"
 	nex_secure_connection_nintendo_badge_arcade "github.com/PretendoNetwork/nintendo-badge-arcade-secure/nex/secure-connection/nintendo-badge-arcade"
 	nex_shop_nintendo_badge_arcade "github.com/PretendoNetwork/nintendo-badge-arcade-secure/nex/shop/nintendo-badge-arcade"
-	"github.com/PretendoNetwork/nex-go"
-	datastore_nintendo_badge_arcade "github.com/PretendoNetwork/nex-protocols-go/datastore/nintendo-badge-arcade"
-	secure_connection_nintendo_badge_arcade "github.com/PretendoNetwork/nex-protocols-go/secure-connection/nintendo-badge-arcade"
-	shop_nintendo_badge_arcade "github.com/PretendoNetwork/nex-protocols-go/shop/nintendo-badge-arcade"
 )
 
 func registerNEXProtocols() {

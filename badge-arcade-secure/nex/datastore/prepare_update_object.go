@@ -17,7 +17,7 @@ func PrepareUpdateObject(err error, client *nex.Client, callID uint32, param *da
 	dataVersion := database.GetVersionByDataID(uint32(dataID))
 
 	bucket := os.Getenv("PN_NBA_CONFIG_S3_BUCKET")
-	key := fmt.Sprintf("%s/%011d-%05d", os.Getenv("PN_NBA_CONFIG_S3_PATH"), dataID, dataVersion + 1)
+	key := fmt.Sprintf("%s/%011d-%05d", os.Getenv("PN_NBA_CONFIG_S3_PATH"), dataID, dataVersion+1)
 
 	input := &globals.PostObjectInput{
 		Bucket:    bucket,

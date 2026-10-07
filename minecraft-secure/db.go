@@ -65,24 +65,24 @@ func dbGetURLs(pid uint32) []string {
 // ---- gatherings ----
 
 type Gathering struct {
-	GID                uint32
-	Owner              uint32
-	Host               uint32
-	Description        string
-	GameMode           uint32
-	Attribs            []uint32
-	MinParticipants    uint16
-	MaxParticipants    uint16
+	GID                 uint32
+	Owner               uint32
+	Host                uint32
+	Description         string
+	GameMode            uint32
+	Attribs             []uint32
+	MinParticipants     uint16
+	MaxParticipants     uint16
 	ParticipationPolicy uint32
-	PolicyArgument     uint32
-	Flags              uint32
-	State              uint32
-	OpenParticipation  bool
-	MatchmakeSystem    uint32
-	ApplicationData    []byte
-	ProgressScore      uint8
-	SessionKey         []byte
-	Participants       []uint32
+	PolicyArgument      uint32
+	Flags               uint32
+	State               uint32
+	OpenParticipation   bool
+	MatchmakeSystem     uint32
+	ApplicationData     []byte
+	ProgressScore       uint8
+	SessionKey          []byte
+	Participants        []uint32
 }
 
 func randomSessionKey() []byte {

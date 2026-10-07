@@ -1,8 +1,8 @@
 package nex_secure_connection_nintendo_badge_arcade
 
 import (
-	"github.com/PretendoNetwork/nintendo-badge-arcade-secure/globals"
 	secure_connection_nintendo_badge_arcade "github.com/PretendoNetwork/nex-protocols-go/secure-connection/nintendo-badge-arcade"
+	"github.com/PretendoNetwork/nintendo-badge-arcade-secure/globals"
 
 	"github.com/PretendoNetwork/nex-go"
 )

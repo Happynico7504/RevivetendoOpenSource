@@ -1,9 +1,9 @@
 package utility
 
 import (
-	"github.com/PretendoNetwork/nintendo-badge-arcade-secure/database"
 	"github.com/PretendoNetwork/nex-go"
 	"github.com/PretendoNetwork/nex-protocols-go/datastore"
+	"github.com/PretendoNetwork/nintendo-badge-arcade-secure/database"
 )
 
 func DataStorePostParamToFreePlayData(ownerID uint32, metaInfo *datastore.DataStorePreparePostParam) {

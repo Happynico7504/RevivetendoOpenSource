@@ -4,8 +4,8 @@ import (
 	"database/sql"
 	"os"
 
-	_ "github.com/lib/pq"
 	"github.com/PretendoNetwork/nintendo-badge-arcade-secure/globals"
+	_ "github.com/lib/pq"
 )
 
 var postgres *sql.DB

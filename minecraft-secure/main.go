@@ -121,13 +121,13 @@ const (
 	mmeBrowseWithURLsNoH   = 0x2B
 	mmeBrowseNoHolderNoRng = 0x34
 	mmeBrowseWithURLsNoHNR = 0x35
-	mmeAutoWithGID         = 0x18  // AutoMatchmakeWithGatheringId_Postpone
-	mmeUpdateSession       = 0x8   // UpdateMatchmakeSession (but may differ)
-	mmeEndParticipation    = 0x24  // EndParticipation (in matchmake_ext proto)
-	mmeWithdraw            = 0x29  // WithdrawMatchmaking
-	mmeWithdrawAll         = 0x2C  // WithdrawMatchmakingAll
-	mmeRequestMatchmaking  = 0x28  // but that's AutoMatchmakeWithParam, skip
-	mmeGetMyGathering      = 0x7   // JoinMatchmakeSession, same ID
+	mmeAutoWithGID         = 0x18 // AutoMatchmakeWithGatheringId_Postpone
+	mmeUpdateSession       = 0x8  // UpdateMatchmakeSession (but may differ)
+	mmeEndParticipation    = 0x24 // EndParticipation (in matchmake_ext proto)
+	mmeWithdraw            = 0x29 // WithdrawMatchmaking
+	mmeWithdrawAll         = 0x2C // WithdrawMatchmakingAll
+	mmeRequestMatchmaking  = 0x28 // but that's AutoMatchmakeWithParam, skip
+	mmeGetMyGathering      = 0x7  // JoinMatchmakeSession, same ID
 )
 
 // nat-traversal (0x03) method IDs not in nex-protocols-go v1.0.23

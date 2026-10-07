@@ -13,4 +13,3 @@ type badgeArcadeMetaBinary struct {
 	Unknown4                []uint64
 	Unknown5                []byte // 32 bytes long hash
 }
-
