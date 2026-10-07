@@ -2,10 +2,9 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"context"
-	"bytes"
-	_ "embed"
 	"crypto"
 	"crypto/aes"
 	"crypto/cipher"
@@ -16,9 +15,11 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"database/sql"
+	_ "embed"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -31,7 +32,6 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"encoding/json"
 	"regexp"
 	"sort"
 	"strconv"
@@ -43,10 +43,10 @@ import (
 	"github.com/andybalholm/brotli"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
-	"github.com/pires/go-proxyproto"
-	"github.com/redis/go-redis/v9"
 	minio "github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/pires/go-proxyproto"
+	"github.com/redis/go-redis/v9"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -98,7 +98,6 @@ type serviceTokenResp struct {
 }
 
 const juxtAESKeyHex = "6014b79d9a50f090f4b7342d00d33a53cd97760ee3e50c35ad40ab7e01dbddcc"
-
 
 var db *sql.DB
 
@@ -380,12 +379,42 @@ func main() {
 	// Swapdoodle authenticates entirely through its own NASC/locator path).
 	// mii_data is nullable and stays NULL until extractMiiFromSwapdoodleNote
 	// actually works - see project_swapdoodle_note_format_moderation memory.
+	db.Exec(`CREATE TABLE IF NOT EXISTS coin_ledger (
+		id BIGSERIAL PRIMARY KEY,
+		pid BIGINT NOT NULL,
+		delta INTEGER NOT NULL,
+		balance_after INTEGER NOT NULL,
+		reason TEXT NOT NULL DEFAULT '',
+		ref TEXT UNIQUE,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`)
+	db.Exec(`CREATE TABLE IF NOT EXISTS ip_pid_cache (
+		ip        TEXT        PRIMARY KEY,
+		pid       BIGINT      NOT NULL,
+		cached_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`)
+	db.Exec(`CREATE TABLE IF NOT EXISTS coin_wallets (
+		pid BIGINT PRIMARY KEY,
+		balance INTEGER NOT NULL,
+		last_grant DATE NOT NULL
+	)`)
 	db.Exec(`CREATE TABLE IF NOT EXISTS ds_devices (
 		pid              BIGINT      PRIMARY KEY,
 		mii_data         BYTEA,
 		mii_rendered_at  TIMESTAMPTZ,
 		updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	)`)
+	db.Exec(`CREATE TABLE IF NOT EXISTS n3ds_devices (
+		username    TEXT        PRIMARY KEY,
+		device_id   TEXT        NOT NULL DEFAULT '',
+		serial      TEXT        NOT NULL DEFAULT '',
+		device_cert TEXT        NOT NULL DEFAULT '',
+		pw_hash     TEXT        NOT NULL DEFAULT '',
+		updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`)
+	db.Exec(`ALTER TABLE n3ds_devices ADD COLUMN IF NOT EXISTS web_password_hash TEXT NOT NULL DEFAULT ''`)
+	db.Exec(`ALTER TABLE n3ds_devices ADD COLUMN IF NOT EXISTS discord_id TEXT`)
+	migrateCTRDevices()
 	db.Exec(`CREATE TABLE IF NOT EXISTS web_logins (id BIGSERIAL PRIMARY KEY, pid BIGINT NOT NULL, ip TEXT NOT NULL, logged_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), success BOOLEAN NOT NULL)`)
 	db.Exec(`ALTER TABLE redirects ADD COLUMN IF NOT EXISTS game_server_id TEXT`)
 	db.Exec(`ALTER TABLE redirects ADD COLUMN IF NOT EXISTS port INTEGER`)
@@ -461,6 +490,7 @@ func main() {
 		mux := http.NewServeMux()
 		mux.HandleFunc("/internal/auth", handleInternalAuth)
 		mux.HandleFunc("/internal/badge-arcade/rebuild", handleBadgeArcadeRebuild)
+		mux.HandleFunc("/internal/coins/add", handleInternalCoinsAdd)
 		mux.HandleFunc("/internal/mii", handleInternalMii)
 		mux.HandleFunc("/internal/web/status", handleWebStatus)
 		mux.HandleFunc("/internal/web/set-password", handleWebSetPassword)
@@ -654,11 +684,84 @@ func handleServiceToken(w http.ResponseWriter, r *http.Request) {
 	w.Write(body)
 }
 
+// webPasswordHashFor returns an account's web password hash: the Wii U row's when
+// it has one, otherwise the 3DS-only row's.
+func webPasswordHashFor(username string) string {
+	var h string
+	db.QueryRow(`SELECT COALESCE(NULLIF(w.web_password_hash,''), n.web_password_hash, '')
+		FROM (SELECT $1::text AS u) x
+		LEFT JOIN wii_devices w ON w.username = x.u
+		LEFT JOIN n3ds_devices n ON n.username = x.u`, username).Scan(&h)
+	return h
+}
+
+// isCTRDeviceCert reports whether a base64 device certificate belongs to a 3DS
+// ("Nintendo CA - G3_NintendoCTR2prod" issuer). Wii U certificates are issued by
+// "Root-CA00000003-MS00000012". Checked against all 297 stored certificates: the
+// issuer separates the two platforms exactly, unlike serial-number guesses.
+func isCTRDeviceCert(cert string) bool {
+	raw, err := base64.RawStdEncoding.DecodeString(strings.TrimRight(strings.TrimSpace(cert), "="))
+	return err == nil && bytes.Contains(raw, []byte("NintendoCTR"))
+}
+
+// migrateCTRDevices moves any 3DS credentials still sitting in wii_devices into
+// n3ds_devices (idempotent). The wii_devices row stays, credentials blanked.
+func migrateCTRDevices() {
+	rows, err := db.Query(`SELECT username, device_id, serial, device_cert, pw_hash FROM wii_devices WHERE device_cert != ''`)
+	if err != nil {
+		log.Printf("migrateCTRDevices: query: %v", err)
+		return
+	}
+	type row struct{ user, id, serial, cert, pw string }
+	var ctr []row
+	for rows.Next() {
+		var x row
+		if rows.Scan(&x.user, &x.id, &x.serial, &x.cert, &x.pw) == nil && isCTRDeviceCert(x.cert) {
+			ctr = append(ctr, x)
+		}
+	}
+	rows.Close()
+	for _, x := range ctr {
+		db.Exec(`INSERT INTO n3ds_devices (username, device_id, serial, device_cert, pw_hash) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (username) DO NOTHING`, x.user, x.id, x.serial, x.cert, x.pw)
+		db.Exec(`UPDATE wii_devices SET device_id = '', serial = '', device_cert = '', pw_hash = '' WHERE username = $1`, x.user)
+		log.Printf("migrateCTRDevices: moved 3DS credentials for %q to n3ds_devices", x.user)
+	}
+}
+
+// loadConsoleCreds returns the console credentials for a PNID: the Wii U's when it
+// has any, otherwise the 3DS's. Both are replayed the same way (wiiUHeaders works
+// for 3DS credentials too - Pretendo accepted them, e.g. Mii sync for 3DS accounts).
+func loadConsoleCreds(username string) (deviceID, serial, cert, pwHash string, ok bool) {
+	db.QueryRow(`SELECT device_id, serial, device_cert, pw_hash FROM wii_devices WHERE username = $1 AND device_cert != '' AND pw_hash != ''`, username).
+		Scan(&deviceID, &serial, &cert, &pwHash)
+	if cert == "" {
+		db.QueryRow(`SELECT device_id, serial, device_cert, pw_hash FROM n3ds_devices WHERE username = $1 AND device_cert != '' AND pw_hash != ''`, username).
+			Scan(&deviceID, &serial, &cert, &pwHash)
+	}
+	return deviceID, serial, cert, pwHash, cert != "" && pwHash != ""
+}
+
 func storeDeviceHeaders(username, pwHash string, r *http.Request) {
 	deviceID := r.Header.Get("X-Nintendo-Device-Id")
 	serial := r.Header.Get("X-Nintendo-Serial-Number")
 	cert := r.Header.Get("X-Nintendo-Device-Cert")
 	if username == "" || (deviceID == "" && cert == "") {
+		return
+	}
+	if isCTRDeviceCert(cert) {
+		// A 3DS console. Its credentials live in n3ds_devices so a 3DS login can never
+		// overwrite the Wii U credentials of the same PNID (and vice versa). wii_devices
+		// only ever holds accounts that have actually connected a Wii U; a 3DS-only
+		// account keeps its web password in n3ds_devices.web_password_hash.
+		db.Exec(`INSERT INTO n3ds_devices (username, device_id, serial, device_cert, pw_hash, updated_at)
+			VALUES ($1, $2, $3, $4, $5, NOW())
+			ON CONFLICT (username) DO UPDATE SET
+				device_id   = EXCLUDED.device_id,
+				serial      = EXCLUDED.serial,
+				device_cert = EXCLUDED.device_cert,
+				pw_hash     = EXCLUDED.pw_hash,
+				updated_at  = NOW()`,
+			username, deviceID, serial, cert, pwHash)
 		return
 	}
 	db.Exec(`INSERT INTO wii_devices (username, device_id, serial, device_cert, pw_hash, updated_at)
@@ -670,6 +773,11 @@ func storeDeviceHeaders(username, pwHash string, r *http.Request) {
 			pw_hash     = EXCLUDED.pw_hash,
 			updated_at  = NOW()`,
 		username, deviceID, serial, cert, pwHash)
+	// A PNID that linked Discord back when it only had a 3DS keeps that link once its
+	// Wii U connects (WiiU Chat call DMs look the link up on the Wii U row).
+	db.Exec(`UPDATE wii_devices SET discord_id = n.discord_id FROM n3ds_devices n
+		WHERE wii_devices.username = $1 AND n.username = $1
+		AND wii_devices.discord_id IS NULL AND n.discord_id IS NOT NULL`, username)
 }
 
 func handle(w http.ResponseWriter, r *http.Request) {
@@ -770,6 +878,7 @@ func handle(w http.ResponseWriter, r *http.Request) {
 				}
 				log.Printf("profile: captured PID=%d PNID=%q for %s", p.PID, p.PNID, ip)
 			}
+			body = fixProfileUTCOffset(body)
 		}
 		writeResponse(w, status, headers, body)
 		return
@@ -1379,6 +1488,16 @@ func storePIDInDB(hash string, pid uint32) {
 		hash, pid)
 }
 
+// storeIPPID persists an IP -> PID resolution so a service restart (which wipes
+// the in-memory pidCache) doesn't strand a ninja/badge-arcade session that has
+// no other way to re-resolve its PID. See fetchRealPID's doc comment.
+func storeIPPID(ip string, pid uint32) {
+	db.Exec(`INSERT INTO ip_pid_cache (ip, pid)
+	         VALUES ($1, $2)
+	         ON CONFLICT (ip) DO UPDATE SET pid = EXCLUDED.pid, cached_at = NOW()`,
+		ip, pid)
+}
+
 func storeMiiName(pid uint32, name string) {
 	if name == "" {
 		return
@@ -1937,10 +2056,27 @@ func fetchRealPID(r *http.Request) uint32 {
 		return pid
 	}
 
+	// Ninja/badge-arcade shop calls carry no header authHash or the upstream
+	// nex_token/profile fallbacks below can use (X-Nintendo-Servicetoken isn't
+	// Authorization, and Pretendo's real API doesn't recognize it) - the ONLY way
+	// they ever resolve a PID is inheriting an in-memory hit from an earlier,
+	// differently-authenticated request on the same IP. That memory is wiped on
+	// every restart, silently breaking coin tracking for whoever's mid-session at
+	// the time (confirmed 2026-09-24: it fell back to the default balance and
+	// stopped debiting real coins, with no error visible on either end). This
+	// persisted twin survives restarts.
+	var dbPID uint32
+	if err := db.QueryRow(`SELECT pid FROM ip_pid_cache WHERE ip = $1`, ip).Scan(&dbPID); err == nil && dbPID != 0 {
+		pidCache.Store(ip, dbPID)
+		log.Printf("fetchRealPID: persisted ip cache hit PID=%d for %s", dbPID, ip)
+		return dbPID
+	}
+
 	hash := authHash(r)
 	if hash != "" {
 		if pid := lookupPIDFromDB(hash); pid != 0 {
 			pidCache.Store(ip, pid)
+			storeIPPID(ip, pid)
 			log.Printf("fetchRealPID: db cache hit PID=%d for %s", pid, ip)
 			return pid
 		}
@@ -1961,6 +2097,7 @@ func fetchRealPID(r *http.Request) uint32 {
 			continue
 		}
 		pidCache.Store(ip, tkn.PID)
+		storeIPPID(ip, tkn.PID)
 		if hash != "" {
 			storePIDInDB(hash, tkn.PID)
 		}
@@ -1977,10 +2114,11 @@ func fetchRealPID(r *http.Request) uint32 {
 		var p profilePerson
 		if xml.Unmarshal(body, &p) == nil && p.PID != 0 {
 			pidCache.Store(ip, p.PID)
+			storeIPPID(ip, p.PID)
 			if hash != "" {
 				storePIDInDB(hash, p.PID)
 				storeMiiName(p.PID, p.Mii.Name)
-					go uploadMiiImages(p.PID, p.Mii.Data)
+				go uploadMiiImages(p.PID, p.Mii.Data)
 			}
 			log.Printf("fetchRealPID: PID=%d via profile fetch (stored)", p.PID)
 			return p.PID
@@ -2267,7 +2405,6 @@ func doUpstream(r *http.Request) ([]byte, int, http.Header, error) {
 	return body, resp.StatusCode, resp.Header, err
 }
 
-
 var hopByHop = map[string]bool{
 	"Transfer-Encoding":   true,
 	"Connection":          true,
@@ -2383,7 +2520,11 @@ func pretendoFetchProfile(deviceID, serial, deviceCert, token string) (profilePe
 // across two attempts). Runs fully in the background (go initMiiImages() in main()),
 // so a 186-device backfill taking ~3h doesn't block or slow anything else down.
 func initMiiImages() {
-	rows, err := db.Query(`SELECT username, device_id, serial, device_cert, pw_hash FROM wii_devices WHERE device_cert != '' AND pw_hash != ''`)
+	rows, err := db.Query(`SELECT username, device_id, serial, device_cert, pw_hash FROM wii_devices WHERE device_cert != '' AND pw_hash != ''
+		UNION ALL
+		SELECT n.username, n.device_id, n.serial, n.device_cert, n.pw_hash FROM n3ds_devices n
+		WHERE n.device_cert != '' AND n.pw_hash != ''
+		AND NOT EXISTS (SELECT 1 FROM wii_devices w WHERE w.username = n.username AND w.device_cert != '' AND w.pw_hash != '')`)
 	if err != nil {
 		log.Printf("initMiiImages: db query: %v", err)
 		return
@@ -2478,7 +2619,6 @@ func cachePNIDMapping(pid uint32, pnid string) {
 	// A new PNID for this PID changes what /internal/lookup would answer.
 	invalidateLookupCache(pid)
 }
-
 
 // relayAssignURL is relayhub's local endpoint (see relayhub's /assign).
 var relayAssignURL = "http://127.0.0.1:9401/assign"
@@ -2792,12 +2932,11 @@ func handleInternalAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var deviceID, serial, deviceCert, pwHash, webPwHash string
-	db.QueryRow(`SELECT device_id, serial, device_cert, pw_hash, web_password_hash FROM wii_devices WHERE username = $1`, userID).
-		Scan(&deviceID, &serial, &deviceCert, &pwHash, &webPwHash)
-	if deviceCert == "" || pwHash == "" {
-		log.Printf("internal/auth: no Wii U credentials for %q", userID)
-		fail("no device registered — connect via Wii U first", 401)
+	webPwHash := webPasswordHashFor(userID)
+	// Any registered console (Wii U or 3DS) proves the account has connected before.
+	if _, _, _, _, hasConsole := loadConsoleCreds(userID); !hasConsole {
+		log.Printf("internal/auth: no console credentials for %q", userID)
+		fail("no console registered — connect a Wii U or 3DS first", 401)
 		return
 	}
 	if webPwHash == "" {
@@ -2913,9 +3052,7 @@ func handleInternalMii(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 1. Local user with Pretendo device credentials — authenticate as themselves.
-	var deviceID, serial, deviceCert, pwHash string
-	db.QueryRow(`SELECT device_id, serial, device_cert, pw_hash FROM wii_devices WHERE username = $1 AND device_cert != '' AND pw_hash != ''`, pnid).
-		Scan(&deviceID, &serial, &deviceCert, &pwHash)
+	deviceID, serial, deviceCert, pwHash, _ := loadConsoleCreds(pnid)
 	if deviceCert != "" {
 		prof, _, err := fetchPretendoProfile(deviceID, serial, deviceCert, pwHash, pnid)
 		if err != nil {
@@ -3039,9 +3176,9 @@ func handleWebStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"invalid pid"}`, 400)
 		return
 	}
-	var webPwHash string
-	db.QueryRow(`SELECT w.web_password_hash FROM wii_devices w JOIN pnid_cache p ON p.pnid = w.username WHERE p.pid = $1`, pid).Scan(&webPwHash)
-	hasPassword := webPwHash != ""
+	var pnidForStatus string
+	db.QueryRow(`SELECT pnid FROM pnid_cache WHERE pid = $1`, pid).Scan(&pnidForStatus)
+	hasPassword := pnidForStatus != "" && webPasswordHashFor(pnidForStatus) != ""
 
 	type loginEntry struct {
 		IP       string    `json:"ip"`
@@ -3088,7 +3225,13 @@ func handleWebSetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h := sha256.Sum256([]byte(password))
-	res, err := db.Exec(`UPDATE wii_devices SET web_password_hash = $1 WHERE username = (SELECT pnid FROM pnid_cache WHERE pid = $2)`, hex.EncodeToString(h[:]), pid)
+	hexHash := hex.EncodeToString(h[:])
+	res, err := db.Exec(`UPDATE wii_devices SET web_password_hash = $1 WHERE username = (SELECT pnid FROM pnid_cache WHERE pid = $2)`, hexHash, pid)
+	if err == nil {
+		if n, _ := res.RowsAffected(); n == 0 {
+			res, err = db.Exec(`UPDATE n3ds_devices SET web_password_hash = $1 WHERE username = (SELECT pnid FROM pnid_cache WHERE pid = $2)`, hexHash, pid)
+		}
+	}
 	if err != nil {
 		log.Printf("web/set-password: db error for PID %d: %v", pid, err)
 		http.Error(w, `{"error":"db error"}`, 500)
@@ -5014,6 +5157,7 @@ func markSwapdoodleBossServed(dataID, pid int64) {
 // since Pretendo doesn't implement any of this either):
 //   - RNG_MD1/dstdatList.bin - destination/metadata list
 //   - RNG_NT1/<lang>/nt1, RNG_NT2/<lang>/nt2 - localized notification templates
+//
 // All three send If-Modified-Since, exactly like dstsetting, and were
 // answered the same synthetic-304 way until the 2026-08-27 placeholder-200
 // experiment below. RNG_EC1/<n>.dlp is a plain unconditional GET with no such
@@ -5303,15 +5447,40 @@ func handleNpdlCDN(w http.ResponseWriter, r *http.Request) {
 			// skipped. Files only change when replaced on disk.
 			log.Printf("npdl CDN: Badge Arcade request headers for %s: If-Modified-Since=%q If-None-Match=%q Range=%q UA=%q",
 				r.URL.Path, r.Header.Get("If-Modified-Since"), r.Header.Get("If-None-Match"), r.Header.Get("Range"), r.Header.Get("User-Agent"))
-			if fi, statErr := os.Stat(badgeArcadeBossDataDir + "/" + filename); statErr == nil {
+			fi, statErr := os.Stat(badgeArcadeBossDataDir + "/" + filename)
+			if statErr == nil {
 				w.Header().Set("ETag", fmt.Sprintf("\"%x-%x\"", fi.Size(), fi.ModTime().UnixNano()))
 				w.Header().Set("Last-Modified", fi.ModTime().UTC().Format(http.TimeFormat))
 			}
-			// 2026-09-21: NEVER answer a conditional request with 304. The console's first
-			// request after a Last-Modified was stored carries If-Modified-Since; we used to
-			// answer 304 and every such launch was followed by a second login ~2 minutes later
-			// (the "double load"; 4 of 4 launches). The console only recovered by dropping the
-			// header and asking again, which got the full 200. So always send the file.
+			// 2026-09-21 diagnosis retracted 2026-09-22: the 09-21 fix assumed answering 304
+			// caused the "second login ~2 minutes later" pattern, since 4 of 4 launches showed
+			// it right after a 304. But tonight, with this code already forcing 200 unconditionally
+			// the entire session, that exact same ~2-minute-later second login still happened
+			// (21:12:03 -> 21:13:45 in account-proxy.log) - so 304 was never the cause. Per
+			// how the real service behaved: a second, "genuinely new data" login + SD-card
+			// write was normal *when content actually changed* - it wasn't a malfunction to
+			// recover from. Always forcing 200 instead just guarantees every launch looks like
+			// new data (a fresh full download, never a "nothing changed" signal), which is
+			// itself the far more likely explanation for both the every-launch reload *and*
+			// the 26.5MB transfer repeatedly hitting "connection reset by peer" - it's being
+			// forced to happen on every single launch instead of only the first. Actually
+			// honoring the conditional request when our validators match is what the real
+			// server did; only fall through to a full body when something's genuinely changed.
+			if inm := r.Header.Get("If-None-Match"); inm != "" && inm == w.Header().Get("ETag") {
+				w.WriteHeader(http.StatusNotModified)
+				log.Printf("npdl CDN: Badge Arcade %s -> 304 (If-None-Match matched, unchanged)", r.URL.Path)
+				return
+			}
+			if ims := r.Header.Get("If-Modified-Since"); ims != "" && statErr == nil {
+				// HTTP dates only carry second precision; fi.ModTime() carries nanoseconds,
+				// so an untruncated comparison sees the file as always a fraction of a second
+				// "newer" than what the console sent and a 304 can never match.
+				if t, err := http.ParseTime(ims); err == nil && !fi.ModTime().Truncate(time.Second).After(t) {
+					w.WriteHeader(http.StatusNotModified)
+					log.Printf("npdl CDN: Badge Arcade %s -> 304 (If-Modified-Since %s, unchanged)", r.URL.Path, ims)
+					return
+				}
+			}
 			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
 			w.WriteHeader(http.StatusOK)
 			sendStart := time.Now()
@@ -5742,6 +5911,17 @@ func fixPolicylistUpdateTime(body []byte, contentEncoding string, cacheKey strin
 	return fixed, true, nil
 }
 
+// scannerProbeRe matches common vulnerability-scanner probe paths (.env dumps, wp-config,
+// Spring actuator, Laravel ignition, .git/config, etc.) that constantly hit the generic
+// proxy fallbacks below on our various *.pretendo.cc / own-domain hosts. Logged with a
+// distinct "scanner probe" tag so this traffic doesn't blend into genuine upstream-error
+// noise when grepping the logs for real outages.
+var scannerProbeRe = regexp.MustCompile(`(?i)(\.env(\.|$|/)|wp-config|wp-admin|wp-login|wp-content|\.git/(config|HEAD)|\bactuator/|_ignition/|phpunit|eval-stdin|xmlrpc\.php|\.(bak|swp|old)$|\.DS_Store$|id_rsa|\.htaccess$|boaform|/cgi-bin/|vendor/phpunit|\.aws/credentials|debug/default/view|crusader-404-probe|/\.\./|__vite_rsc_findSourceMapURL)`)
+
+func isScannerProbe(path string) bool {
+	return scannerProbeRe.MatchString(path)
+}
+
 // handleGenericPretendoProxy transparently forwards a request to the real Pretendo
 // server at the same hostname, unchanged. Fallback for any *.pretendo.cc host we
 // haven't explicitly built handling for (e.g. BOSS CDN/content domains other than
@@ -5764,7 +5944,11 @@ func handleGenericPretendoProxy(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := wiiUHTTPClient.Do(proxyReq)
 	if err != nil {
-		log.Printf("generic pretendo.cc proxy: upstream error for %s: %v", fullTarget, err)
+		if isScannerProbe(r.URL.Path) {
+			log.Printf("generic pretendo.cc proxy: scanner probe %s %s: %v", r.Method, fullTarget, err)
+		} else {
+			log.Printf("generic pretendo.cc proxy: upstream error for %s: %v", fullTarget, err)
+		}
 		http.Error(w, "upstream error", http.StatusBadGateway)
 		return
 	}
@@ -5789,6 +5973,10 @@ var knownOLVHosts = map[string]bool{
 	"portal.olv.nicochristmann.net": true,
 	"ctr.olv.nicochristmann.net":    true,
 	"olv3ds.nicochristmann.net":     true,
+	// The 3DS's Miiverse discovery on the short domain: without it the request
+	// went to Pretendo's discovery, which pointed the console at Pretendo's
+	// Miiverse, where our service token is invalid (015-5016 when posting).
+	"discovery.olv.nicoch.net": true,
 }
 
 // handleGenericOwnDomainProxy is the counterpart to handleGenericPretendoProxy, for
@@ -5818,7 +6006,11 @@ func handleGenericOwnDomainProxy(w http.ResponseWriter, r *http.Request, ownSuff
 
 	resp, err := wiiUHTTPClient.Do(proxyReq)
 	if err != nil {
-		log.Printf("generic %s proxy: upstream error for %s: %v", ownSuffix, fullTarget, err)
+		if isScannerProbe(r.URL.Path) {
+			log.Printf("generic %s proxy: scanner probe %s %s: %v", ownSuffix, r.Method, fullTarget, err)
+		} else {
+			log.Printf("generic %s proxy: upstream error for %s: %v", ownSuffix, fullTarget, err)
+		}
 		http.Error(w, "upstream error", http.StatusBadGateway)
 		return
 	}
@@ -5851,7 +6043,7 @@ func handleOLV(w http.ResponseWriter, r *http.Request) {
 		handleGenericOwnDomainProxy(w, r, ".nicochristmann.net")
 		return
 	}
-	if strings.HasSuffix(r.Host, ".nicoch.net") {
+	if strings.HasSuffix(r.Host, ".nicoch.net") && !knownOLVHosts[r.Host] {
 		handleGenericOwnDomainProxy(w, r, ".nicoch.net")
 		return
 	}
@@ -6087,7 +6279,6 @@ func startOLVProxy() {
 			return &olvCert, nil
 		}
 	}
-
 
 	// is3DSSensitiveHost/stagger3DSHandshake are a 3DS-only gate, deliberately
 	// separate from anything Wii U touches: a no-op for every hostname Wii U
@@ -6417,8 +6608,273 @@ func ninjaContentType(r *http.Request) string {
 // ninjaLocale remembers each console's shop country/language (client IP -> {country, lang}).
 var ninjaLocale sync.Map
 
+// RevivetendoCoin wallet: every account gets ninjaCoinDaily coins per UTC day,
+// unused coins roll over, and the daily grant only tops the balance up while it is
+// below ninjaCoinCap (never past it). Packs themselves cannot be banked: buying one
+// starts the rounds immediately, so only coins are stored. The grant
+// is applied lazily on every read/spend (missed days accumulate up to the cap),
+// so there is no cron job. One "5 Runden" pack costs ninjaPackPrice coins, so
+// the free daily grant buys ninjaCoinDaily/ninjaPackPrice packs per day.
+const (
+	ninjaCoinCap   = 500 // coins can be banked up to this; the free daily grant stops at it
+	ninjaCoinDaily = 1   // 1 free pack (= 5 rounds) per day - kept low to cover server costs
+	ninjaPackPrice = 1   // keep the literal "1.00" amounts in the CAS ListItems, ECS GetTaxes and prepurchase_info responses in sync
+)
+
+// walletApply grants any pending daily coins inside tx and returns the balance.
+func walletApply(tx *sql.Tx, pid uint32) (int, error) {
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	var bal int
+	var last time.Time
+	err := tx.QueryRow(`SELECT balance, last_grant FROM coin_wallets WHERE pid=$1 FOR UPDATE`, int64(pid)).Scan(&bal, &last)
+	if err == sql.ErrNoRows {
+		_, err = tx.Exec(`INSERT INTO coin_wallets(pid, balance, last_grant) VALUES($1,$2,$3)`, int64(pid), ninjaCoinDaily, today)
+		return ninjaCoinDaily, err
+	}
+	if err != nil {
+		return 0, err
+	}
+	if days := int(today.Sub(last.UTC().Truncate(24*time.Hour)) / (24 * time.Hour)); days > 0 {
+		if bal < ninjaCoinCap {
+			bal += days * ninjaCoinDaily
+			if bal > ninjaCoinCap {
+				bal = ninjaCoinCap
+			}
+		}
+		if _, err = tx.Exec(`UPDATE coin_wallets SET balance=$2, last_grant=$3 WHERE pid=$1`, int64(pid), bal, today); err != nil {
+			return 0, err
+		}
+	}
+	return bal, nil
+}
+
+// walletBalance returns pid's current balance (after the daily grant). On any
+// error it fails open with the daily amount so a DB hiccup never blocks the shop.
+func walletBalance(pid uint32) int {
+	tx, err := db.Begin()
+	if err != nil {
+		return ninjaCoinDaily
+	}
+	defer tx.Rollback()
+	bal, err := walletApply(tx, pid)
+	if err != nil {
+		log.Printf("wallet: balance for %d: %v", pid, err)
+		return ninjaCoinDaily
+	}
+	tx.Commit()
+	return bal
+}
+
+// walletSpend debits amount if the balance covers it. Returns the resulting
+// balance and whether the debit happened.
+func walletSpend(pid uint32, amount int) (int, bool) {
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, false
+	}
+	defer tx.Rollback()
+	bal, err := walletApply(tx, pid)
+	if err != nil {
+		log.Printf("wallet: spend for %d: %v", pid, err)
+		return 0, false
+	}
+	if bal < amount {
+		tx.Commit()
+		return bal, false
+	}
+	bal -= amount
+	if _, err = tx.Exec(`UPDATE coin_wallets SET balance=$2 WHERE pid=$1`, int64(pid), bal); err != nil {
+		log.Printf("wallet: spend update for %d: %v", pid, err)
+		return 0, false
+	}
+	tx.Exec(`INSERT INTO coin_ledger(pid, delta, balance_after, reason) VALUES($1,$2,$3,'purchase')`, int64(pid), -amount, bal)
+	tx.Commit()
+	return bal, true
+}
+
+// walletAdjust adds delta coins (negative to remove), or sets the balance to *absolute when given, on pid's wallet and records
+// it in coin_ledger. Unlike the free daily grant this is NOT limited by
+// ninjaCoinCap, so supporter coins can be banked above it; the balance only
+// floors at 0. A non-empty ref makes the call idempotent: a repeated ref is
+// ignored and applied=false is returned.
+func walletAdjust(pid uint32, delta int, absolute *int, reason, ref string) (bal int, applied bool, err error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, false, err
+	}
+	defer tx.Rollback()
+	cur, err := walletApply(tx, pid)
+	if err != nil {
+		return 0, false, err
+	}
+	bal = cur + delta
+	if absolute != nil {
+		bal = *absolute
+		delta = bal - cur
+	}
+	if bal < 0 {
+		bal = 0
+		delta = -cur
+	}
+	var refArg interface{}
+	if ref != "" {
+		refArg = ref
+	}
+	res, err := tx.Exec(`INSERT INTO coin_ledger(pid, delta, balance_after, reason, ref) VALUES($1,$2,$3,$4,$5) ON CONFLICT (ref) DO NOTHING`,
+		int64(pid), delta, bal, reason, refArg)
+	if err != nil {
+		return 0, false, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return cur, false, nil
+	}
+	if _, err = tx.Exec(`UPDATE coin_wallets SET balance=$2 WHERE pid=$1`, int64(pid), bal); err != nil {
+		return 0, false, err
+	}
+	return bal, true, tx.Commit()
+}
+
+// handleInternalCoinsAdd is the external "add funds" hook (e.g. a future Patreon
+// webhook). It lives on the localhost-only internal listener and additionally
+// requires the PN_COIN_ADMIN_TOKEN secret in the X-Coin-Token header; with no
+// token configured it is disabled entirely.
+//
+//	POST /internal/coins/add
+//	{"pnid":"SomePNID" | "pid":123, "amount":50 | "set":120, "reason":"patreon tier 2", "ref":"unique-id"}
+func handleInternalCoinsAdd(w http.ResponseWriter, r *http.Request) {
+	token := os.Getenv("PN_COIN_ADMIN_TOKEN")
+	if token == "" {
+		http.Error(w, "coin admin endpoint disabled (PN_COIN_ADMIN_TOKEN unset)", http.StatusServiceUnavailable)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if !hmac.Equal([]byte(r.Header.Get("X-Coin-Token")), []byte(token)) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	var req struct {
+		PNID   string `json:"pnid"`
+		PID    uint32 `json:"pid"`
+		Amount int    `json:"amount"`
+		Set    *int   `json:"set"`
+		Reason string `json:"reason"`
+		Ref    string `json:"ref"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	if (req.Set == nil && req.Amount == 0) || (req.Set != nil && req.Amount != 0) || req.Amount > 100000 || req.Amount < -100000 ||
+		(req.Set != nil && (*req.Set < 0 || *req.Set > 1000000)) || len(req.Reason) > 200 || len(req.Ref) > 100 {
+		http.Error(w, "invalid amount/reason/ref", http.StatusBadRequest)
+		return
+	}
+	pid := req.PID
+	if pid == 0 && req.PNID != "" {
+		var p int64
+		if err := db.QueryRow(`SELECT pid FROM pnid_cache WHERE lower(pnid)=lower($1)`, req.PNID).Scan(&p); err != nil {
+			http.Error(w, "unknown pnid", http.StatusNotFound)
+			return
+		}
+		pid = uint32(p)
+	}
+	if pid == 0 {
+		http.Error(w, "need pnid or pid", http.StatusBadRequest)
+		return
+	}
+	bal, applied, err := walletAdjust(pid, req.Amount, req.Set, req.Reason, req.Ref)
+	if err != nil {
+		log.Printf("coins/add: PID %d amount %d: %v", pid, req.Amount, err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	log.Printf("coins/add: PID %d amount %+d reason=%q ref=%q applied=%v balance=%d", pid, req.Amount, req.Reason, req.Ref, applied, bal)
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"pid":%d,"balance":%d,"applied":%v}`, pid, bal, applied)
+}
+
+// ninjaBalanceJSON formats a balance like the real service's balance object.
+func ninjaBalanceJSON(bal int) string {
+	return fmt.Sprintf(`{"amount":"%d,00 %s","currency":"ECOIN","raw_value":"%d"}`, bal, ninjaCoinName, bal)
+}
+
+// ninjaCoinName is the currency label mint shows for balances and prices (the
+// real service's per-country price_format suffix, here a fake "coin" since
+// everything is free). If it turns out too wide for some screen, ReviveCoin is
+// the shorter fallback.
+const ninjaCoinName = "RevivetendoCoin"
+
 // ninjaLocaleRe keeps anything but a 2-3 letter code out of the JSON we build from it.
 var ninjaLocaleRe = regexp.MustCompile(`^[A-Za-z]{2,3}$`)
+
+// ninjaPrepurchaseRe matches mint's /ninja/ws/<region>/title/<titleId>/prepurchase_info
+// path (see the handler's own comment for how this was found). The region
+// segment is built from the same obj+0x68 field the response ends up
+// writing - on a console's very first prepurchase_info call that field may
+// still be empty, giving a blank segment ("/ninja/ws//title/..."), so this
+// accepts anything but a slash rather than requiring a real 2-3 letter code.
+// ninjaTicketTitle remembers which service title each ticket_id we issued from
+// !purchase_ctr belongs to, so AccountGetETickets can build a ticket for it.
+var ninjaTicketTitle sync.Map
+
+// ticketIDRe pulls every <TicketId> out of an AccountGetETickets request.
+var ticketIDRe = regexp.MustCompile(`<ecs:TicketId>(\d+)</ecs:TicketId>`)
+
+// buildETicket builds a 3DS v1 ticket (0x350 bytes, big-endian, layout per
+// 3dbrew's Ticket page). It is not signed by Nintendo: the signature is zeroed,
+// which only works because the console's Luma3DS patches signature checks.
+// Everything else that identifies the ticket (id, console, title) is real.
+// The title key is zero; Badge Arcade's service title has no contents to
+// decrypt. Limits are left all-zero (no play/time limit) - what the requested
+// limit_type "PR" really maps to on a ticket is not yet known.
+func buildETicket(ticketID uint64, consoleID uint32, titleID uint64) []byte {
+	t := make([]byte, 0x350)
+	be := binary.BigEndian
+	be.PutUint32(t[0x000:], 0x00010004)                // RSA-2048 SHA-256 signature type
+	copy(t[0x140:0x180], "Root-CA00000003-XS0000000c") // issuer
+	t[0x1BC] = 0x01                                    // ticket format version
+	be.PutUint64(t[0x1D0:], ticketID)
+	be.PutUint32(t[0x1D8:], consoleID)
+	be.PutUint64(t[0x1DC:], titleID)
+	be.PutUint16(t[0x1E4:], 0xFFFF) // sys access
+	// 0x1E6 ticket title version, 0x1F0 license type, 0x1F1 common key index: all 0
+	// Content index (0xAC bytes at 0x2A4): header describing one 0x84-byte
+	// block, then an all-contents bitmap.
+	idx := t[0x2A4:]
+	for i, v := range []uint32{0x00010014, 0x00000014, 0x00010014, 0x00000000, 0x00000084, 0x00000084, 0x00030000} {
+		be.PutUint32(idx[i*4:], v)
+	}
+	for i := 0x2C; i < 0xAC; i++ {
+		idx[i] = 0xFF
+	}
+	return t
+}
+
+// ninjaTaxLocationsRe matches mint's /ws/<region>/tax_locations lookup, used by
+// the US/CA-only state/province step: CA sends an empty state= to request the
+// full province list, US sends a real postal_code to resolve one entry.
+var ninjaTaxLocationsRe = regexp.MustCompile(`^/ninja/ws/([^/]*)/tax_locations$`)
+
+// caProvinces is the complete, exact list of Canadian provinces/territories -
+// small enough to hardcode fully rather than guess, unlike US ZIP codes.
+var caProvinces = []string{"AB", "BC", "MB", "NB", "NL", "NS", "NT", "NU", "ON", "PE", "QC", "SK", "YT"}
+
+// usZipPrefixState is a first-digit ZIP code -> a real state in that range,
+// good enough to let a purchase proceed without a full ZIP database (this
+// server has no real per-ZIP sales tax to calculate; everything is free).
+var usZipPrefixState = map[byte]string{
+	'0': "MA", '1': "NY", '2': "DC", '3': "FL", '4': "IN",
+	'5': "IA", '6': "IL", '7': "TX", '8': "CO", '9': "CA",
+}
+
+// ninjaPurchaseRe matches mint's ticket purchase commit,
+// POST /ninja/ws/<region>/title/<titleId>/tickets/!purchase_ctr.
+var ninjaPurchaseRe = regexp.MustCompile(`^/ninja/ws/[^/]*/title/[0-9A-Fa-f]+/tickets/!purchase_ctr$`)
+
+var ninjaPrepurchaseRe = regexp.MustCompile(`^/ninja/ws/([^/]*)/title/\d+/prepurchase_info$`)
 
 func handleNinjaShop(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
@@ -6467,12 +6923,16 @@ func handleNinjaShop(w http.ResponseWriter, r *http.Request) {
 		if country == "" {
 			country = "US"
 		}
-		fmt.Fprintf(w, `{"country_detail":{"region_code":"%s","max_cash":{"amount":"999,00 eCoin","currency":"ECOIN","raw_value":"999"},"loyalty_system_available":false,"legal_payment_message_required":false,"legal_business_message_required":false,"tax_excluded_country":false,"tax_free_country":false,"prepaid_card_available":true,"credit_card_available":false,"credit_card_store_available":false,"jcb_security_code_available":false,"nfc_available":false,"coupon_available":false,"my_coupon_available":true,"price_format":{"positive_prefix":"","positive_suffix":" eCoin","negative_prefix":"- ","negative_suffix":" eCoin","formats":{"format":[{"value":"# ### ### ###,##","digit":"#"}],"pattern_id":"5"}},"default_timezone":"-05:00","eshop_available":true,"name":"Unknown","iso_code":"%s","default_language_code":"en","language_selectable":false}}`, country, country)
+		w.Write([]byte(strings.ReplaceAll(fmt.Sprintf(`{"country_detail":{"region_code":"%s","max_cash":{"amount":"999,00 {COIN}","currency":"ECOIN","raw_value":"999"},"loyalty_system_available":false,"legal_payment_message_required":false,"legal_business_message_required":false,"tax_excluded_country":false,"tax_free_country":false,"prepaid_card_available":false,"credit_card_available":false,"credit_card_store_available":false,"jcb_security_code_available":false,"nfc_available":false,"coupon_available":false,"my_coupon_available":true,"price_format":{"positive_prefix":"","positive_suffix":" {COIN}","negative_prefix":"- ","negative_suffix":" {COIN}","formats":{"format":[{"value":"# ### ### ###,##","digit":"#"}],"pattern_id":"5"}},"default_timezone":"-05:00","eshop_available":true,"name":"Unknown","iso_code":"%s","default_language_code":"en","language_selectable":false}}`, country, country), "{COIN}", ninjaCoinName)))
 
 	case path == "/ninja/ws/my/balance/current" || path == "/ninja/ws/my/balance/current_raw":
 		// Generous free balance - the whole point is "buy plays" succeeding
 		// without real payment.
-		w.Write([]byte(`{"balance": {"amount": "9999,00 eCoin","currency": "ECOIN","raw_value": "9999"}}`))
+		bal := ninjaCoinDaily
+		if pid := fetchRealPID(r); pid != 0 {
+			bal = walletBalance(pid)
+		}
+		w.Write([]byte(`{"balance": ` + ninjaBalanceJSON(bal) + `}`))
 
 	case path == "/ninja/ws/my/session/!open":
 		pid := fetchRealPID(r)
@@ -6498,14 +6958,205 @@ func handleNinjaShop(w http.ResponseWriter, r *http.Request) {
 		// did carry "Set-Cookie: JSESSIONID=...; Path=/ninja; HttpOnly". We never set one,
 		// which very likely explains why every session_config field change (country/lang,
 		// initial_device_account_id, auto_billing_contracted) never changed the result.
+		//
+		// 2026-10-02: found via a real crash dump (reported as New-3DS-specific, but the
+		// mint dump turned out byte-identical to the existing one, ruling that out) that
+		// this =true was very likely the real cause of a data abort inside mint's generic
+		// card-number validator (FUN_0016c8e8 -> Luhn check FUN_001f78cc in code.bin),
+		// reached from the credit-card auto_billing/cc_purchase flow (FUN_001f64d0)
+		// despite credit_card_available and prepaid_card_available both already being
+		// false - those flags gate ADDING a new card, not viewing/re-entering one mint
+		// already believes is on file because we claimed auto_billing_contracted. We
+		// never back that claim with real card data, so that screen reads garbage.
+		// false is also simply correct: we don't support real billing at all.
 		sessionID := make([]byte, 16)
 		rand.Read(sessionID)
 		w.Header().Set("Set-Cookie", fmt.Sprintf("JSESSIONID=%X; Path=/ninja; HttpOnly", sessionID))
-		fmt.Fprintf(w, `{"session_config":{"pid":%d,"account_id":"%d","country":"`+country+`","saved_lang":"`+lang+`","shop_account_initialized":true,"device_link_updated":false,"owned_titles_modified":0,"shared_titles_last_modified":0,"age":21,"server_time":%d,"devices":{"device":[{"name":"CTR","initial_device_account_id":"%s","npns_ready":true,"id":4}]},"parental_controls":{"parental_control":[{"device":"CTR","type":"game_rating_age","value":0},{"device":"CTR","type":"game_rating_lock","value":0},{"device":"CTR","type":"shopping","value":0}]},"auto_billing_contracted":true,"id":"%d"}}`,
+		fmt.Fprintf(w, `{"session_config":{"pid":%d,"account_id":"%d","country":"`+country+`","saved_lang":"`+lang+`","shop_account_initialized":true,"device_link_updated":false,"owned_titles_modified":0,"shared_titles_last_modified":0,"age":21,"server_time":%d,"devices":{"device":[{"name":"CTR","initial_device_account_id":"%s","npns_ready":true,"id":4}]},"parental_controls":{"parental_control":[{"device":"CTR","type":"game_rating_age","value":0},{"device":"CTR","type":"game_rating_lock","value":0},{"device":"CTR","type":"shopping","value":0}]},"auto_billing_contracted":false,"id":"%d"}}`,
 			pid, pid, time.Now().UnixMilli(), devAcc, pid)
 
 	case path == "/ninja/ws/my/session/!close":
 		w.Write([]byte(`{}`))
+
+	// 2026-09-22: "/ninja/ws/my/tax_location" was unhandled (falling into the
+	// default 500/XML case below) on every single buy-plays attempt tonight,
+	// starting exactly when this testing began - the only ninja path with that
+	// exact timing correlation. Live GDB on mint (Luma3DS debug stub) found the
+	// real EC (module 78) "InvalidState" result 0xC8A13817 (026-2500) sitting
+	// in its purchase-attempt state right after this call. Confirmed via a
+	// literal string search in mint's own code.bin: right next to the
+	// "tax_location" JSON key string sits a *sibling* result constant,
+	// 0xC8A13818 (one description code higher than ours), paired with the
+	// exact sub-field names id/state/city/county/state_code - i.e. this is
+	// mint's own tax_location response validator, and our missing response is
+	// producing the "didn't get a valid response at all" variant of the same
+	// error family. DE doesn't need US-style state-level tax granularity, so a
+	// minimal but structurally valid response using those real field names.
+	//
+	// 2026-09-23 (corrected later the same day): the earlier id-gate theory here
+	// was wrong. mint's tax_location parser (FUN_001eeb00) only sets its "have a
+	// tax record" flag when FUN_001649d8 finds "id" as a NUMBER (type tag 2/3);
+	// a string id ("0", what we sent originally) or no id at all both leave it 0.
+	// The state-F consumer (raw code at 0x1eda68, never disassembled by Ghidra, called
+	// from 0x19d840) then writes display code 91313 (009-1313) into obj+0x234 and
+	// leaves the result slot untouched whenever that flag is 0 - confirmed live
+	// via Rosalina memory read (result=0, display=0x164b1 with mint alive on the
+	// error screen). So "id" must be present and numeric. Whether the earlier US/CA
+	// strcmp gate (state D) then objects for non-US/CA consoles is still to be
+	// seen live; that gate writes BOTH result (0xc8a13818) and display.
+	case path == "/ninja/ws/my/tax_location":
+		w.Write([]byte(`{"tax_location":{"id":0,"state":"","city":"","county":"","state_code":"","postal_code":""}}`))
+
+	// 2026-09-22: the other ninja path that was unhandled all night (unlike
+	// tax_location, no timing correlation with buy-plays testing - it's been
+	// unhandled since before that started). Tried after the tax_location fix
+	// got past 026-2500 into a *different* EC InvalidState (009-1313): a
+	// decompile found that specific error is a strcmp against literal "US"/
+	// "CA" on a country field that's reliably empty on every attempt (verified
+	// live via GDB on three separate fresh objects, not just one). Since a
+	// real DE console would never legitimately reach that US/CA-only branch,
+	// the working theory is mint falls into it when its own locale
+	// resolution is incomplete - and this is the one other locale-adjacent
+	// call still going unanswered. Literal string search in mint's code.bin
+	// found the expected key is bare "lang" (not "language"), sitting next to
+	// another sibling EC error constant, confirming this is a real, checked
+	// field - not guessed from scratch like earlier attempts tonight.
+	case path == "/ninja/ws/my/language":
+		lang := "en"
+		if v, ok := ninjaLocale.Load(ip); ok {
+			lang = v.([2]string)[1]
+		}
+		fmt.Fprintf(w, `{"lang":"%s"}`, lang)
+
+	// 2026-09-23: found via Ghidra decompile that mint's buy-plays flow makes a
+	// completely separate, previously unnoticed request before ever reaching
+	// the tax_location-gated US/CA check - a hardcoded (not ServiceURLs-driven)
+	// GET to https://ninja.ctr.shop.nintendo.net/ninja/ws/<id>/title/<titleId>/
+	// prepurchase_info, confirmed via zero matches for "prepurchase" anywhere
+	// in account-proxy.log despite extensive buy-plays testing tonight - this
+	// call has never once been answered. Its "%s" host-URL region path segment
+	// is literally the same obj+0x68 struct field the US/CA gate later reads
+	// (used as a path component when building the request), and the response's
+	// prepurchase_info.purchasing_content[].payment_amount.price.regular_price.id
+	// is what actually *writes* that field, parsed here via the exact same
+	// generic key/type-tag JSON walker (FUN_0017ff8c/FUN_00164948) as every
+	// other ninja endpoint. Applying the identical region-conditional pattern
+	// already used for tax_location, since this is the same struct field: a
+	// real "id" for US/CA (needed for that flow to work at all), omitted for
+	// everyone else so the field stays unset and the later gate's early-success
+	// path (per the tax_location fix) takes over instead of failing the
+	// strcmp. eshop_sales_status/content_size/tax_excluded/total_amount and
+	// payment_amount's own total_amount are all required by the parser
+	// (FUN_001e5148/FUN_001e4e0c) to be present with the right JSON types
+	// (object/array/string) or it aborts before ever reaching the id field -
+	// values themselves don't matter beyond that, gated purchases show a
+	// generous free balance already (see /my/balance/current).
+	case ninjaPrepurchaseRe.MatchString(path):
+		m := ninjaPrepurchaseRe.FindStringSubmatch(path)
+		country := "US"
+		if v, ok := ninjaLocale.Load(ip); ok {
+			country = v.([2]string)[0]
+		}
+		regularPriceID := ""
+		if strings.ToUpper(country) == "US" || strings.ToUpper(country) == "CA" {
+			regularPriceID = m[1]
+		}
+		fmt.Fprintf(w, `{"prepurchase_info":{"tax_excluded":false,"total_amount":{"amount":"1,00 RevivetendoCoin","currency":"ECOIN","raw_value":"1"},"purchasing_content":[{"eshop_sales_status":"onsale","content_size":0,"payment_amount":{"total_amount":{"amount":"1,00 RevivetendoCoin","currency":"ECOIN","raw_value":"1"},"price":{"regular_price":{"id":"%s"}}}}]}}`, regularPriceID)
+
+	// 2026-09-23: the "Download" button on the buy-plays confirmation screen POSTs
+	// the purchase here (form body: service_title_id, item_id[], limit_type[],
+	// limit_value[], rivToken[] = the token badge-arcade-secure's GetRivToken
+	// returned, reference_id[], amount[]). Response schema from mint's own parser
+	// (FUN_001ec1d4, decompiled): transaction_results.transaction_result must be
+	// an ARRAY with exactly one entry per requested item_id[], each an object
+	// with an integer ticket_id and a post_balance object carrying string
+	// amount/currency/raw_value. Anything missing or mistyped falls into the
+	// generic 026-2500 EC InvalidState error, which is what an unhandled path
+	// produced. Purchases are free here, so post_balance is unchanged.
+	case r.Method == http.MethodPost && ninjaPurchaseRe.MatchString(path):
+		n := len(postForm["item_id[]"])
+		if n < 1 {
+			n = 1
+		}
+		total := n * ninjaPackPrice
+		newBal := ninjaCoinDaily
+		if pid := fetchRealPID(r); pid != 0 {
+			var ok bool
+			newBal, ok = walletSpend(pid, total)
+			if !ok {
+				log.Printf("ninja shop: purchase_ctr REFUSED for PID %d from %s: %d coins needed, balance %d", pid, ip, total, newBal)
+				w.WriteHeader(http.StatusBadRequest)
+				w.Write([]byte(`{"error":{"code":"3001","message":"insufficient balance"}}`))
+				return
+			}
+			log.Printf("ninja shop: purchase_ctr PID %d spent %d coins, balance now %d", pid, total, newBal)
+		}
+		var sb strings.Builder
+		sb.WriteString(`{"transaction_results":{"transaction_result":[`)
+		base := time.Now().Unix() * 1000
+		for i := 0; i < n; i++ {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			ninjaTicketTitle.Store(base+int64(i), postForm.Get("service_title_id"))
+			fmt.Fprintf(&sb, `{"ticket_id":%d,"post_balance":%s}`, base+int64(i), ninjaBalanceJSON(newBal))
+		}
+		sb.WriteString(`]}}`)
+		log.Printf("ninja shop: purchase_ctr from %s items=%d form=%v", ip, n, postForm)
+		w.Write([]byte(sb.String()))
+
+	// 2026-09-23: hit live by a real US console (postal_code=00000/11111) after the
+	// US/CA gate started passing (once obj+0x68 == the console's real country - see
+	// project memory). Schema confirmed via Ghidra decompile of mint's two parsers,
+	// FUN_001f3600 (US, keyed by postal_code) and FUN_001f49cc (CA, keyed by state):
+	// {"tax_locations":{"tax_location":[{"id":<number>,"city":"","county":"","state":"XX","postal_code":"12345"}]}},
+	// array up to 64 entries, empty is valid and every string field is required if
+	// any entry is present at all (city/county/state/postal_code all looked up
+	// independently; a single missing one fails the whole array). CA's observed
+	// request always sends state= empty, which reads as "give me the full list to
+	// choose from" - all 13 provinces, so returning that exactly is both safe and
+	// correct. US sends a real ZIP wanting one resolved entry, not all 50 states;
+	// a first-digit ZIP->state table is close enough since nothing here is a real
+	// purchase with real tax anyway.
+	// 2026-09-23: after picking an entry from tax_locations (previous case), mint
+	// saves the choice here. Decompile of mint's FUN_001ebe20 (the real function -
+	// Ghidra's first guess at the boundary was wrong and produced a broken decompile
+	// with unaff_r6/r7/r8; the real entry starts one push{...,lr} earlier) confirms
+	// it never reads any field from our response at all - success just requires the
+	// generic send+parse helper (FUN_0016448c) to get back valid JSON; the submitted
+	// tax_location_id is cached purely client-side. So an empty object is sufficient
+	// and correct here, not a placeholder guess.
+	case path == "/ninja/ws/my/tax_location/!put":
+		w.Write([]byte(`{}`))
+
+	case ninjaTaxLocationsRe.MatchString(path):
+		m := ninjaTaxLocationsRe.FindStringSubmatch(path)
+		region := strings.ToUpper(m[1])
+		var sb strings.Builder
+		sb.WriteString(`{"tax_locations":{"tax_location":[`)
+		writeEntry := func(i int, state, postal string) {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			fmt.Fprintf(&sb, `{"id":%d,"city":"","county":"","state":%q,"postal_code":%q}`, i, state, postal)
+		}
+		switch region {
+		case "CA":
+			for i, prov := range caProvinces {
+				writeEntry(i, prov, "")
+			}
+		default:
+			postal := r.URL.Query().Get("postal_code")
+			if postal != "" {
+				state := "CA"
+				if s, ok := usZipPrefixState[postal[0]]; ok {
+					state = s
+				}
+				writeEntry(0, state, postal)
+			}
+		}
+		sb.WriteString(`]}}`)
+		w.Write([]byte(sb.String()))
 
 	default:
 		log.Printf("ninja shop: unhandled path %s from %s", path, ip)
@@ -6618,7 +7269,17 @@ func handleECS(w http.ResponseWriter, r *http.Request) {
 		// false, meaning nim never had a reason to even attempt that call.
 		// Flipping it on the chance the purchase flow depends on that IAS
 		// round-trip completing.
-		fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><soapenv:Body><GetAccountStatusResponse xmlns="urn:ecs.wsapi.broadon.com"><Version>2.0</Version><DeviceId>%s</DeviceId><MessageId>%s</MessageId><TimeStamp>%d</TimeStamp><ErrorCode>0</ErrorCode><ServiceStandbyMode>false</ServiceStandbyMode><AccountId>%s</AccountId><AccountStatus>R</AccountStatus><Balance><Amount>9999</Amount><Currency>EUR</Currency></Balance><EulaVersion>0</EulaVersion><Country>%s</Country><Region>%s</Region><AccountAttributes><Name>LOYALTY_LOGIN_NAME</Name><Value></Value></AccountAttributes><TIV>1149809128885587.0</TIV><TIV>1169575131682554.0</TIV><TIV>1314918129672913.0</TIV><TIV>1326222027437328.0</TIV><TIV>1338129668636531.0</TIV><TIV>1186379246602384.0</TIV><TIV>1358509901483789.0</TIV><TIV>1250518513292961.0</TIV><TIV>1233556221450613.0</TIV><TIV>1255164559487202.0</TIV><TIV>1308861876776051.0</TIV><TIV>1286072485522462.0</TIV><TIV>1387092800086442.0</TIV><TIV>1282035307179909.0</TIV><TIV>1203991784779312.0</TIV><TIV>1308681197893237.0</TIV><TIV>1184380370551609.0</TIV><TIV>1196788529703881.0</TIV><TIV>1180251793068540.0</TIV><TIV>1358557812147086.0</TIV><TIV>1266002331520620.0</TIV><TIV>1145695266680248.0</TIV><TIV>1179557585538440.0</TIV><TIV>1339926727609970.0</TIV><TIV>1147624340491422.0</TIV><TIV>1132244943650770.0</TIV><TIV>1193095819017622.0</TIV><TIV>1360780990104007.0</TIV><TIV>1301381848583681.0</TIV><TIV>1398319857900498.0</TIV><TIV>1241500844974252.1</TIV><TIV>1319126278449643.0</TIV><TIV>1401321891205073.0</TIV><TIV>1320413304361997.1</TIV><TIV>1228105690723466.0</TIV><TIV>1173296748471852.0</TIV><TIV>1289107132933952.1</TIV><TIV>1138320722983789.1</TIV><TIV>1160467418015390.2</TIV><TIV>1318649123677401.1</TIV><ServiceURLs><Name>ContentPrefixURL</Name><URI>https://nus.c.shop.nicoch.net/ccs/download</URI></ServiceURLs><ServiceURLs><Name>UncachedContentPrefixURL</Name><URI>https://nus.c.shop.nicoch.net/ccs/download</URI></ServiceURLs><ServiceURLs><Name>SystemContentPrefixURL</Name><URI>https://nus.c.shop.nicoch.net/ccs/download</URI></ServiceURLs><ServiceURLs><Name>SystemUncachedContentPrefixURL</Name><URI>https://nus.c.shop.nicoch.net/ccs/download</URI></ServiceURLs><ServiceURLs><Name>EcsURL</Name><URI>https://ecs.c.shop.nicoch.net/ecs/services/ECommerceSOAP</URI></ServiceURLs><ServiceURLs><Name>IasURL</Name><URI>https://ias.c.shop.nicoch.net/ias/services/IdentityAuthenticationSOAP</URI></ServiceURLs><ServiceURLs><Name>CasURL</Name><URI>https://cas.c.shop.nicoch.net/cas/services/CatalogingSOAP</URI></ServiceURLs><ServiceURLs><Name>NusURL</Name><URI>https://nus.c.shop.nicoch.net/nus/services/NetUpdateSOAP</URI></ServiceURLs><IVSSyncFlag>true</IVSSyncFlag><CountryAttribits>15</CountryAttribits></GetAccountStatusResponse></soapenv:Body></soapenv:Envelope>`,
+		//
+		// 2026-09-22: tapping "buy" now gets past the shop-load crash (see the
+		// ListItems element-order fix below) and reaches a real 3DS EC (module
+		// 78, e-commerce) "InvalidState" result (026-2500, decoded live via GDB
+		// from CENTER's own {result, code, display} tuple at 0x425020) - a
+		// local, on-console purchase-readiness check, not a malformed server
+		// reply. EulaVersion=0 is a plausible trigger (reads as "no EULA
+		// version on record" rather than "accepted"); trying 1 as the simplest
+		// test of "just needs to be nonzero" before dumping the EC module to
+		// find out what description code 23 actually means.
+		fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><soapenv:Body><GetAccountStatusResponse xmlns="urn:ecs.wsapi.broadon.com"><Version>2.0</Version><DeviceId>%s</DeviceId><MessageId>%s</MessageId><TimeStamp>%d</TimeStamp><ErrorCode>0</ErrorCode><ServiceStandbyMode>false</ServiceStandbyMode><AccountId>%s</AccountId><AccountStatus>R</AccountStatus><Balance><Amount>9999</Amount><Currency>EUR</Currency></Balance><EulaVersion>1</EulaVersion><Country>%s</Country><Region>%s</Region><AccountAttributes><Name>LOYALTY_LOGIN_NAME</Name><Value></Value></AccountAttributes><TIV>1149809128885587.0</TIV><TIV>1169575131682554.0</TIV><TIV>1314918129672913.0</TIV><TIV>1326222027437328.0</TIV><TIV>1338129668636531.0</TIV><TIV>1186379246602384.0</TIV><TIV>1358509901483789.0</TIV><TIV>1250518513292961.0</TIV><TIV>1233556221450613.0</TIV><TIV>1255164559487202.0</TIV><TIV>1308861876776051.0</TIV><TIV>1286072485522462.0</TIV><TIV>1387092800086442.0</TIV><TIV>1282035307179909.0</TIV><TIV>1203991784779312.0</TIV><TIV>1308681197893237.0</TIV><TIV>1184380370551609.0</TIV><TIV>1196788529703881.0</TIV><TIV>1180251793068540.0</TIV><TIV>1358557812147086.0</TIV><TIV>1266002331520620.0</TIV><TIV>1145695266680248.0</TIV><TIV>1179557585538440.0</TIV><TIV>1339926727609970.0</TIV><TIV>1147624340491422.0</TIV><TIV>1132244943650770.0</TIV><TIV>1193095819017622.0</TIV><TIV>1360780990104007.0</TIV><TIV>1301381848583681.0</TIV><TIV>1398319857900498.0</TIV><TIV>1241500844974252.1</TIV><TIV>1319126278449643.0</TIV><TIV>1401321891205073.0</TIV><TIV>1320413304361997.1</TIV><TIV>1228105690723466.0</TIV><TIV>1173296748471852.0</TIV><TIV>1289107132933952.1</TIV><TIV>1138320722983789.1</TIV><TIV>1160467418015390.2</TIV><TIV>1318649123677401.1</TIV><ServiceURLs><Name>ContentPrefixURL</Name><URI>https://nus.c.shop.nicoch.net/ccs/download</URI></ServiceURLs><ServiceURLs><Name>UncachedContentPrefixURL</Name><URI>https://nus.c.shop.nicoch.net/ccs/download</URI></ServiceURLs><ServiceURLs><Name>SystemContentPrefixURL</Name><URI>https://nus.c.shop.nicoch.net/ccs/download</URI></ServiceURLs><ServiceURLs><Name>SystemUncachedContentPrefixURL</Name><URI>https://nus.c.shop.nicoch.net/ccs/download</URI></ServiceURLs><ServiceURLs><Name>EcsURL</Name><URI>https://ecs.c.shop.nicoch.net/ecs/services/ECommerceSOAP</URI></ServiceURLs><ServiceURLs><Name>IasURL</Name><URI>https://ias.c.shop.nicoch.net/ias/services/IdentityAuthenticationSOAP</URI></ServiceURLs><ServiceURLs><Name>CasURL</Name><URI>https://cas.c.shop.nicoch.net/cas/services/CatalogingSOAP</URI></ServiceURLs><ServiceURLs><Name>NusURL</Name><URI>https://nus.c.shop.nicoch.net/nus/services/NetUpdateSOAP</URI></ServiceURLs><IVSSyncFlag>true</IVSSyncFlag><CountryAttribits>15</CountryAttribits></GetAccountStatusResponse></soapenv:Body></soapenv:Envelope>`,
 			deviceID, messageID, now, accountID, country, region)
 
 	case "AccountListETicketIds":
@@ -6634,6 +7295,46 @@ func handleECS(w http.ResponseWriter, r *http.Request) {
 		// that here instead of the guessed ias-specific namespace.
 		fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><soapenv:Body><DeleteSavedCardResponse xmlns="urn:ecs.wsapi.broadon.com"><Version>2.0</Version><DeviceId>%s</DeviceId><MessageId>%s</MessageId><TimeStamp>%d</TimeStamp><ErrorCode>0</ErrorCode><ServiceStandbyMode>false</ServiceStandbyMode><AccountId>%s</AccountId></DeleteSavedCardResponse></soapenv:Body></soapenv:Envelope>`,
 			deviceID, messageID, now, accountID)
+
+	// 2026-09-23: right after !purchase_ctr succeeds, nim fetches the ticket it
+	// just bought with AccountGetETickets (request: one <TicketId> per ticket -
+	// the ticket_id we returned - plus the console's <DeviceCert>). Its parser
+	// (FUN_00134c90 -> FUN_00136a5c, decompiled) reads one <ETickets> element
+	// per requested id, in order, base64-decoding each into the raw ticket, then
+	// optional <Certs> elements (a cert chain), which we skip.
+	case "AccountGetETickets":
+		devID, _ := strconv.ParseUint(deviceID, 10, 64)
+		var tickets strings.Builder
+		for _, m := range ticketIDRe.FindAllStringSubmatch(string(body), -1) {
+			tid, _ := strconv.ParseInt(m[1], 10, 64)
+			title := uint64(0x0004000D00153600)
+			if v, ok := ninjaTicketTitle.Load(tid); ok {
+				if parsed, err := strconv.ParseUint(v.(string), 16, 64); err == nil && parsed != 0 {
+					title = parsed
+				}
+			}
+			tk := buildETicket(uint64(tid), uint32(devID), title)
+			log.Printf("ECS: AccountGetETickets: issuing ticket id=%d console=%08x title=%016x", tid, uint32(devID), title)
+			tickets.WriteString("<ETickets>" + base64.StdEncoding.EncodeToString(tk) + "</ETickets>")
+		}
+		fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><soapenv:Body><AccountGetETicketsResponse xmlns="urn:ecs.wsapi.broadon.com"><Version>2.0</Version><DeviceId>%s</DeviceId><MessageId>%s</MessageId><TimeStamp>%d</TimeStamp><ErrorCode>0</ErrorCode><ServiceStandbyMode>false</ServiceStandbyMode>%s</AccountGetETicketsResponse></soapenv:Body></soapenv:Envelope>`,
+			deviceID, messageID, now, tickets.String())
+
+	// 2026-09-23: after the tax_location "id" fix (must be a JSON number, see that
+	// handler) the buy-plays flow finally gets past 009-1313, fetches
+	// balance/current, and then nim sends this ECS call - which we never handled
+	// (logged as an unrecognized SOAP method), followed by 009-2997. The request
+	// carries <TaxLocationId> (our tax_location id echoed back) and <Items>.
+	// Response shape taken from nim's own parser (FUN_00118714, local_1c != 0
+	// branch, decompiled in Ghidra): one <LocationTaxes> wrapper holding
+	// <ItemTaxes> entries (ItemId, TaxCategory, TotalTax, PreTaxAmount,
+	// AfterTaxAmount, then repeated <Taxes> with TaxType/TaxAmount/TaxRate),
+	// followed by TaxGrandTotal, PreTaxGrandTotal, AfterTaxGrandTotal, Currency
+	// and TaxExcluded, read strictly in that order. Everything is a free
+	// purchase here, so all amounts are zero.
+	case "GetTaxes":
+		fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><soapenv:Body><GetTaxesResponse xmlns="urn:ecs.wsapi.broadon.com"><Version>2.0</Version><DeviceId>%s</DeviceId><MessageId>%s</MessageId><TimeStamp>%d</TimeStamp><ErrorCode>0</ErrorCode><ServiceStandbyMode>false</ServiceStandbyMode><LocationTaxes><ItemTaxes><ItemId>1</ItemId><TaxCategory>0</TaxCategory><TotalTax>0.00</TotalTax><PreTaxAmount>1.00</PreTaxAmount><AfterTaxAmount>1.00</AfterTaxAmount><Taxes><TaxType>VAT</TaxType><TaxAmount>0.00</TaxAmount><TaxRate>0.00</TaxRate></Taxes></ItemTaxes><TaxGrandTotal>0.00</TaxGrandTotal><PreTaxGrandTotal>1.00</PreTaxGrandTotal><AfterTaxGrandTotal>1.00</AfterTaxGrandTotal><Currency>EUR</Currency><TaxExcluded>false</TaxExcluded></LocationTaxes></GetTaxesResponse></soapenv:Body></soapenv:Envelope>`,
+			deviceID, messageID, now)
 
 	default:
 		// Unknown method - almost certainly the actual purchase-completion
@@ -6950,12 +7651,50 @@ func handleCAS(w http.ResponseWriter, r *http.Request) {
 	// <ItemId> (not <Id>), and Amount/Currency are nested inside their own <Price> wrapper, not
 	// flat under <Prices>. A separate optional <Limits> array (FUN_00127454) can be omitted
 	// entirely - the parser treats a missing <Limits> element as zero limits, not an error.
+	// 2026-09-22 follow-up #2: the console (real hardware) crashed inside CENTER (Badge Arcade,
+	// title 0004000000153600) while processing this reply - a data abort reading address 0,
+	// traced to code.bin @0x0022BA0C. That function walks the item's returned <Attributes>
+	// list looking for one named "sys.ItemCode" (the literal string sits at 0x0022BADC in
+	// Badge Arcade's own code.bin - it's one of the Attributes the request explicitly asks for
+	// via <cas:Attributes>sys.ItemCode</cas:Attributes>, which we weren't returning at all). Not
+	// finding it, it falls into a fallback branch that copies from a hardcoded-null source with
+	// no null check - a real, unguarded bug in Badge Arcade itself, just never reachable against
+	// Nintendo's real servers because they always returned a matching sys.ItemCode. Adding the
+	// attribute below routed around that branch - confirmed on real hardware: the console got
+	// past this crash entirely and failed later (new PC, new fault) inside FUN_00124c14, whose
+	// input is a strtok-style splitter (FUN_00101490) that tokenizes on "." and returns NULL
+	// with no caller-side null check if none is found - FUN_002bbee0 (a decimal-string parser)
+	// then dereferences that NULL. Two follow-up guesses at *which* dot-less value fed this
+	// (sys.ItemCode="0.00" backfilled with the rest of the requested Attributes, then a dotted
+	// <ItemId>) both reproduced the exact same crash bit-for-bit, ruling both out. Traced fully
+	// via a Ghidra headless decompile of nim's own response parser (not just CENTER's consumer
+	// code): FUN_00124c14's input traces back through FUN_001248b4 -> FUN_0022af28 ->
+	// FUN_00356048, which reads *(int*)(*item+0x10)+4 (a *different* accessor than the
+	// Attributes-list walk at +0x18/+0x1c) - the item's <Prices> sub-object. Inside nim's own
+	// per-price parser (FUN_00136448 -> FUN_00137cc4 -> FUN_0013873c -> FUN_00127fa4, all in
+	// nim's code.bin), <Amount>'s text is copied verbatim - not reformatted - into that exact
+	// offset, with <Currency> right after it. Our <Amount>0</Amount> is the literal string "0",
+	// with no decimal point - looked like the tokenizer's cause, but three separate dotted-value
+	// attempts (sys.ItemCode, ItemId, Amount) all reproduced the exact same crash bit-for-bit,
+	// which live GDB (breakpoint at CENTER's FUN_00356048, Luma3DS debug stub, 2026-09-22)
+	// finally explained: the live item struct's Attributes count/pointer (+0x18/+0x1c) were
+	// perfect - exactly 5, matching every <Attributes> we send - but the Prices count/pointer
+	// (+0x10/+0x14) were both zero, meaning nim's parser (FUN_001267d0 in nim's code.bin) never
+	// found a <Prices> element at all, despite one being right there in the XML with valid
+	// content (every sub-field of it was independently verified correct: LicenseKind "SERVICE"
+	// matches nim's table exactly, missing <Limits> is explicitly handled as success not error).
+	// nim's per-item parser checks TitleIncluded/ContentIndex, then Attributes, then Prices last
+	// - if that lookup is a forward-only cursor scan rather than a full re-scan per element name
+	// (typical for a lightweight embedded XML parser), and our document has <Prices> BEFORE
+	// <Attributes>, looking for Attributes first walks the cursor past Prices before nim ever
+	// looks for it. Reordered to put <Prices> after <Attributes>, matching nim's internal check
+	// order instead of guessing at content formatting.
 	if method.XMLName.Local == "ListItems" {
 		titleID := soapFieldValue(method.Fields, "TitleId")
 		if titleID == "" {
 			titleID = "0004000D00153600"
 		}
-		fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><soapenv:Body><ListItemsResponse xmlns="urn:cas.wsapi.broadon.com"><Version>1.0</Version><DeviceId>%s</DeviceId><MessageId>%s</MessageId><TimeStamp>%d</TimeStamp><ErrorCode>0</ErrorCode><ListResultTotalSize>1</ListResultTotalSize><Items><TitleId>%s</TitleId><Prices><ItemId>1</ItemId><Price><Amount>0</Amount><Currency>EUR</Currency></Price><LicenseKind>SERVICE</LicenseKind></Prices></Items></ListItemsResponse></soapenv:Body></soapenv:Envelope>`,
+		fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><soapenv:Body><ListItemsResponse xmlns="urn:cas.wsapi.broadon.com"><Version>1.0</Version><DeviceId>%s</DeviceId><MessageId>%s</MessageId><TimeStamp>%d</TimeStamp><ErrorCode>0</ErrorCode><ListResultTotalSize>1</ListResultTotalSize><Items><TitleId>%s</TitleId><Attributes><Name>sys.ItemCode</Name><Value>0.00</Value></Attributes><Attributes><Name>NewSince</Name><Value>0</Value></Attributes><Attributes><Name>TitleVersion</Name><Value>0</Value></Attributes><Attributes><Name>InitialPurchaseOnly</Name><Value>false</Value></Attributes><Attributes><Name>MaxServiceDays</Name><Value>0</Value></Attributes><Prices><ItemId>1.00</ItemId><Price><Amount>1.00</Amount><Currency>EUR</Currency></Price><LicenseKind>SERVICE</LicenseKind></Prices></Items></ListItemsResponse></soapenv:Body></soapenv:Envelope>`,
 			deviceID, messageID, time.Now().UnixMilli(), titleID)
 		return
 	}
