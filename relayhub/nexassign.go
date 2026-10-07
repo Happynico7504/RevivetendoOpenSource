@@ -222,6 +222,9 @@ type NexAssigner struct {
 	// Logf receives the hub's own diagnostics (why a relay's credential pull was refused).
 	Logf      func(string, ...any)
 	ForcePIDs func() map[uint32]bool
+	// MainPIDs, if set, returns players who always stay on the main server (no relay),
+	// whatever their region - for ruling a relay path in or out for one console.
+	MainPIDs func() map[uint32]bool
 	// EdgeLists maps a game with an edge (relaylink.EdgeVariants: "wsc", "wiiu-chat") to a function
 	// returning the consoles (or ForceAll) whose session should be terminated on the relay by that
 	// game's edge instead of going to the main's secure server.
@@ -405,6 +408,9 @@ func (a *NexAssigner) Assign(ctx context.Context, req AssignRequest) (*AssignRes
 	game, ok := games[req.Game]
 	if !ok || req.PID == 0 || req.Password == "" {
 		return nil, ErrUnknownGame
+	}
+	if a.MainPIDs != nil && a.MainPIDs()[req.PID] {
+		return nil, ErrNoRelay
 	}
 	forced := false
 	if a.ForcePIDs != nil {

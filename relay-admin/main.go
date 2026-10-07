@@ -1735,14 +1735,14 @@ var landingTmpl = template.Must(template.New("landing").Parse(`<!DOCTYPE html>
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Inkay Relay">
 <meta property="og:title" content="Pretendo Bridge">
-<meta property="og:description" content="Private Wii U relay — play Mario Kart 8 and WiiU Chat on a custom Pretendo server.">
+<meta property="og:description" content="Public Wii U and 3DS revival network — play Mario Kart 8, Wii Sports Club, Badge Arcade, Swapdoodle, Miiverse and more, built on Pretendo.">
 <meta property="og:image" content="` + siteHost + `/inkay/stats/card.svg">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta property="og:url" content="` + siteHost + `/">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Pretendo Bridge">
-<meta name="twitter:description" content="Private Wii U relay — play Mario Kart 8 and WiiU Chat on a custom Pretendo server.">
+<meta name="twitter:description" content="Public Wii U and 3DS revival network — play Mario Kart 8, Wii Sports Club, Badge Arcade, Swapdoodle, Miiverse and more, built on Pretendo.">
 <meta name="twitter:image" content="` + siteHost + `/inkay/stats/card.svg">
 <style>
 body{font-family:system-ui,sans-serif;max-width:640px;margin:4rem auto;padding:0 1rem;color:#222}
@@ -1909,7 +1909,7 @@ var cardTmpl = template.Must(template.New("card").Parse(`<svg xmlns="http://www.
 
   <!-- logo / title -->
   <text x="80" y="120" font-family="system-ui,sans-serif" font-size="52" font-weight="700" fill="#f8fafc">Pretendo Bridge</text>
-  <text x="80" y="168" font-family="system-ui,sans-serif" font-size="24" fill="#94a3b8">Private Wii U relay — live stats</text>
+  <text x="80" y="168" font-family="system-ui,sans-serif" font-size="24" fill="#94a3b8">Wii U and 3DS revival network — live stats</text>
 
   <!-- divider -->
   <rect x="80" y="200" width="1040" height="1" fill="#334155"/>

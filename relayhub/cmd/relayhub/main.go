@@ -236,6 +236,13 @@ func cmdServe(args []string) {
 				ftime  time.Time
 			)
 			forcePath := filepath.Join(filepath.Dir(*keyPath), "nex-force-pids")
+			// ~/.relayhub/nex-main-pids: consoles that always stay on the main server.
+			var (
+				mmu    sync.Mutex
+				mcache map[uint32]bool
+				mtime  time.Time
+			)
+			mainPath := filepath.Join(filepath.Dir(*keyPath), "nex-main-pids")
 			assigner = &relayhub.NexAssigner{
 				Streams: streams, Registry: reg, Geo: geo, Logf: log.Printf,
 				EdgeLists: map[string]func() map[uint32]bool{
@@ -250,6 +257,15 @@ func cmdServe(args []string) {
 						fcache, ftime = relayhub.ParseForcePIDs(string(raw)), time.Now()
 					}
 					return fcache
+				},
+				MainPIDs: func() map[uint32]bool {
+					mmu.Lock()
+					defer mmu.Unlock()
+					if mcache == nil || time.Since(mtime) > 5*time.Second {
+						raw, _ := os.ReadFile(mainPath)
+						mcache, mtime = relayhub.ParseForcePIDs(string(raw)), time.Now()
+					}
+					return mcache
 				},
 				Games: func() map[string]relaylink.NexGame {
 					gmu.Lock()
