@@ -249,14 +249,14 @@ func (r *P2PRouter) candidates(ctx context.Context, regions []string) []p2pCandi
 	return out
 }
 
-func (r *P2PRouter) openOn(ctx context.Context, instance string, req P2PRequest) (map[uint32]int, error) {
+func (r *P2PRouter) openOn(ctx context.Context, instance, ip string, req P2PRequest) (map[uint32]int, error) {
 	if instance == MainInstance {
 		if r.Local == nil {
 			return nil, errors.New("the main hosts no tunnels")
 		}
-		return r.Local.Open(req.Key, req.Stations)
+		return r.Local.Open(req.Key, ip, req.Stations)
 	}
-	body, _ := json.Marshal(relaylink.P2POpen{Key: req.Key, Stations: req.Stations})
+	body, _ := json.Marshal(relaylink.P2POpen{Key: req.Key, IP: ip, Stations: req.Stations})
 	out, err := r.CallRelay(ctx, instance, relaylink.MethodP2POpen, body)
 	if err != nil {
 		return nil, err
@@ -283,7 +283,7 @@ func (r *P2PRouter) Open(ctx context.Context, req P2PRequest) (*P2PResult, error
 	}
 	r.mu.Unlock()
 	if ok {
-		ports, err := r.openOn(ctx, pl.instance, req)
+		ports, err := r.openOn(ctx, pl.instance, pl.ip, req)
 		if err == nil {
 			r.remember(req.Key, pl.instance, pl.ip)
 			return &P2PResult{Instance: pl.instance, IP: pl.ip, Ports: ports}, nil
@@ -312,7 +312,7 @@ func (r *P2PRouter) Open(ctx context.Context, req P2PRequest) (*P2PResult, error
 	}
 	var lastErr error = ErrNoTunnel
 	for _, c := range r.candidates(ctx, regions) {
-		ports, err := r.openOn(ctx, c.id, req)
+		ports, err := r.openOn(ctx, c.id, c.ip, req)
 		if err != nil {
 			lastErr = err
 			r.logf("p2p: %s: %s cannot host the tunnel: %v", req.Key, c.id, err)

@@ -197,7 +197,7 @@ func main() {
 				if err := json.Unmarshal(body, &req); err != nil {
 					return nil, err
 				}
-				ports, err := tun.Open(req.Key, req.Stations)
+				ports, err := tun.Open(req.Key, req.IP, req.Stations)
 				if err != nil {
 					return nil, err
 				}

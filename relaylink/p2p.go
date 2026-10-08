@@ -16,6 +16,10 @@ package relaylink
 // it used at all, else to the address the game server announced.
 
 import (
+	"bytes"
+	"crypto/hmac"
+	"crypto/md5"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -42,6 +46,7 @@ type P2PStation struct {
 // P2POpen opens a tunnel session, or adds stations to an open one (same Key).
 type P2POpen struct {
 	Key      string       `json:"key"`
+	IP       string       `json:"ip,omitempty"` // the tunnel host's public IPv4 (needed to rewrite in-band addresses)
 	Stations []P2PStation `json:"stations"`
 }
 
@@ -86,6 +91,8 @@ type P2PTunnels struct {
 
 type p2pSession struct {
 	key      string
+	ip       net.IP // the tunnel host's public IPv4 as the consoles see it (nil = no in-band rewriting)
+	rewrites uint64 // station addresses rewritten in PIA packets
 	created  time.Time
 	lastFwd  time.Time // last forwarded packet (zero until the first)
 	stations map[uint32]*p2pStation
@@ -136,7 +143,7 @@ func (t *P2PTunnels) logf(f string, a ...any) {
 
 // Open creates the session (or adds the stations it does not have yet) and returns every
 // station's alias port. Opening an existing session again is harmless.
-func (t *P2PTunnels) Open(key string, stations []P2PStation) (map[uint32]int, error) {
+func (t *P2PTunnels) Open(key, publicIP string, stations []P2PStation) (map[uint32]int, error) {
 	if key == "" || len(stations) == 0 {
 		return nil, ErrP2PBadInput
 	}
@@ -157,6 +164,9 @@ func (t *P2PTunnels) Open(key string, stations []P2PStation) (map[uint32]int, er
 			return nil, ErrP2PFull
 		}
 		sess = &p2pSession{key: key, created: t.now(), stations: map[uint32]*p2pStation{}}
+		if ip := net.ParseIP(publicIP).To4(); ip != nil {
+			sess.ip = ip
+		}
 		t.sessions[key] = sess
 		created = true
 	}
@@ -233,8 +243,8 @@ func (t *P2PTunnels) closeLocked(sess *p2pSession, why string) {
 		per = append(per, fmt.Sprintf("%d sent %d got %d (last seen at %v)", pid, st.sent, st.got, st.last))
 	}
 	sort.Strings(per)
-	t.logf("p2p: session %s %s after %v: %d packets, %d bytes forwarded, %d dropped; %s",
-		sess.key, why, t.now().Sub(sess.created).Round(time.Second), sess.packets, sess.bytes, sess.dropped, strings.Join(per, "; "))
+	t.logf("p2p: session %s %s after %v: %d packets, %d bytes forwarded, %d dropped, %d in-band addresses rewritten; %s",
+		sess.key, why, t.now().Sub(sess.created).Round(time.Second), sess.packets, sess.bytes, sess.dropped, sess.rewrites, strings.Join(per, "; "))
 }
 
 // Run closes idle and expired sessions until stop is closed, then shuts everything down.
@@ -337,9 +347,18 @@ func (t *P2PTunnels) serve(sess *p2pSession, dst *p2pStation) {
 		sess.lastFwd = t.now()
 		from.sent++
 		dst.got++
+		rewrote := 0
+		if sess.ip != nil {
+			rewrote = rewritePIA(buf[:n], sess.aliasesLocked())
+			sess.rewrites += uint64(rewrote)
+		}
+		rewrites := sess.rewrites
 		trace := t.cfg.TracePackets > 0 && sess.packets <= uint64(t.cfg.TracePackets)
 		seq := sess.packets
 		t.mu.Unlock()
+		if rewrote > 0 && rewrites <= 20 {
+			t.logf("p2p: session %s: rewrote %d station address(es) in a PIA packet %d -> %d", sess.key, rewrote, from.pid, dst.pid)
+		}
 		if trace {
 			t.logf("p2p: trace %s #%d %d(%v) -> %d(%v) via :%d->:%d %dB %x", sess.key, seq, from.pid, src, dst.pid, to, dst.alias, from.alias, n, buf[:n])
 		}
@@ -395,4 +414,83 @@ func (st *p2pStation) target(fromAlias int) *net.UDPAddr {
 		return st.last
 	}
 	return &net.UDPAddr{IP: st.ip, Port: st.port}
+}
+
+// ---- in-band station addresses (PIA) ------------------------------------------------------
+//
+// Getting the consoles to send to the tunnel is not enough for matches of three or more: PIA,
+// Nintendo's P2P library, tells every member the others' locations itself (the host's station
+// list), and those are the consoles' real public addresses. Two joiners then try to reach each
+// other directly - the very thing the tunnel exists to avoid. Captured 2026-10-08: the station
+// list is plaintext, one location per member as
+//
+//	public IPv4 (4) | port (2, big endian) | 00 00 | PID (4, big endian) | connection id (8) | flags...
+//
+// followed by the same for the private (LAN) address, and every packet ends in a 16-byte
+// HMAC-MD5 over the rest, keyed with the matchmake session key - which this network hands out
+// empty. So the tunnel can replace a member's public location with its alias here and sign the
+// packet again. Packets that do not verify with the empty key are left alone.
+
+var piaMagic = []byte{0x32, 0xab, 0x98, 0x64}
+
+type piaAlias struct {
+	ip   [4]byte
+	port uint16
+}
+
+func (s *p2pSession) aliasesLocked() map[uint32]piaAlias {
+	m := make(map[uint32]piaAlias, len(s.stations))
+	for pid, st := range s.stations {
+		var a piaAlias
+		copy(a.ip[:], s.ip)
+		a.port = uint16(st.alias)
+		m[pid] = a
+	}
+	return m
+}
+
+func piaSigned(pkt []byte) bool {
+	if len(pkt) < len(piaMagic)+16 || !bytes.Equal(pkt[:4], piaMagic) {
+		return false
+	}
+	mac := hmac.New(md5.New, nil)
+	mac.Write(pkt[:len(pkt)-16])
+	return hmac.Equal(mac.Sum(nil), pkt[len(pkt)-16:])
+}
+
+func lanAddress(ip []byte) bool {
+	return ip[0] == 10 || ip[0] == 127 || ip[0] == 0 || (ip[0] == 172 && ip[1]&0xf0 == 16) || (ip[0] == 192 && ip[1] == 168)
+}
+
+// rewritePIA replaces, in place, the public locations of the given consoles with their aliases
+// and re-signs the packet. It returns how many locations it changed.
+func rewritePIA(pkt []byte, aliases map[uint32]piaAlias) int {
+	if !piaSigned(pkt) {
+		return 0
+	}
+	end := len(pkt) - 16
+	n := 0
+	for i := 4; i+12 <= end; i++ {
+		if pkt[i+6] != 0 || pkt[i+7] != 0 {
+			continue
+		}
+		a, ok := aliases[binary.BigEndian.Uint32(pkt[i+8:i+12])]
+		if !ok || lanAddress(pkt[i:i+4]) {
+			continue
+		}
+		if bytes.Equal(pkt[i:i+4], a.ip[:]) && binary.BigEndian.Uint16(pkt[i+4:i+6]) == a.port {
+			i += 11
+			continue // already the alias
+		}
+		copy(pkt[i:i+4], a.ip[:])
+		binary.BigEndian.PutUint16(pkt[i+4:i+6], a.port)
+		n++
+		i += 11
+	}
+	if n > 0 {
+		mac := hmac.New(md5.New, nil)
+		mac.Write(pkt[:end])
+		copy(pkt[end:], mac.Sum(nil))
+	}
+	return n
 }
