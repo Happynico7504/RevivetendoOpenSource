@@ -42,6 +42,7 @@ func connectDB() {
 	rankingScoresCol = db.Collection("ranking_scores")
 	rankingCommonDataCol = db.Collection("ranking_common_data")
 	clubSearchesCol = db.Collection("club_searches")
+	p2pLoadHistory(db)
 	// Same MongoDB instance, different logical database - Juxt (the Miiverse
 	// revival) owns the real club/community names, keyed by the same club code
 	// this server already uses in its own eu_NNN/us_NNN DataStore tags. See

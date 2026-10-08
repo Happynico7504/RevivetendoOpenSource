@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"text/tabwriter"
@@ -180,6 +181,9 @@ func cmdServe(args []string) {
 	streamListen := fs.String("stream-listen", "0.0.0.0:7778", "real-time relay stream listen address (\"\" disables)")
 	geoPath := fs.String("geoip", "/usr/local/share/revivetendo-dns/dbip-country-lite.mmdb", "GeoIP database used to choose a relay for a console (\"\" disables regional NEX routing)")
 	nexRoot := fs.String("nex-root", "/nico-pretendo-bridge", "repository root holding the *-authentication/.env files")
+	p2pPorts := fs.String("p2p-ports", "61000-61999", "UDP port range of the main's P2P tunnel host (\"\" = the main hosts no tunnels)")
+	p2pIP := fs.String("p2p-ip", "", "public IPv4 consoles reach the main's tunnels at (default: WSC's secure server address)")
+	p2pRegion := fs.String("p2p-region", "eu", "the main's region for choosing where a tunnel runs")
 	fs.Parse(args)
 
 	db := openDB(*envFile)
@@ -298,6 +302,39 @@ func cmdServe(args []string) {
 		chatEdge = &relayhub.EdgeBridge{Streams: streams, Main: *wucEdge, Names: relaylink.WUCEdgeNames, Logf: log.Printf}
 		chatEdge.Register()
 	}
+	// P2P tunnels for consoles that cannot reach each other directly. Which gatherings get one is
+	// decided by ~/.relayhub/wsc-p2p-tunnel ("international", "*", PIDs; missing = none), re-read
+	// every few seconds, so it can be switched without restarting the hub.
+	p2pRouter := &relayhub.P2PRouter{
+		LocalRegion: *p2pRegion, Logf: log.Printf,
+		Policy:    p2pPolicy(filepath.Join(filepath.Dir(*keyPath), "wsc-p2p-tunnel")),
+		CallRelay: streams.CallRelay,
+	}
+	if geo, gerr := relayhub.OpenMMDBGeo(*geoPath); gerr == nil {
+		p2pRouter.Geo = geo
+	} else {
+		log.Printf("p2p: no GeoIP (%v): only \"*\" and PID policies work", gerr)
+	}
+	resolver := assigner
+	if resolver == nil {
+		resolver = &relayhub.NexAssigner{}
+	}
+	p2pRouter.Relays = relayhub.RelayLister(reg, streams, resolver.ResolveHost)
+	if lo, hi, ok := parsePortRange(*p2pPorts); ok {
+		ip := *p2pIP
+		if ip == "" {
+			ip = relayhub.LoadNexGames(*nexRoot, os.Getenv)["wsc"].SecureHost
+		}
+		if net.ParseIP(ip).To4() == nil {
+			log.Printf("p2p: the main hosts no tunnels (no public IPv4; set -p2p-ip)")
+		} else {
+			p2pRouter.Local = relaylink.NewP2PTunnels(relaylink.P2PConfig{PortMin: lo, PortMax: hi, Logf: log.Printf})
+			p2pRouter.LocalIP = ip
+			go p2pRouter.Local.Run(make(chan struct{}))
+			log.Printf("p2p: the main hosts tunnels at %s, UDP %d-%d", ip, lo, hi)
+		}
+	}
+
 	if *streamListen != "" {
 		sln, err := net.Listen("tcp", *streamListen)
 		if err != nil {
@@ -338,6 +375,40 @@ func cmdServe(args []string) {
 		if chatEdge != nil {
 			mux.HandleFunc("/wuc-edge/out", chatEdge.Out)
 		}
+		// wsc-secure asks for a gathering's tunnel; 204 = the consoles connect directly.
+		mux.HandleFunc("/p2p/open", func(w http.ResponseWriter, r *http.Request) {
+			var req relayhub.P2PRequest
+			if r.Method != http.MethodPost || json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<14)).Decode(&req) != nil {
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			ctx, cancel := context.WithTimeout(r.Context(), 1200*time.Millisecond)
+			defer cancel()
+			res, err := p2pRouter.Open(ctx, req)
+			if err != nil {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			json.NewEncoder(w).Encode(res)
+		})
+		mux.HandleFunc("/p2p/close", func(w http.ResponseWriter, r *http.Request) {
+			var req struct {
+				Key string `json:"key"`
+			}
+			if r.Method != http.MethodPost || json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<12)).Decode(&req) != nil {
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			p2pRouter.Close(r.Context(), req.Key)
+			w.WriteHeader(http.StatusNoContent)
+		})
+		mux.HandleFunc("/p2p/status", func(w http.ResponseWriter, r *http.Request) {
+			var local []relaylink.P2PSessionStatus
+			if p2pRouter.Local != nil {
+				local = p2pRouter.Local.Status()
+			}
+			json.NewEncoder(w).Encode(map[string]any{"policy": p2pRouter.Policy(), "main": local})
+		})
 		mux.HandleFunc("/invalidate", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
 				http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -754,4 +825,36 @@ func edgeList(path string) func() map[uint32]bool {
 		}
 		return cache
 	}
+}
+
+// p2pPolicy returns a function reading the tunnel policy file, re-read every few seconds.
+func p2pPolicy(path string) func() relayhub.P2PPolicy {
+	var (
+		mu    sync.Mutex
+		cache relayhub.P2PPolicy
+		at    time.Time
+	)
+	return func() relayhub.P2PPolicy {
+		mu.Lock()
+		defer mu.Unlock()
+		if at.IsZero() || time.Since(at) > 5*time.Second {
+			raw, _ := os.ReadFile(path)
+			cache, at = relayhub.ParseP2PPolicy(string(raw)), time.Now()
+		}
+		return cache
+	}
+}
+
+// parsePortRange reads "lo-hi"; "" or anything malformed means off.
+func parsePortRange(s string) (int, int, bool) {
+	a, b, ok := strings.Cut(s, "-")
+	if !ok {
+		return 0, 0, false
+	}
+	lo, err1 := strconv.Atoi(strings.TrimSpace(a))
+	hi, err2 := strconv.Atoi(strings.TrimSpace(b))
+	if err1 != nil || err2 != nil || lo < 1024 || hi > 65535 || hi < lo {
+		return 0, 0, false
+	}
+	return lo, hi, true
 }

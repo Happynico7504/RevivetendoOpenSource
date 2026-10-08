@@ -1233,6 +1233,7 @@ func main() {
 	go startStatusServer()
 	go cleanupStaleGatherings()
 	go watchStaleConnections()
+	go p2pJanitor()
 	go watchRankingScoreRegions()
 	go logLoadSnapshot()
 	go pingPlayerConnectivity()
@@ -2195,6 +2196,20 @@ func getSessionURLs(err error, client *nex.Client, callID uint32, gatheringID ui
 		}
 	}
 
+	// A tunneled gathering: the joiner reaches the host through the tunnel, so it only gets the
+	// host's alias there (no LAN URL: the two are never on one network when tunneled).
+	if t := p2pOpen(gatheringID, hostPID, false); t != nil {
+		for _, urlStr := range urls {
+			if nex.NewStationURL(urlStr).Type() != "3" {
+				continue
+			}
+			if aliased, ok := p2pAlias(urlStr, t, hostPID); ok {
+				urls = []string{aliased}
+				break
+			}
+		}
+	}
+
 	fmt.Printf("GetSessionURLs: gid=%d hostPID=%d urls=%v\n", gatheringID, hostPID, urls)
 
 	rmcResponseStream := nex.NewStreamOut(nexServer)
@@ -2239,6 +2254,7 @@ func endParticipation(err error, client *nex.Client, callID uint32, gid uint32, 
 	if rec, ok := playerJoinedAt.LoadAndDelete(client.PID()); ok {
 		jr := rec.(joinRecord)
 		if jr.gid == gid && time.Since(jr.when) < 30*time.Second {
+			p2pRecordFailure(gid, client.PID(), dbGetGatheringHost(gid))
 			n := 0
 			if v, loaded := gatheringFailCount.Load(gid); loaded {
 				n = v.(int)
@@ -2282,13 +2298,36 @@ func requestProbeInitiationExt(err error, client *nex.Client, callID uint32, tar
 	sendResponse(client, nat_traversal.ProtocolID, callID, nat_traversal.MethodRequestProbeInitiationExt, nil)
 
 	// Forward InitiateProbe to each target
-	rmcMessage := nex.RMCRequest{}
-	rmcMessage.SetProtocolID(nat_traversal.ProtocolID)
-	rmcMessage.SetCallID(0xffff0000 + callID)
-	rmcMessage.SetMethodID(nat_traversal.MethodInitiateProbe)
-	probeStream := nex.NewStreamOut(nexServer)
-	probeStream.WriteString(stationToProbe)
-	rmcMessage.SetParameters(probeStream.Bytes())
+	probeMessage := func(station string) []byte {
+		rmcMessage := nex.RMCRequest{}
+		rmcMessage.SetProtocolID(nat_traversal.ProtocolID)
+		rmcMessage.SetCallID(0xffff0000 + callID)
+		rmcMessage.SetMethodID(nat_traversal.MethodInitiateProbe)
+		probeStream := nex.NewStreamOut(nexServer)
+		probeStream.WriteString(station)
+		rmcMessage.SetParameters(probeStream.Bytes())
+		return rmcMessage.Bytes()
+	}
+	direct := probeMessage(stationToProbe)
+	// A caller that was told a target lives at the gathering's P2P tunnel sends its packets
+	// there, so the target must be told to expect the caller at the caller's alias. Pairs whose
+	// consoles know each other's real addresses stay direct.
+	var tunnel *p2pTunnel
+	var tunneled []byte
+	if gid := dbFindGatheringForPID(client.PID()); gid != 0 {
+		if v, ok := p2pTunnels.Load(gid); ok {
+			tunnel = v.(*p2pTunnel)
+			if tunnel.Ports[client.PID()] == 0 {
+				tunnel = p2pOpen(gid, dbGetGatheringHost(gid), true)
+			}
+			if tunnel != nil {
+				if aliased, ok := p2pAlias(stationToProbe, tunnel, client.PID()); ok {
+					tunneled = probeMessage(aliased)
+					fmt.Printf("RequestProbeInitiationExt: PID=%d probe via tunnel %s %s\n", client.PID(), tunnel.Instance, aliased)
+				}
+			}
+		}
+	}
 
 	for _, target := range targetList {
 		// Look up the target's LIVE connection by PID (currentClient, kept fresh on
@@ -2325,7 +2364,11 @@ func requestProbeInitiationExt(err error, client *nex.Client, callID uint32, tar
 			msgPkt.SetSource(0xA1)
 			msgPkt.SetDestination(0xAF)
 			msgPkt.SetType(nex.DataPacket)
-			msgPkt.SetPayload(rmcMessage.Bytes())
+			payload := direct
+			if tunneled != nil && nex.NewStationURL(target).Address() == tunnel.IP {
+				payload = tunneled
+			}
+			msgPkt.SetPayload(payload)
 			msgPkt.AddFlag(nex.FlagNeedsAck)
 			msgPkt.AddFlag(nex.FlagReliable)
 			nexServer.Send(msgPkt)
@@ -2749,6 +2792,7 @@ func handleCloseParticipation(packet *nex.PacketV1) {
 	stream := nex.NewStreamIn(request.Parameters(), nexServer)
 	gid := stream.ReadUInt32LE()
 	fmt.Printf("CloseParticipation: PID=%d gid=%d\n", client.PID(), gid)
+	p2pStarted.Store(gid, time.Now())
 	dbCloseGathering(gid)
 	go dbRecordMatch(gid)
 
@@ -2805,6 +2849,9 @@ func reportNATTraversalResult(err error, client *nex.Client, callID uint32, cid 
 	}
 	sendResponse(client, nat_traversal.ProtocolID, callID, nat_traversal.MethodReportNATTraversalResult, []byte{})
 	if result {
+		if gid := dbFindGatheringForPID(client.PID()); gid != 0 {
+			p2pStarted.Store(gid, time.Now())
+		}
 		// Don't close here — CloseParticipation is the actual game-start signal.
 		// Just clear the quick-exit fail counter so a successful pair doesn't
 		// penalise the gathering.

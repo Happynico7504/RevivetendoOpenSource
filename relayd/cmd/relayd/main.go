@@ -181,6 +181,38 @@ func main() {
 				log.Printf("stream: event %q", topic)
 			},
 		}
+		// Calls from the main, by method.
+		calls := map[string]func(context.Context, []byte) ([]byte, error){}
+		handlers.Call = func(cctx context.Context, _ *relaylink.StreamConn, method string, body []byte) ([]byte, error) {
+			if fn := calls[method]; fn != nil {
+				return fn(cctx, body)
+			}
+			return nil, errors.New("unknown method")
+		}
+		if cfg.P2P != nil && cfg.P2P.Enabled {
+			tun := relaylink.NewP2PTunnels(relaylink.P2PConfig{PortMin: cfg.P2P.PortMin, PortMax: cfg.P2P.PortMax, Logf: log.Printf})
+			go tun.Run(ctx.Done())
+			calls[relaylink.MethodP2POpen] = func(_ context.Context, body []byte) ([]byte, error) {
+				var req relaylink.P2POpen
+				if err := json.Unmarshal(body, &req); err != nil {
+					return nil, err
+				}
+				ports, err := tun.Open(req.Key, req.Stations)
+				if err != nil {
+					return nil, err
+				}
+				return json.Marshal(relaylink.P2POpenResult{Ports: ports})
+			}
+			calls[relaylink.MethodP2PClose] = func(_ context.Context, body []byte) ([]byte, error) {
+				var req relaylink.P2PClose
+				if err := json.Unmarshal(body, &req); err != nil {
+					return nil, err
+				}
+				tun.Close(req.Key)
+				return []byte("ok"), nil
+			}
+			log.Printf("P2P tunnels enabled")
+		}
 		if len(cfg.NexAuth) > 0 {
 			nexSup = &relayd.NexSupervisor{Logf: log.Printf}
 			nexSup.Pull = func(pctx context.Context, game string, pid uint32) (string, error) {
@@ -195,10 +227,7 @@ func main() {
 				}
 				return a.Password, nil
 			}
-			handlers.Call = func(cctx context.Context, _ *relaylink.StreamConn, method string, body []byte) ([]byte, error) {
-				if method != relaylink.MethodCredPut {
-					return nil, errors.New("unknown method")
-				}
+			calls[relaylink.MethodCredPut] = func(cctx context.Context, body []byte) ([]byte, error) {
 				var p relaylink.NexCredPut
 				if err := json.Unmarshal(body, &p); err != nil {
 					return nil, err

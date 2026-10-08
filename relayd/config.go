@@ -35,6 +35,15 @@ type Config struct {
 	StreamDisabled  bool              `json:"stream_disabled"`
 	StaggerHosts    []string          `json:"stagger_hosts"` // SNI names that get the per-IP handshake stagger (sni mode)
 	StaggerEmptySNI *bool             `json:"stagger_empty_sni"`
+	P2P             *P2PConfig        `json:"p2p"` // UDP tunnels between consoles (off unless enabled; needs the stream)
+}
+
+// P2PConfig turns on the P2P tunnel host: the main may then put consoles that cannot reach each
+// other directly on this relay (see relaylink.P2PTunnels).
+type P2PConfig struct {
+	Enabled bool `json:"enabled"`
+	PortMin int  `json:"port_min"` // default 61000
+	PortMax int  `json:"port_max"` // default 61999
 }
 
 // ComponentConfig is one separately shipped binary (for example the WSC edge). relayd

@@ -517,3 +517,6 @@ func isEdgeVariant(name string) bool {
 	}
 	return false
 }
+
+// ResolveHost turns a relay's configured host into an IPv4 address (cached for a few minutes).
+func (a *NexAssigner) ResolveHost(host string) (string, error) { return a.resolve(host) }
