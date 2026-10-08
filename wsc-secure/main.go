@@ -2300,6 +2300,17 @@ func requestProbeInitiationExt(err error, client *nex.Client, callID uint32, tar
 	if pid, ok := extractStationPID(stationToProbe); ok {
 		markHolePunching(pid)
 	}
+	// Everyone already in the gathering too: in a 3+ player match the earlier joiners connect
+	// to the new one as well (the host tells them about it directly, without a probe request
+	// of their own) and go just as quiet toward this server meanwhile. Confirmed 2026-10-08:
+	// gids 36364 and 480950 - the first joiner's traversal succeeded, a second joiner
+	// arrived, and the first one was wiped by StaleDisconnect (idle 15s) mid-setup, so the
+	// match never started.
+	if gid := dbFindGatheringForPID(client.PID()); gid != 0 {
+		for _, pid := range dbGetGatheringPlayers(gid) {
+			markHolePunching(pid)
+		}
+	}
 
 	sendResponse(client, nat_traversal.ProtocolID, callID, nat_traversal.MethodRequestProbeInitiationExt, nil)
 
@@ -2847,9 +2858,14 @@ func reportNATTraversalResult(err error, client *nex.Client, callID uint32, cid 
 	// not the host's. A NAT result from any one participant means the
 	// gathering's hole-punch phase has concluded one way or another, so it's
 	// reasonable to lift the exemption for everyone in it.
+	// Only in a two-player gathering does one result end the traversal; with more players
+	// everyone, the reporter included, may still be connecting to someone else
+	// (CloseParticipation and holePunchExemptionMax end it then).
 	if gid := dbFindGatheringForPID(client.PID()); gid != 0 {
-		for _, pid := range dbGetGatheringPlayers(gid) {
-			clearHolePunching(pid)
+		if players := dbGetGatheringPlayers(gid); len(players) <= 2 {
+			for _, pid := range players {
+				clearHolePunching(pid)
+			}
 		}
 	} else {
 		clearHolePunching(client.PID())
