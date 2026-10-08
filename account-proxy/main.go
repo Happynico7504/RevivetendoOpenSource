@@ -275,7 +275,7 @@ func init() {
 }
 
 func main() {
-	godotenv.Load("../wiiu-chat-secure/.env")
+	godotenv.Load("/nico-pretendo-bridge/wiiu-chat-secure/.env")
 	// Prefixed load (godotenv.Load does not override already-set vars) so
 	// this can't collide with wiiu-chat-secure's own env - see
 	// swapdoodleS3Client's doc comment for why account-proxy needs these.
@@ -486,6 +486,7 @@ func main() {
 	mongoDB = mongoClient.Database("pretendo")
 	wscMongoDB = mongoClient.Database("wsc")
 	go badgeArcadeGalleryLoop()
+	go discordPresenceLoop()
 	log.Printf("connected to MongoDB")
 
 	refreshRedirects()
@@ -5548,6 +5549,21 @@ func handleNpdlCDN(w http.ResponseWriter, r *http.Request) {
 		log.Printf("npdl CDN: Badge Arcade %s -> no captured content for this path, proxying", r.URL.Path)
 	}
 
+	// NZOffPg is polled by every 3DS (Pretendo has no content for it, 404).
+	// While 3DS system messages are active it carries them as HOME Menu
+	// notifications - an experiment: unconfirmed whether the console accepts
+	// notification payloads on this task (see n3ds_news.go).
+	if strings.Contains(r.URL.Path, "/NZOffPg/") {
+		if data := n3dsNewsOnlyFile(); data != nil {
+			w.Header().Set("Connection", "close")
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.WriteHeader(http.StatusOK)
+			w.Write(data)
+			log.Printf("npdl CDN: %s -> served 3DS notifications (%d bytes)", r.URL.Path, len(data))
+			return
+		}
+	}
+
 	isRingEC1 := strings.Contains(r.URL.Path, "/RNG_EC1/") && strings.HasSuffix(r.URL.Path, ".dlp")
 	if strings.Contains(r.URL.Path, "/RNG_") && !isRingEC1 {
 		for suffix, filename := range swapdoodleRingFiles {
@@ -5558,6 +5574,10 @@ func handleNpdlCDN(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				log.Printf("npdl CDN: %s -> real ring file %s unavailable (%v), falling back to placeholder", r.URL.Path, filename, err)
 				break
+			}
+			if suffix == "/nt1" {
+				// Our 3DS HOME Menu notifications ride along (see n3ds_news.go).
+				data = withN3DSNews(data)
 			}
 			w.Header().Set("Connection", "close") // see CONN_HOST_MAX comment above
 			w.Header().Set("Content-Type", "application/octet-stream")
@@ -7749,7 +7769,7 @@ func handleCAS(w http.ResponseWriter, r *http.Request) {
 	if method.XMLName.Local == "ListItems" {
 		titleID := soapFieldValue(method.Fields, "TitleId")
 		if titleID == "" {
-			titleID = "0004000D00153600"
+			titleID = casServiceTitleFor(soapFieldValue(method.Fields, "ApplicationId"))
 		}
 		fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><soapenv:Body><ListItemsResponse xmlns="urn:cas.wsapi.broadon.com"><Version>1.0</Version><DeviceId>%s</DeviceId><MessageId>%s</MessageId><TimeStamp>%d</TimeStamp><ErrorCode>0</ErrorCode><ListResultTotalSize>1</ListResultTotalSize><Items><TitleId>%s</TitleId><Attributes><Name>sys.ItemCode</Name><Value>0.00</Value></Attributes><Attributes><Name>NewSince</Name><Value>0</Value></Attributes><Attributes><Name>TitleVersion</Name><Value>0</Value></Attributes><Attributes><Name>InitialPurchaseOnly</Name><Value>false</Value></Attributes><Attributes><Name>MaxServiceDays</Name><Value>0</Value></Attributes><Prices><ItemId>1.00</ItemId><Price><Amount>1.00</Amount><Currency>EUR</Currency></Price><LicenseKind>SERVICE</LicenseKind></Prices></Items></ListItemsResponse></soapenv:Body></soapenv:Envelope>`,
 			deviceID, messageID, time.Now().UnixMilli(), titleID)
@@ -7758,4 +7778,16 @@ func handleCAS(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><soapenv:Body><%sResponse xmlns="urn:cas.wsapi.broadon.com"><Version>1.0</Version><DeviceId>%s</DeviceId><MessageId>%s</MessageId><TimeStamp>%d</TimeStamp><ErrorCode>0</ErrorCode></%sResponse></soapenv:Body></soapenv:Envelope>`,
 		method.XMLName.Local, deviceID, messageID, time.Now().UnixMilli(), method.XMLName.Local)
+}
+
+// casServiceTitleFor is the round-pack service title (0004000D...) of the game
+// that asks CAS ListItems, which sends only its ApplicationId (0004000000...).
+// The pack must belong to the same regional release: a US Badge Arcade
+// (0004000000153500) offered the other regions' pack (0004000D00153600) shows
+// "this service can not be used in your region" (HeyTay82, 2026-10-08).
+func casServiceTitleFor(applicationID string) string {
+	if len(applicationID) == 16 && strings.HasPrefix(strings.ToUpper(applicationID), "00040000") {
+		return "0004000D" + strings.ToUpper(applicationID[8:])
+	}
+	return "0004000D00153600"
 }
