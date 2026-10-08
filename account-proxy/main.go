@@ -7000,7 +7000,14 @@ func handleNinjaShop(w http.ResponseWriter, r *http.Request) {
 		if country == "" {
 			country = "US"
 		}
-		w.Write([]byte(strings.ReplaceAll(fmt.Sprintf(`{"country_detail":{"region_code":"%s","max_cash":{"amount":"999,00 {COIN}","currency":"ECOIN","raw_value":"999"},"loyalty_system_available":false,"legal_payment_message_required":false,"legal_business_message_required":false,"tax_excluded_country":false,"tax_free_country":false,"prepaid_card_available":false,"credit_card_available":false,"credit_card_store_available":false,"jcb_security_code_available":false,"nfc_available":false,"coupon_available":false,"my_coupon_available":true,"price_format":{"positive_prefix":"","positive_suffix":" {COIN}","negative_prefix":"- ","negative_suffix":" {COIN}","formats":{"format":[{"value":"# ### ### ###,##","digit":"#"}],"pattern_id":"5"}},"default_timezone":"-05:00","eshop_available":true,"name":"Unknown","iso_code":"%s","default_language_code":"en","language_selectable":false}}`, country, country), "{COIN}", ninjaCoinName)))
+		// mint (FUN_001f3bd0) fails with 009-4995 "can not be used in your region"
+		// when its shop state is marked for adding funds (+0x177) and none of
+		// prepaid_card_available / credit_card_available / nfc_available is true.
+		// US consoles hit that (HeyTay82, 2026-10-08) on the tax-location path; a
+		// prepaid card is the one payment method without card data to validate
+		// (credit cards crashed mint, see session/!open below).
+		prepaid := strings.EqualFold(country, "US") || strings.EqualFold(country, "CA")
+		w.Write([]byte(strings.ReplaceAll(fmt.Sprintf(`{"country_detail":{"region_code":"%s","max_cash":{"amount":"999,00 {COIN}","currency":"ECOIN","raw_value":"999"},"loyalty_system_available":false,"legal_payment_message_required":false,"legal_business_message_required":false,"tax_excluded_country":false,"tax_free_country":false,"prepaid_card_available":%t,"credit_card_available":false,"credit_card_store_available":false,"jcb_security_code_available":false,"nfc_available":false,"coupon_available":false,"my_coupon_available":true,"price_format":{"positive_prefix":"","positive_suffix":" {COIN}","negative_prefix":"- ","negative_suffix":" {COIN}","formats":{"format":[{"value":"# ### ### ###,##","digit":"#"}],"pattern_id":"5"}},"default_timezone":"-05:00","eshop_available":true,"name":"Unknown","iso_code":"%s","default_language_code":"en","language_selectable":false}}`, country, prepaid, country), "{COIN}", ninjaCoinName)))
 
 	case path == "/ninja/ws/my/balance/current" || path == "/ninja/ws/my/balance/current_raw":
 		// Generous free balance - the whole point is "buy plays" succeeding
