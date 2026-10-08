@@ -136,7 +136,6 @@ var gameServerTitles = map[string]string{
 	"1010EB00": "Mario Kart 8",
 	"1012F100": "Wii Sports Club",
 	"10145E00": "Angry Birds Star Wars",
-	"10176A00": "Super Mario Maker",
 	"100E4B00": "Super Smash Bros.",
 	"1014B700": "Minecraft: WiiU Edition",
 	"10138B00": "Pokemon Art Academy",
@@ -156,7 +155,8 @@ func formatHMS(d time.Duration) string {
 }
 
 var tmplFuncs = template.FuncMap{
-	"add1": func(i int) int { return i + 1 },
+	"wscKindLabel": wscKindLabel,
+	"add1":         func(i int) int { return i + 1 },
 	// connectedFor renders how long a connection established at the given unix
 	// time has been up, as hh:mm:ss ("—" when unknown).
 	"connectedFor": func(since int64) string {
@@ -449,58 +449,25 @@ var swapdoodleDB *sql.DB
 var swapdoodleS3 *minio.Client
 var swapdoodleS3Bucket string
 
-func fetchWiiUTitleDB() {
-	// The flattened titleID-suffix -> name map is cached in Redis so restarts
-	// don't refetch (and depend on) the external GitHub Pages file each time.
-	const titleDBKey = "titledb:wup-names"
-	if cached, ok := runtimeCacheGet(context.Background(), titleDBKey); ok {
-		var names map[string]string
-		if json.Unmarshal([]byte(cached), &names) == nil && len(names) > 0 {
-			for k, v := range names {
-				gameServerTitles[k] = v
-			}
-			log.Printf("[titledb] loaded %d titles from redis cache", len(names))
-			return
-		}
-	}
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Get("https://dantheman827.github.io/nus-info/complete-wup-regionprimaries.json")
-	if err != nil {
-		log.Printf("[titledb] fetch failed: %v", err)
-		return
-	}
-	// Format: { "US": { "titleID": {name, ...}, ... }, "GB": {...}, ... }
-	var db map[string]map[string]struct {
-		Name string `json:"name"`
-	}
-	err = json.NewDecoder(resp.Body).Decode(&db)
-	resp.Body.Close()
-	if err != nil {
-		log.Printf("[titledb] parse failed: %v", err)
-		return
-	}
+// addWiiUTitleNames adds the generated WiiUBrew title list
+// (wiiu_titles_wiiubrew.go, see scripts/gen_wiiu_titles.py) to gameServerTitles,
+// keyed like the rest of the dashboard by the title ID's low 32 bits. The
+// hand-written names above win.
+func addWiiUTitleNames() {
 	added := 0
-	names := map[string]string{}
-	for _, titles := range db {
-		for titleID, entry := range titles {
-			if len(titleID) != 16 || entry.Name == "" {
-				continue
-			}
-			key := strings.ToUpper(titleID[8:])
-			gameServerTitles[key] = entry.Name
-			names[key] = entry.Name
+	for tid, name := range wiiubrewTitleNames {
+		key := fmt.Sprintf("%08X", tid&0xFFFFFFFF)
+		if _, ok := gameServerTitles[key]; !ok {
+			gameServerTitles[key] = name
 			added++
 		}
 	}
-	if blob, err := json.Marshal(names); err == nil && len(names) > 0 {
-		runtimeCacheSet(context.Background(), titleDBKey, string(blob), 24*time.Hour)
-	}
-	log.Printf("[titledb] loaded %d additional titles", added)
+	log.Printf("[titles] added %d Wii U title names", added)
 }
 
 func main() {
-	godotenv.Load("../wiiu-chat-secure/.env")
-	fetchWiiUTitleDB()
+	godotenv.Load("/nico-pretendo-bridge/wiiu-chat-secure/.env")
+	addWiiUTitleNames()
 
 	var err error
 	db, err = sql.Open("postgres", os.Getenv("PN_WUC_POSTGRES_URI"))
@@ -570,6 +537,9 @@ func main() {
 	http.HandleFunc("/my/login", myLoginHandler)
 	http.HandleFunc("/my/logout", myLogoutHandler)
 	http.HandleFunc("/my/discord", myDiscordHandler)
+	http.HandleFunc("/my/discord/presence/start", myDiscordPresenceStart)
+	http.HandleFunc("/my/discord/presence/callback", myDiscordPresenceCallback)
+	http.HandleFunc("/my/discord/presence/unlink", myDiscordPresenceUnlink)
 	http.HandleFunc("/my/account", myAccountHandler)
 	http.HandleFunc("/my/patreon", myPatreonHandler)
 	http.HandleFunc("/my/patreon/start", myPatreonStart)
@@ -854,6 +824,20 @@ type WSCGatheringRow struct {
 	MaxPlayers  int64
 	Players     []WSCPlayerRow
 	Open        bool
+	Kind        string // "friend", "club" or "public" (wsc-secure's gatheringKind)
+	ClubName    string // host's club, when wsc-secure knows its name
+}
+
+// wscKindLabel is how a session kind is shown on the dashboard and overlay.
+func wscKindLabel(kind string) string {
+	switch kind {
+	case "friend":
+		return "Friends"
+	case "club":
+		return "Club"
+	default:
+		return "Public"
+	}
 }
 
 type WSCMatchRow struct {
@@ -933,6 +917,8 @@ func fetchWSCStatus() WSCDashData {
 			PlayerCount int64   `json:"player_count"`
 			Players     []int64 `json:"players"`
 			Open        bool    `json:"open"`
+			Kind        string  `json:"kind"`
+			ClubName    string  `json:"club_name"`
 		} `json:"gatherings"`
 		Matches []struct {
 			GID         int64   `json:"gid"`
@@ -1002,6 +988,8 @@ func fetchWSCStatus() WSCDashData {
 			PlayerCount: g.PlayerCount,
 			MaxPlayers:  g.MaxPlayers,
 			Open:        g.Open,
+			Kind:        g.Kind,
+			ClubName:    g.ClubName,
 		}
 		for _, pid := range g.Players {
 			row.Players = append(row.Players, WSCPlayerRow{
@@ -1062,6 +1050,7 @@ tr:last-child td{border-bottom:none}
 .badge{display:inline-block;padding:.2rem .5rem;border-radius:4px;font-size:.75rem;font-weight:600}
 .on{background:#dcfce7;color:#166534}.off{background:#fee2e2;color:#991b1b}
 .tag{display:inline-block;padding:.15rem .4rem;border-radius:4px;font-size:.75rem;background:#e0e7ff;color:#3730a3}
+.kind{display:inline-block;padding:.15rem .4rem;border-radius:4px;font-size:.75rem;background:#f4f4f5;color:#3f3f46}.kind.friend{background:#f3e8ff;color:#6b21a8}.kind.club{background:#fef3c7;color:#92400e}
 .mono{font-family:monospace;font-size:.85rem}
 </style>
 </head>
@@ -1100,11 +1089,12 @@ tr:last-child td{border-bottom:none}
 <h2>Active Gatherings{{if .Gatherings}} <span style="background:#dcfce7;color:#166534;border-radius:999px;padding:.1rem .5rem;font-size:.75rem;font-weight:700;vertical-align:middle">{{len .Gatherings}}</span>{{end}}</h2>
 {{if .Gatherings}}
 <table>
-<tr><th>GID</th><th>Sport</th><th>Host</th><th>Players</th><th>Capacity</th><th>Open</th></tr>
+<tr><th>GID</th><th>Sport</th><th>Type</th><th>Host</th><th>Players</th><th>Capacity</th><th>Open</th></tr>
 {{range .Gatherings}}
 <tr>
   <td class="mono">{{.GID}}</td>
   <td><span class="tag">{{.SportName}}</span></td>
+  <td><span class="kind {{.Kind}}">{{wscKindLabel .Kind}}</span>{{if .ClubName}}<br><span style="color:#666;font-size:.8rem">{{.ClubName}}</span>{{end}}</td>
   <td>{{if .HostPNID}}<strong>@{{.HostPNID}}</strong>{{else}}<span class="mono">{{.Host}}</span>{{end}}</td>
   <td>
     {{range .Players}}{{if .PNID}}@{{.PNID}}{{else}}<span class="mono">{{.PID}}</span>{{end}} {{end}}
@@ -1330,6 +1320,9 @@ func apiWSCPlayers(w http.ResponseWriter, r *http.Request) {
 		PlayerCount int64        `json:"player_count"`
 		MaxPlayers  int64        `json:"max_players"`
 		Open        bool         `json:"open"`
+		Kind        string       `json:"kind"`
+		KindLabel   string       `json:"kind_label"`
+		ClubName    string       `json:"club_name,omitempty"`
 		Players     []PlayerJSON `json:"players"`
 	}
 	type NatShameJSON struct {
@@ -1367,6 +1360,9 @@ func apiWSCPlayers(w http.ResponseWriter, r *http.Request) {
 			PlayerCount: g.PlayerCount,
 			MaxPlayers:  g.MaxPlayers,
 			Open:        g.Open,
+			Kind:        g.Kind,
+			KindLabel:   wscKindLabel(g.Kind),
+			ClubName:    g.ClubName,
 		}
 		for _, p := range g.Players {
 			gj.Players = append(gj.Players, PlayerJSON{
@@ -1401,6 +1397,7 @@ body{background:transparent;font-family:'Segoe UI',Arial,sans-serif;padding:14px
 .sport{font-size:12px;font-weight:bold;letter-spacing:.5px;color:#7ecfff;margin-bottom:8px;display:flex;align-items:center;gap:6px}
 .badge{font-size:10px;border-radius:3px;padding:1px 6px;font-weight:normal}
 .open{background:#4caf50}.match{background:#e53935}
+.kind{background:rgba(255,255,255,.18)}.kind.friend{background:#8e44ad}.kind.club{background:#f39c12}
 .player{display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.08)}
 .player:last-child{border-bottom:none}
 .mii{width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,.12);flex-shrink:0;overflow:hidden}
@@ -1439,6 +1436,7 @@ if(!PNID){
     });
     if(!g){el.innerHTML='<div class="card"><span class="offline">Not in a session</span></div>';return;}
     var badge=g.open?'<span class="badge open">Open</span>':'<span class="badge match">In Match</span>';
+    badge='<span class="badge kind '+(g.kind||'public')+'">'+(g.kind_label||'Public')+'</span>'+badge;
     var rows=(g.players||[]).map(function(p){
       var you=(p.pnid||'').toLowerCase()===PNID.toLowerCase();
       var nm=p.mii_name||p.pnid||('PID:'+p.pid);
@@ -1773,6 +1771,10 @@ tr:last-child td{border-bottom:none}
   <a class="card" href="/inkay/my/">
     <h2>My Status</h2>
     <p>Your account, coins, friends, Discord link and web password — sign in with your PNID and web password</p>
+  </a>
+  <a class="card" href="/inkay/my/badge-arcade/">
+    <h2>Badge Editor</h2>
+    <p>Design your own Badge Arcade badges and submit them for the arcade — sign in with your PNID and web password</p>
   </a>
   <a class="card" href="/wsc-public/">
     <h2>WSC Status and Players/Sessions</h2>
@@ -3937,14 +3939,32 @@ h1{font-size:1.4rem;margin-bottom:.5rem}
 .btn{display:block;width:100%;padding:.7rem;margin-top:1.2rem;background:#7c3aed;color:#fff;border:none;border-radius:8px;font-size:.95rem;cursor:pointer;text-decoration:none;text-align:center}
 .btn:hover{background:#6d28d9}
 .btn-sm{display:inline-block;padding:.4rem .9rem;background:#27272a;color:#e4e4e7;border:none;border-radius:6px;font-size:.82rem;cursor:pointer;margin-top:.6rem;text-decoration:none}
+.msg{background:#1e1b4b;border:1px solid #4338ca;border-radius:8px;padding:.8rem 1rem;color:#c7d2fe;font-size:.9rem;margin-bottom:1.2rem}
+.presence{border:1px solid #27272a;border-radius:8px;padding:1rem;margin-bottom:1.2rem}
+.presence h2{font-size:1rem;margin-bottom:.4rem}
+.presence p{color:#a1a1aa;font-size:.88rem}
+.presence .btn{margin-top:.8rem}
 </style>
 </head>
 <body>
 <div class="card">
   <h1>Discord Link</h1>
   <p class="sub">Link your PNID to Discord to reset your web password from the bot, and (with a Wii U) to receive WiiU Chat call notifications via DM.</p>
+  {{if .Msg}}<div class="msg">{{.Msg}}</div>{{end}}
   {{if .LinkedDiscordID}}
   <div class="linked">✅ Your account is linked to Discord user ID <strong>{{.LinkedDiscordID}}</strong>.</div>
+  {{if .PresenceConfigured}}
+  <div class="presence">
+    <h2>Rich Presence</h2>
+    {{if .PresenceOn}}
+    <p>On: while your console is online on Revivetendo, your Discord profile shows the game you're playing.</p>
+    <form method="post" action="/inkay/my/discord/presence/unlink"><button class="btn-sm" type="submit">Turn off</button></form>
+    {{else}}
+    <p>Show the game you're playing on Revivetendo on your Discord profile. Sign in to Discord with the account linked above.</p>
+    <form method="post" action="/inkay/my/discord/presence/start"><button class="btn" type="submit">Turn on Rich Presence</button></form>
+    {{end}}
+  </div>
+  {{end}}
   {{end}}
   <p style="color:#a1a1aa;font-size:.88rem;margin-bottom:.8rem">Signed in as <strong>{{.PNID}}</strong></p>
   <div class="code-box">{{.Code}}</div>
@@ -3961,10 +3981,13 @@ h1{font-size:1.4rem;margin-bottom:.5rem}
 </html>`))
 
 type myDiscordData struct {
-	PNID            string
-	Code            string
-	ExpiresIn       string
-	LinkedDiscordID string
+	PNID               string
+	Code               string
+	ExpiresIn          string
+	LinkedDiscordID    string
+	PresenceConfigured bool
+	PresenceOn         bool
+	Msg                string
 }
 
 // discordIDForPNID returns the Discord user linked to a PNID, from either the Wii U
@@ -4017,10 +4040,13 @@ func myDiscordHandler(w http.ResponseWriter, r *http.Request) {
 	expiresIn := fmt.Sprintf("%d:%02d", mins, secs)
 
 	myDiscordTmpl.Execute(w, myDiscordData{
-		PNID:            pnid,
-		Code:            code,
-		ExpiresIn:       expiresIn,
-		LinkedDiscordID: discordID,
+		PNID:               pnid,
+		Code:               code,
+		ExpiresIn:          expiresIn,
+		LinkedDiscordID:    discordID,
+		PresenceConfigured: discordPresenceConfigured(),
+		PresenceOn:         discordID != "" && discordPresenceEnabled(pid),
+		Msg:                r.URL.Query().Get("msg"),
 	})
 }
 
