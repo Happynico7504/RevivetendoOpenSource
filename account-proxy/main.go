@@ -705,6 +705,19 @@ func handleServiceToken(w http.ResponseWriter, r *http.Request) {
 	w.Write(body)
 }
 
+// canonicalPNID returns the PNID as a console stored it (our rows are keyed by
+// the console's spelling; looked up case-insensitively), or pnid unchanged when
+// no console has logged in with it. Web logins with a different spelling are
+// refused with pnidCaseMismatchMessage.
+func canonicalPNID(pnid string) string {
+	var u string
+	if db.QueryRow(`SELECT username FROM wii_devices WHERE lower(username) = lower($1)
+		UNION ALL SELECT username FROM n3ds_devices WHERE lower(username) = lower($1) LIMIT 1`, pnid).Scan(&u) == nil && u != "" {
+		return u
+	}
+	return pnid
+}
+
 // webPasswordHashFor returns an account's web password hash: the Wii U row's when
 // it has one, otherwise the 3DS-only row's.
 func webPasswordHashFor(username string) string {
@@ -801,7 +814,60 @@ func storeDeviceHeaders(username, pwHash string, r *http.Request) {
 		AND wii_devices.discord_id IS NULL AND n.discord_id IS NOT NULL`, username)
 }
 
+// statusRecorder remembers the status a handler wrote, for logAuthFail.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	if s.status == 0 {
+		s.status = code
+	}
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *statusRecorder) Write(b []byte) (int, error) {
+	if s.status == 0 {
+		s.status = http.StatusOK
+	}
+	return s.ResponseWriter.Write(b)
+}
+
+// handle serves the console account server (port 6666) and logs every request
+// whose authentication failed for fail2ban (see logAuthFail).
 func handle(w http.ResponseWriter, r *http.Request) {
+	rec := &statusRecorder{ResponseWriter: w}
+	handleAccount(rec, r)
+	if authFailed(r, rec.status) {
+		logAuthFail(r, rec.status)
+	}
+}
+
+// authFailed: any 401 or 403 (Pretendo answers requests that don't look like a
+// console's with 403 "An anomaly was detected"), or a login
+// (access_token/generate) refused with 400 (wrong password or unknown account).
+func authFailed(r *http.Request, status int) bool {
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		return true
+	}
+	return status == http.StatusBadRequest && strings.HasSuffix(r.URL.Path, "/access_token/generate")
+}
+
+// logAuthFail writes the line fail2ban's "account-auth" jail counts
+// (/etc/fail2ban/filter.d/account-auth.conf: 5 within 15 minutes bans the address
+// for 30 minutes). Port 6666 is reached directly, so peer is the real TCP peer
+// (the relay's address for relayed players, which the jail ignores);
+// X-Forwarded-For can be forged and is logged for reference only.
+func logAuthFail(r *http.Request, status int) {
+	peer, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		peer = r.RemoteAddr
+	}
+	log.Printf("auth-fail peer=%s client=%s status=%d %s %s", peer, realIP(r), status, r.Method, r.URL.Path)
+}
+
+func handleAccount(w http.ResponseWriter, r *http.Request) {
 	log.Printf("%s %s", r.Method, r.RequestURI)
 	gameServerID := r.URL.Query().Get("game_server_id")
 
@@ -2990,16 +3056,27 @@ func handleInternalAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if left := webPasswordLocked(userID); left > 0 {
+		log.Printf("internal/auth: web login for %q locked (%s left)", userID, left.Round(time.Second))
+		fail(webLockoutMessage(left), http.StatusTooManyRequests)
+		return
+	}
+
+	if c := canonicalPNID(userID); c != userID {
+		log.Printf("internal/auth: %q differs in case from the stored PNID", userID)
+		fail(pnidCaseMismatchMessage, 401)
+		return
+	}
 	webPwHash := webPasswordHashFor(userID)
 	// Any registered console (Wii U or 3DS) proves the account has connected before.
 	if _, _, _, _, hasConsole := loadConsoleCreds(userID); !hasConsole {
 		log.Printf("internal/auth: no console credentials for %q", userID)
-		fail("no console registered — connect a Wii U or 3DS first", 401)
+		fail(pnidNotOnRevivetendoMessage+" See "+revivetendoGuideURL+" to connect your console.", 401)
 		return
 	}
 	if webPwHash == "" {
 		log.Printf("internal/auth: no web password set for %q", userID)
-		fail("no web password set for this account", 401)
+		fail(webPasswordMissingMessage, 401)
 		return
 	}
 
@@ -3010,9 +3087,15 @@ func handleInternalAuth(w http.ResponseWriter, r *http.Request) {
 		log.Printf("internal/auth: wrong web password for %q", userID)
 		pid := pidForPNID(userID)
 		db.Exec(`INSERT INTO web_logins (pid, ip, success) VALUES ($1, $2, FALSE)`, pid, ip)
+		if webPasswordFailed(userID) {
+			log.Printf("internal/auth: %q locked for %s after %d wrong web passwords", userID, webPasswordLockout, webPasswordMaxFails)
+			fail(webLockoutMessage(webPasswordLockout), http.StatusTooManyRequests)
+			return
+		}
 		fail("invalid username or password", 401)
 		return
 	}
+	webPasswordSucceeded(userID)
 
 	// Password matched locally - derive the PID from cache instead of asking Pretendo.
 	// The only thing this endpoint's caller (grpc-stubs' apiLogin) reads from our response
@@ -6026,6 +6109,7 @@ func handleGenericPretendoProxy(w http.ResponseWriter, r *http.Request) {
 		} else {
 			log.Printf("generic pretendo.cc proxy: upstream error for %s: %v", fullTarget, err)
 		}
+		logUpstreamFail(r, fullTarget, "error")
 		http.Error(w, "upstream error", http.StatusBadGateway)
 		return
 	}
@@ -6039,6 +6123,9 @@ func handleGenericPretendoProxy(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
 	log.Printf("generic pretendo.cc proxy: %s %s -> %d", r.Method, fullTarget, resp.StatusCode)
+	if upstreamStatusFailed(resp.StatusCode) {
+		logUpstreamFail(r, fullTarget, strconv.Itoa(resp.StatusCode))
+	}
 }
 
 // knownOLVHosts are the nicochristmann.net hostnames that are genuinely Miiverse/OLV
@@ -6088,6 +6175,7 @@ func handleGenericOwnDomainProxy(w http.ResponseWriter, r *http.Request, ownSuff
 		} else {
 			log.Printf("generic %s proxy: upstream error for %s: %v", ownSuffix, fullTarget, err)
 		}
+		logUpstreamFail(r, fullTarget, "error")
 		http.Error(w, "upstream error", http.StatusBadGateway)
 		return
 	}
@@ -6101,6 +6189,29 @@ func handleGenericOwnDomainProxy(w http.ResponseWriter, r *http.Request, ownSuff
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
 	log.Printf("generic %s proxy: %s %s -> %s -> %d", ownSuffix, r.Method, r.Host, fullTarget, resp.StatusCode)
+	if upstreamStatusFailed(resp.StatusCode) {
+		logUpstreamFail(r, fullTarget, strconv.Itoa(resp.StatusCode))
+	}
+}
+
+// upstreamStatusFailed is a Pretendo answer that counts as a failed request
+// for fail2ban: not found (what path scanners get) or a server error.
+func upstreamStatusFailed(code int) bool {
+	return code == http.StatusNotFound || code >= 500
+}
+
+// logUpstreamFail writes the line fail2ban's "pretendo-upstream" jail counts
+// (/etc/fail2ban/filter.d/pretendo-upstream.conf: more than 25 in 2 hours bans
+// the address for 3 days). peer is the TCP peer from nginx's PROXY protocol
+// header, which a client cannot forge; X-Forwarded-For (realIP) can be, so it
+// is logged for reference only. Relayed players share their relay's peer
+// address, which the jail ignores.
+func logUpstreamFail(r *http.Request, target, reason string) {
+	peer, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		peer = r.RemoteAddr
+	}
+	log.Printf("upstream-fail peer=%s client=%s reason=%s %s %s", peer, realIP(r), reason, r.Method, target)
 }
 
 // handleOLV forwards OLV discovery/API requests to miiverse-api on port 8080.

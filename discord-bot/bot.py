@@ -297,6 +297,22 @@ async def link_pnid(interaction: discord.Interaction, code: str):
 
 _ACCOUNT_PROXY_SET_PASSWORD_URL = "http://127.0.0.1:9191/internal/web/set-password"
 
+
+def clear_web_login_lock(pnid):
+    """Lift the web password lockout (3 wrong passwords in 5 minutes lock a PNID's
+    web login for 15 minutes; web_lockout.go in account-proxy and relay-admin).
+    Returns True if the account was locked, None if Redis is unavailable."""
+    if _redis is None:
+        return None
+    key = pnid.strip().lower()
+    try:
+        was_locked = _redis.delete(f"webpw:lock:{key}") > 0
+        _redis.delete(f"webpw:fails:{key}")
+        return was_locked
+    except Exception as e:
+        print(f"[bot] clear_web_login_lock({pnid}): {e}", flush=True)
+        return None
+
 @bot.tree.command(guild=_guild, name="reset_web_password", description="Reset your Juxt/relay-admin web password (only works if one is already set)")
 async def reset_web_password(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
@@ -342,12 +358,36 @@ async def reset_web_password(interaction: discord.Interaction):
         await interaction.followup.send("❌ Failed to reset password, try again later.", ephemeral=True)
         return
 
+    clear_web_login_lock(pnid)
     await interaction.followup.send(
         f"✅ Your web password for **{pnid}** has been reset.\nNew password: `{new_password}`\n"
         "Save it now — it won't be shown again.",
         ephemeral=True,
     )
     print(f"[bot] reset_web_password: pnid={pnid} via discord_id={interaction.user.id}", flush=True)
+
+
+@bot.tree.command(guild=_guild, name="unlock_web_login", description="Unlock your web login after too many wrong web passwords")
+async def unlock_web_login(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            pnid = linked_pnid(cur, str(interaction.user.id))
+    if not pnid:
+        await interaction.followup.send("❌ No PNID linked. Use `/link_pnid` first.", ephemeral=True)
+        return
+    was_locked = clear_web_login_lock(pnid)
+    if was_locked is None:
+        await interaction.followup.send("❌ Couldn't reach the lock store, try again later.", ephemeral=True)
+        return
+    if was_locked:
+        await interaction.followup.send(f"✅ Web login for **{pnid}** unlocked. You can sign in again.", ephemeral=True)
+    else:
+        await interaction.followup.send(
+            f"ℹ️ Web login for **{pnid}** wasn't locked. If you forgot your password, use `/reset_web_password`.",
+            ephemeral=True,
+        )
+    print(f"[bot] unlock_web_login: pnid={pnid} was_locked={was_locked} via discord_id={interaction.user.id}", flush=True)
 
 
 _ACCOUNT_PROXY_MII_URL = "http://127.0.0.1:9191/internal/mii"

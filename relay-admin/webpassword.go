@@ -24,3 +24,26 @@ func setWebPasswordHash(pnid, hash string) error {
 	_, err = db.Exec(`UPDATE n3ds_devices SET web_password_hash = $1 WHERE username = $2`, hash, pnid)
 	return err
 }
+
+// canonicalPNID returns the PNID as a console stored it (our rows are keyed by
+// the console's spelling; looked up case-insensitively), or pnid unchanged when
+// no console has logged in with it. Web logins with a different spelling are
+// refused with pnidCaseMismatchMessage.
+func canonicalPNID(pnid string) string {
+	var u string
+	if db.QueryRow(`SELECT username FROM wii_devices WHERE lower(username) = lower($1)
+		UNION ALL SELECT username FROM n3ds_devices WHERE lower(username) = lower($1) LIMIT 1`, pnid).Scan(&u) == nil && u != "" {
+		return u
+	}
+	return pnid
+}
+
+// pnidOnRevivetendo reports whether a Wii U or 3DS has ever logged in to
+// Revivetendo with this PNID (case-insensitive, like Nintendo's PNIDs).
+// pnid_cache is not enough: it also holds Pretendo-only friends of our players.
+func pnidOnRevivetendo(pnid string) bool {
+	var ok bool
+	db.QueryRow(`SELECT EXISTS(SELECT 1 FROM wii_devices WHERE lower(username) = lower($1))
+		OR EXISTS(SELECT 1 FROM n3ds_devices WHERE lower(username) = lower($1))`, pnid).Scan(&ok)
+	return ok
+}

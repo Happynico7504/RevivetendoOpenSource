@@ -580,6 +580,19 @@ func (s *apiServer) apiLogin(ctx context.Context, req *LoginRequest) (*LoginResp
 	pid, pnid, err := pretendoAuth(req.Username, req.Password, clientIP)
 	if err != nil {
 		log.Printf("web login failed for %q: %v", req.Username, err)
+		// account-proxy's web password lockout (web_lockout.go): Juxt shows this text.
+		if strings.HasPrefix(err.Error(), "Too many wrong passwords") {
+			return nil, status.Error(codes.ResourceExhausted, err.Error())
+		}
+		if strings.HasPrefix(err.Error(), "No web password") {
+			return nil, status.Error(codes.FailedPrecondition, err.Error())
+		}
+		if strings.HasPrefix(err.Error(), "PNIDs are case-sensitive") {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+		if strings.HasPrefix(err.Error(), "This PNID is not on Revivetendo") {
+			return nil, status.Error(codes.NotFound, err.Error())
+		}
 		return nil, status.Error(codes.Unauthenticated, "invalid username or password")
 	}
 
