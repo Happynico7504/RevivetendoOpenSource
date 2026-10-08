@@ -292,6 +292,26 @@ func dbNewGatheringOpts(hostPID, gameMode, maxPlayers, hostNatm uint32, friends 
 	}
 }
 
+// dbSetGatheringCriteria stores the host's random-matchmaking search attributes
+// on its gathering: the club code ([3]) and the match mode ([4]), see
+// gatheringKind. A mode other than the usual "1" is logged so a club search
+// can be recognised in the logs.
+func dbSetGatheringCriteria(gid uint32, attribs []string) {
+	if len(attribs) < 5 {
+		return
+	}
+	set := bson.D{{Key: "match_attr", Value: attribs[4]}}
+	if code, err := strconv.ParseUint(attribs[3], 10, 32); err == nil && code > 0 {
+		set = append(set, bson.E{Key: "club_code", Value: int64(code)})
+	}
+	if attribs[4] != "1" {
+		fmt.Printf("AutoMatchmake: gathering gid=%d has match mode %q (club search?) attribs=%q\n", gid, attribs[4], attribs)
+	}
+	gatheringsCol.UpdateOne(context.Background(),
+		bson.D{{Key: "gid", Value: gid}},
+		bson.D{{Key: "$set", Value: set}})
+}
+
 // dbSetGatheringSession stores the host's own MatchmakeSession description of a
 // friend session (raw, as sent to CreateMatchmakeSession) and where its
 // ParticipationCount sits, for BrowseMatchmakeSession.

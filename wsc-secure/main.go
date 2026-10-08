@@ -1087,6 +1087,25 @@ type wscGatheringInfo struct {
 	PlayerCount int64   `json:"player_count"`
 	Players     []int64 `json:"players"`
 	Open        bool    `json:"open"`
+	Kind        string  `json:"kind"` // "friend", "club" or "public"; see gatheringKind
+	ClubCode    int64   `json:"club_code,omitempty"`
+	ClubName    string  `json:"club_name,omitempty"`
+}
+
+// gatheringKind classifies a gathering for the dashboards. Friend sessions are
+// the ones a host created with CreateMatchmakeSession. Random matchmaking
+// (AutoMatchmake, system type "1") sends six search attributes: [3] is the
+// searcher's own club code and [4] has been "1" in every search logged so far
+// (2026-10-07/08, five players in five clubs). A club-only search is expected
+// to differ there, so any other value counts as a club session.
+func gatheringKind(d bson.M) string {
+	if f, _ := d["friends"].(bool); f {
+		return "friend"
+	}
+	if m, _ := d["match_attr"].(string); m != "" && m != "1" {
+		return "club"
+	}
+	return "public"
 }
 
 func bsonInt(v interface{}) int64 {
@@ -1135,6 +1154,11 @@ func startStatusServer() {
 					PlayerCount: bsonInt(d["player_count"]),
 				}
 				g.Open, _ = d["open"].(bool)
+				g.Kind = gatheringKind(d)
+				if code := bsonInt(d["club_code"]); code > 0 {
+					g.ClubCode = code
+					g.ClubName, _ = resolveClubName(dsClubRegionPrefix(uint32(g.Host)), uint32(code))
+				}
 				if raw, ok := d["players"].(bson.A); ok {
 					for _, p := range raw {
 						g.Players = append(g.Players, bsonInt(p))
@@ -2327,6 +2351,8 @@ func handleAutoMatchmakeRaw(packet *nex.PacketV1) {
 
 	var gameMode uint32
 	var maxPlayers uint32 = 2
+	var autoAttribs []string // logged to tell club from public matchmaking
+	var autoSystemType string
 
 	criteriaCount := int(stream.ReadUInt32LE())
 	for ci := 0; ci < criteriaCount; ci++ {
@@ -2334,7 +2360,10 @@ func handleAutoMatchmakeRaw(packet *nex.PacketV1) {
 		attribCount := int(stream.ReadUInt32LE())
 		for j := 0; j < attribCount; j++ {
 			length := stream.ReadUInt16LE()
-			stream.ReadBytesNext(int64(length))
+			a := stream.ReadBytesNext(int64(length))
+			if ci == 0 {
+				autoAttribs = append(autoAttribs, strings.TrimRight(string(a), "\x00"))
+			}
 		}
 		// GameMode string
 		gmLen := stream.ReadUInt16LE()
@@ -2359,7 +2388,9 @@ func handleAutoMatchmakeRaw(packet *nex.PacketV1) {
 		}
 		// MatchmakeSystemType string
 		l = stream.ReadUInt16LE()
-		stream.ReadBytesNext(int64(l))
+		if st := stream.ReadBytesNext(int64(l)); ci == 0 {
+			autoSystemType = strings.TrimRight(string(st), "\x00")
+		}
 		// VacantOnly, ExcludeLocked, ExcludeNonHostPid bools
 		stream.ReadBool()
 		stream.ReadBool()
@@ -2374,7 +2405,7 @@ func handleAutoMatchmakeRaw(packet *nex.PacketV1) {
 	if v, ok := pidNATm.Load(client.PID()); ok {
 		natm = v.(uint32)
 	}
-	fmt.Printf("AutoMatchmakeRaw: PID=%d gameMode=%d (sport=0x%02x) maxPlayers=%d natm=%d\n", client.PID(), gameMode, gameMode>>24, maxPlayers, natm)
+	fmt.Printf("AutoMatchmakeRaw: PID=%d gameMode=%d (sport=0x%02x) maxPlayers=%d natm=%d system=%q attribs=%q\n", client.PID(), gameMode, gameMode>>24, maxPlayers, natm, autoSystemType, autoAttribs)
 
 	// A player who just failed NAT traversal always gets a fresh solo gathering
 	// instead of searching for a real one to join - see natFailureBlockedUntil's
@@ -2386,6 +2417,7 @@ func handleAutoMatchmakeRaw(packet *nex.PacketV1) {
 	}
 	if gid == 0 {
 		gid = dbNewGathering(client.PID(), gameMode, maxPlayers, natm)
+		dbSetGatheringCriteria(gid, autoAttribs)
 		fmt.Printf("AutoMatchmake: PID=%d created gathering gid=%d gameMode=%d (sport=0x%02x) natm=%d\n", client.PID(), gid, gameMode, gameMode>>24, natm)
 	} else {
 		dbJoinGathering(gid, client.PID())
