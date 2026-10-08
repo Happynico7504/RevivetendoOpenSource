@@ -5,86 +5,87 @@
 <title>Badge Editor — Badge Arcade</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="stylesheet" href="editor.css">
+<script src="/inkay/i18n/i18n.js"></script>
 </head>
-<body>
+<body data-i18n-page-title="be.title">
 <header>
   <div>
-    <h1>Badge Editor</h1>
-    <p class="sub">Design a badge for Nintendo Badge Arcade on Revivetendo.</p>
+    <h1 data-i18n="land.badges">Badge Editor</h1>
+    <p class="sub" data-i18n="be.sub">Design a badge for Nintendo Badge Arcade on Revivetendo.</p>
   </div>
   <div class="account" id="account">…</div>
 </header>
 
 <main>
   <section class="card art">
-    <h2>Artwork</h2>
+    <h2 data-i18n="be.artwork">Artwork</h2>
     <div class="dropzone" id="dropzone">
       <canvas id="stage" width="384" height="384" aria-label="Badge artwork editor"></canvas>
-      <div class="drophint" id="drophint">Drop an image here or <label class="link">choose a file<input type="file" id="file" accept="image/png,image/jpeg,image/gif" hidden></label><br><small>PNG with a transparent background works best.</small></div>
+      <div class="drophint" id="drophint"><span data-i18n="be.drop">Drop an image here or</span> <label class="link"><span data-i18n="be.choose">choose a file</span><input type="file" id="file" accept="image/png,image/jpeg,image/gif" hidden></label><br><small data-i18n="be.png_hint">PNG with a transparent background works best.</small></div>
     </div>
     <div class="controls">
-      <label>Zoom <input type="range" id="zoom" min="5" max="400" value="100"></label>
-      <button type="button" id="fit">Fit</button>
-      <button type="button" id="rotate" title="Rotate 90°">⟳ 90°</button>
-      <label class="link small">Replace image<input type="file" id="file2" accept="image/png,image/jpeg,image/gif" hidden></label>
+      <label><span data-i18n="be.zoom">Zoom</span> <input type="range" id="zoom" min="5" max="400" value="100"></label>
+      <button type="button" id="fit" data-i18n="be.fit">Fit</button>
+      <button type="button" id="rotate" title="Rotate 90°" data-i18n-title="be.rotate">⟳ 90°</button>
+      <label class="link small"><span data-i18n="be.replace">Replace image</span><input type="file" id="file2" accept="image/png,image/jpeg,image/gif" hidden></label>
     </div>
     <div class="controls">
-      <label><input type="checkbox" id="showOutline" checked> Show outline</label>
-      <label><input type="checkbox" id="editOutline"> Edit outline</label>
-      <button type="button" id="autoOutline">Automatic outline</button>
+      <label><input type="checkbox" id="showOutline" checked> <span data-i18n="be.show_outline">Show outline</span></label>
+      <label><input type="checkbox" id="editOutline"> <span data-i18n="be.edit_outline">Edit outline</span></label>
+      <button type="button" id="autoOutline" data-i18n="be.auto_outline">Automatic outline</button>
     </div>
-    <p class="hint" id="outlineHint">The outline decides how the badge collides in the crane. Drag the image to position it; in “Edit outline”, drag the points.</p>
+    <p class="hint" id="outlineHint" data-i18n="be.outline_hint">The outline decides how the badge collides in the crane. Drag the image to position it; in “Edit outline”, drag the points.</p>
   </section>
 
   <section class="card preview">
-    <h2>Preview</h2>
-    <p class="hint">Rendered with the same encoder as the real badge.</p>
+    <h2 data-i18n="be.preview">Preview</h2>
+    <p class="hint" data-i18n="be.preview_hint">Rendered with the same encoder as the real badge.</p>
     <div class="previews">
-      <figure><div class="home"><img id="p64" alt=""></div><figcaption>HOME Menu</figcaption></figure>
-      <figure><div class="small"><img id="p32" alt=""></div><figcaption>Small</figcaption></figure>
-      <figure><div class="machine"><img id="pshadow" alt=""><img id="ptex" alt=""></div><figcaption>In the machine</figcaption></figure>
+      <figure><div class="home"><img id="p64" alt=""></div><figcaption data-i18n="be.home">HOME Menu</figcaption></figure>
+      <figure><div class="small"><img id="p32" alt=""></div><figcaption data-i18n="be.small">Small</figcaption></figure>
+      <figure><div class="machine"><img id="pshadow" alt=""><img id="ptex" alt=""></div><figcaption data-i18n="be.machine">In the machine</figcaption></figure>
     </div>
     <p class="status" id="previewStatus"></p>
   </section>
 
   <section class="card names">
-    <h2>Name</h2>
-    <label for="nameEn">English name <small>(up to 2 lines)</small></label>
-    <textarea id="nameEn" rows="2" maxlength="120" placeholder="e.g. Mii TV badge"></textarea>
+    <h2 data-i18n="be.name">Name</h2>
+    <label for="nameEn" data-i18n="be.name_en">English name <small>(up to 2 lines)</small></label>
+    <textarea id="nameEn" rows="2" maxlength="120" placeholder="e.g. Mii TV badge" data-i18n-placeholder="be.name_ph"></textarea>
     <details>
-      <summary>Other languages <small>(optional — English is used where empty)</small></summary>
+      <summary data-i18n="be.other_langs">Other languages <small>(optional — English is used where empty)</small></summary>
       <div class="langs" id="langs"></div>
     </details>
   </section>
 
   <section class="card save">
-    <h2>Save</h2>
-    <label for="title">Title <small>(only shown to you and the reviewers)</small></label>
-    <input id="title" maxlength="60" placeholder="Defaults to the English name">
+    <h2 data-i18n="be.save_h">Save</h2>
+    <label for="title" data-i18n="be.title_label">Title <small>(only shown to you and the reviewers)</small></label>
+    <input id="title" maxlength="60" placeholder="Defaults to the English name" data-i18n-placeholder="be.title_ph">
     <div class="controls">
-      <button type="button" class="primary" id="save">Save</button>
-      <button type="button" id="saveCopy">Save as copy</button>
-      <button type="button" id="new">New badge</button>
+      <button type="button" class="primary" id="save" data-i18n="be.save">Save</button>
+      <button type="button" id="saveCopy" data-i18n="be.save_copy">Save as copy</button>
+      <button type="button" id="new" data-i18n="be.new">New badge</button>
     </div>
     <div class="controls">
-      <button type="button" class="submit" id="submit">Submit for review…</button>
+      <button type="button" class="submit" id="submit" data-i18n="be.submit_review">Submit for review…</button>
     </div>
     <div class="rules" id="rules" hidden>
-      <p><strong>Before you submit</strong></p>
+      <p><strong data-i18n="be.before">Before you submit</strong></p>
       <ul>
-        <li>Only use artwork you made yourself or are allowed to share.</li>
-        <li>Nothing offensive, hateful, sexual, or personal information.</li>
-        <li>An admin reviews every badge before it can appear in the arcade; they may reject it with a note.</li>
-        <li>While it waits for review (and once approved) it can't be edited — “Save as copy” to make changes.</li>
+        <li data-i18n="be.rule1">Only use artwork you made yourself or are allowed to share.</li>
+        <li data-i18n="be.rule2">Nothing offensive, hateful, sexual, or personal information.</li>
+        <li data-i18n="be.rule3">An admin reviews every badge before it can appear in the arcade; they may reject it with a note.</li>
+        <li data-i18n="be.rule4">While it waits for review (and once approved) it can't be edited — “Save as copy” to make changes.</li>
       </ul>
-      <div class="controls"><button type="button" class="primary" id="submitConfirm">Submit</button><button type="button" id="submitCancel">Cancel</button></div>
+      <div class="controls"><button type="button" class="primary" id="submitConfirm" data-i18n="be.submit">Submit</button><button type="button" id="submitCancel" data-i18n="be.cancel">Cancel</button></div>
     </div>
     <p class="status" id="saveStatus"></p>
   </section>
 
   <section class="card creations" id="creationsCard">
-    <h2>My creations</h2>
-    <div id="creations"><p class="hint">Log in to see your saved creations.</p></div>
+    <h2 data-i18n="be.creations">My creations</h2>
+    <div id="creations"><p class="hint" data-i18n="be.login_to_see">Log in to see your saved creations.</p></div>
   </section>
 </main>
 

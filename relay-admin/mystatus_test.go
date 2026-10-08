@@ -49,7 +49,7 @@ func TestMyStatus3DSOnlyWithoutWallet(t *testing.T) {
 // A Wii U account keeps everything it had.
 func TestMyStatusWiiU(t *testing.T) {
 	out := renderStatus(t, myStatusData{PID: 1, PNID: "wiiu", ShowWiiU: true})
-	mustContain(t, out, "Offline", "Friends (0)", "No friends yet", "refresh-label", "setInterval")
+	mustContain(t, out, "Offline", `<span data-i18n="my.friends">Friends</span> (0)`, "No friends yet", "refresh-label", "setInterval")
 	mustNotContain(t, out, "RevivetendoCoin")
 	on := renderStatus(t, myStatusData{PID: 1, PNID: "wiiu", IsOnline: true, ShowWiiU: true})
 	mustContain(t, on, "Online")
@@ -58,7 +58,7 @@ func TestMyStatusWiiU(t *testing.T) {
 // A player with both consoles sees everything, including the wallet.
 func TestMyStatusBothConsoles(t *testing.T) {
 	out := renderStatus(t, myStatusData{PID: 1, PNID: "both", ShowWiiU: true, ShowWallet: true, WalletBalance: 5})
-	mustContain(t, out, "Friends (0)", "5 RevivetendoCoin")
+	mustContain(t, out, `<span data-i18n="my.friends">Friends</span> (0)`, "5 RevivetendoCoin")
 }
 
 // Account management and the Discord link are for everyone (the bot's password reset

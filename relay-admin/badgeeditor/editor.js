@@ -14,6 +14,10 @@
   ];
 
   var $ = function (id) { return document.getElementById(id); };
+  // T translates through the dashboard's i18n.js (keys in /inkay/i18n/lang/*.js),
+  // F fills its {placeholders}; both fall back to the English text.
+  var T = function (key, en) { return window.I18N ? I18N.t(key, en) : en; };
+  var F = function (key, en, args) { var s = T(key, en); return window.I18N ? I18N.fill(s, args) : s.replace(/\{(\w+)\}/g, function (m, k) { return k in args ? args[k] : m; }); };
   var stage = $("stage"), ctx = stage.getContext("2d");
 
   var state = {
@@ -50,7 +54,7 @@
     return new Promise(function (resolve, reject) {
       var im = new Image();
       im.onload = function () { resolve(im); };
-      im.onerror = function () { reject(new Error("could not read that image")); };
+      im.onerror = function () { reject(new Error(T("be.bad_image", "could not read that image"))); };
       im.src = src;
     });
   }
@@ -124,13 +128,13 @@
   function preview() {
     if (!state.img) return;
     var seq = ++previewSeq;
-    status($("previewStatus"), "Rendering…");
+    status($("previewStatus"), T("be.rendering", "Rendering…"));
     api("preview", { method: "POST", body: { art: artDataURL(), collision: state.collision } }).then(function (p) {
       if (seq !== previewSeq) return;
       $("p64").src = p.image64; $("p32").src = p.image32;
       $("ptex").src = p.texture; $("pshadow").src = p.shadow;
       state.shown = p.collision || [];
-      status($("previewStatus"), state.collision ? "Using your outline." : "Automatic outline: " + state.shown.length + " shape(s).");
+      status($("previewStatus"), state.collision ? T("be.using_outline", "Using your outline.") : F("be.auto_shapes", "Automatic outline: {n} shape(s).", { n: state.shown.length }));
       render();
     }).catch(function (e) { if (seq === previewSeq) status($("previewStatus"), e.message, "err"); });
   }
@@ -138,7 +142,7 @@
   // ---------- input: image ----------
   function useFile(file) {
     if (!file) return;
-    if (!/^image\/(png|jpeg|gif)$/.test(file.type)) { status($("previewStatus"), "Please use a PNG, JPEG or GIF image.", "err"); return; }
+    if (!/^image\/(png|jpeg|gif)$/.test(file.type)) { status($("previewStatus"), T("be.bad_type", "Please use a PNG, JPEG or GIF image."), "err"); return; }
     var reader = new FileReader();
     reader.onload = function () {
       loadImage(reader.result).then(function (im) {
@@ -228,7 +232,7 @@
   LANGS.forEach(function (l) {
     var id = "name" + l[0];
     var wrap = document.createElement("div");
-    wrap.innerHTML = '<label for="' + id + '">' + esc(l[1]) + '</label><textarea id="' + id + '" rows="2" maxlength="120" placeholder="uses English"></textarea>';
+    wrap.innerHTML = '<label for="' + id + '" data-i18n="be.lang' + l[0] + '">' + esc(l[1]) + '</label><textarea id="' + id + '" rows="2" maxlength="120" placeholder="uses English" data-i18n-placeholder="be.uses_english"></textarea>';
     langBox.appendChild(wrap);
   });
   document.querySelectorAll(".names textarea").forEach(function (t) {
@@ -258,10 +262,10 @@
       state.loggedIn = me.loggedIn;
       var a = $("account");
       if (me.loggedIn) {
-        a.innerHTML = "Logged in as <strong>" + esc(me.pnid || "you") + "</strong> · <a href=\"../\">My page</a>" +
-          (me.banned ? '<br><span class="note">This account can\'t save creations.</span>' : "");
+        a.innerHTML = esc(T("be.logged_in_as", "Logged in as")) + " <strong>" + esc(me.pnid || "you") + "</strong> · <a href=\"../\">" + esc(T("be.my_page", "My page")) + "</a>" +
+          (me.banned ? '<br><span class="note">' + esc(T("be.banned", "This account can't save creations.")) + "</span>" : "");
       } else {
-        a.innerHTML = '<a href="../">Log in</a> to save your creations<br><small>(then come back to this page)</small>';
+        a.innerHTML = T("be.login_prompt", '<a href="../">Log in</a> to save your creations<br><small>(then come back to this page)</small>');
       }
       $("save").disabled = $("saveCopy").disabled = !me.loggedIn;
       updateSubmit();
@@ -270,18 +274,18 @@
   }
   function refreshList() {
     var box = $("creations");
-    if (!state.loggedIn) { box.innerHTML = '<p class="hint">Log in to see your saved creations.</p>'; return Promise.resolve(); }
+    if (!state.loggedIn) { box.innerHTML = '<p class="hint">' + T("be.login_to_see", "Log in to see your saved creations.") + "</p>"; return Promise.resolve(); }
     return api("creations").then(function (list) {
-      if (!list.length) { box.innerHTML = '<p class="hint">Nothing saved yet.</p>'; return; }
+      if (!list.length) { box.innerHTML = '<p class="hint">' + T("be.nothing", "Nothing saved yet.") + "</p>"; return; }
       box.innerHTML = '<div class="list">' + list.map(function (c) {
         var cur = state.current && state.current.id === c.id ? " current" : "";
         return '<div class="item' + cur + '"><img src="' + API + "creations/" + c.id + "/art.png?v=" + encodeURIComponent(c.updatedAt) + '" alt="">' +
           '<div class="t" title="' + esc(c.title) + '">' + esc(c.title) + "</div>" +
-          '<span class="pill ' + c.status + '">' + c.status + "</span>" +
+          '<span class="pill ' + c.status + '">' + esc(T("be.st_" + c.status, c.status)) + "</span>" +
           (c.reviewNote ? '<div class="note">' + esc(c.reviewNote) + "</div>" : "") +
-          '<div class="actions"><button type="button" data-load="' + c.id + '">' + (c.status === "draft" || c.status === "rejected" ? "Edit" : "View") + "</button>" +
-          (c.status === "submitted" ? '<button type="button" data-withdraw="' + c.id + '">Withdraw</button>' : "") +
-          (c.status !== "approved" ? '<button type="button" data-del="' + c.id + '">Delete</button>' : "") + "</div></div>";
+          '<div class="actions"><button type="button" data-load="' + c.id + '">' + (c.status === "draft" || c.status === "rejected" ? T("be.edit", "Edit") : T("be.view", "View")) + "</button>" +
+          (c.status === "submitted" ? '<button type="button" data-withdraw="' + c.id + '">' + T("be.withdraw", "Withdraw") + "</button>" : "") +
+          (c.status !== "approved" ? '<button type="button" data-del="' + c.id + '">' + T("be.delete", "Delete") + "</button>" : "") + "</div></div>";
       }).join("") + "</div>";
     }).catch(function (e) { box.innerHTML = '<p class="status err">' + esc(e.message) + "</p>"; });
   }
@@ -295,9 +299,9 @@
       return;
     }
     if (id) {
-      if (state.dirty && !confirm("Discard your unsaved changes?")) return;
+      if (state.dirty && !confirm(T("be.discard", "Discard your unsaved changes?"))) return;
       loadCreation(+id);
-    } else if (del && confirm("Delete this creation? This can't be undone.")) {
+    } else if (del && confirm(T("be.confirm_delete", "Delete this creation? This can't be undone."))) {
       api("creations/" + del, { method: "DELETE" }).then(function () {
         if (state.current && state.current.id === +del) state.current = null;
         refreshList();
@@ -306,7 +310,7 @@
   });
 
   function loadCreation(id) {
-    status($("saveStatus"), "Loading…");
+    status($("saveStatus"), T("be.loading", "Loading…"));
     api("creations/" + id).then(function (c) {
       var spec = c.spec || {};
       var view = spec.view || null;
@@ -325,14 +329,14 @@
         $("drophint").classList.add("hidden");
         render(); preview(); refreshList();
         status($("saveStatus"), c.status === "submitted" || c.status === "approved"
-          ? "This creation is " + c.status + "; “Save as copy” to change it." : "Loaded.");
+          ? F("be.locked", "This creation is {status}; “Save as copy” to change it.", { status: T("be.st_" + c.status, c.status) }) : T("be.loaded", "Loaded."));
       });
     }).catch(function (e) { status($("saveStatus"), e.message, "err"); });
   }
 
   function save(asCopy) {
-    if (!state.img) { status($("saveStatus"), "Add an image first.", "err"); return Promise.reject(new Error("no image")); }
-    if (!$("nameEn").value.trim()) { status($("saveStatus"), "Give the badge an English name.", "err"); $("nameEn").focus(); return Promise.reject(new Error("no name")); }
+    if (!state.img) { status($("saveStatus"), T("be.need_image", "Add an image first."), "err"); return Promise.reject(new Error("no image")); }
+    if (!$("nameEn").value.trim()) { status($("saveStatus"), T("be.need_name", "Give the badge an English name."), "err"); $("nameEn").focus(); return Promise.reject(new Error("no name")); }
     var body = {
       kind: "badge", title: $("title").value, art: artDataURL(), source: state.source || "",
       spec: { names: names(), collision: state.collision, view: state.view }
@@ -341,11 +345,11 @@
     var req = !asCopy && editable
       ? api("creations/" + state.current.id, { method: "PUT", body: body })
       : api("creations", { method: "POST", body: body });
-    status($("saveStatus"), "Saving…");
+    status($("saveStatus"), T("be.saving", "Saving…"));
     return req.then(function (r) {
       state.current = { id: r.id, status: "draft" };
       state.dirty = false;
-      status($("saveStatus"), "Saved.", "ok");
+      status($("saveStatus"), T("be.saved", "Saved."), "ok");
       refreshList(); updateSubmit();
       return r;
     }).catch(function (e) { status($("saveStatus"), e.message, "err"); throw e; });
@@ -356,10 +360,10 @@
     var st = state.current && state.current.status;
     var b = $("submit");
     b.disabled = !state.loggedIn || st === "submitted" || st === "approved";
-    b.textContent = st === "submitted" ? "Waiting for review" : st === "approved" ? "Approved" : "Submit for review…";
+    b.textContent = st === "submitted" ? T("be.waiting", "Waiting for review") : st === "approved" ? T("be.st_approved", "Approved") : T("be.submit_review", "Submit for review…");
   }
   $("submit").onclick = function () {
-    if (!state.img) { status($("saveStatus"), "Add an image first.", "err"); return; }
+    if (!state.img) { status($("saveStatus"), T("be.need_image", "Add an image first."), "err"); return; }
     $("rules").hidden = false;
   };
   $("submitCancel").onclick = function () { $("rules").hidden = true; };
@@ -372,14 +376,14 @@
       return api("creations/" + c.id + "/submit", { method: "POST", body: {} });
     }).then(function () {
       state.current.status = "submitted";
-      status($("saveStatus"), "Submitted — you'll see the review result in “My creations”.", "ok");
+      status($("saveStatus"), T("be.submitted", "Submitted — you'll see the review result in “My creations”."), "ok");
       refreshList(); updateSubmit();
     }).catch(function (e) { status($("saveStatus"), e.message, "err"); });
   };
   $("save").onclick = function () { save(false).catch(function () {}); };
   $("saveCopy").onclick = function () { save(true).catch(function () {}); };
   $("new").onclick = function () {
-    if (state.dirty && !confirm("Discard your unsaved changes?")) return;
+    if (state.dirty && !confirm(T("be.discard", "Discard your unsaved changes?"))) return;
     state.img = null; state.source = null; state.collision = null; state.shown = []; state.current = null; state.dirty = false;
     state.view = { x: 0, y: 0, zoom: 100, rot: 0 }; $("zoom").value = 100;
     setNames([]); $("title").value = "";
@@ -391,6 +395,9 @@
 
   window.addEventListener("beforeunload", function (e) { if (state.dirty) { e.preventDefault(); e.returnValue = ""; } });
 
-  render();
-  refreshAccount().catch(function () { $("account").textContent = ""; });
+  function start() {
+    render();
+    refreshAccount().catch(function () { $("account").textContent = ""; });
+  }
+  if (window.I18N) I18N.ready(start); else start();
 })();

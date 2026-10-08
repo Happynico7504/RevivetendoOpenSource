@@ -155,6 +155,10 @@ func formatHMS(d time.Duration) string {
 }
 
 var tmplFuncs = template.FuncMap{
+	// msgKey is the i18n key of a fixed ?msg= notice ("" when it has none).
+	"msgKey": func(msg string) string { return msgKeys[msg] },
+	// sportKey is the i18n key of a WSC sport name ("Bowling" -> "sport.bowling").
+	"sportKey":     func(name string) string { return "sport." + strings.ToLower(name) },
 	"wscKindLabel": wscKindLabel,
 	"add1":         func(i int) int { return i + 1 },
 	// connectedFor renders how long a connection established at the given unix
@@ -1035,6 +1039,7 @@ func fetchWSCStatus() WSCDashData {
 var wscTmpl = template.Must(template.New("wsc").Funcs(tmplFuncs).Parse(`<!DOCTYPE html>
 <html lang="en">
 <head>
+` + i18nScript + `
 <meta charset="utf-8">
 <title>WSC Dashboard — Inkay Relay Admin</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1054,82 +1059,82 @@ tr:last-child td{border-bottom:none}
 .mono{font-family:monospace;font-size:.85rem}
 </style>
 </head>
-<body>
-<h1>Wii Sports Club Dashboard</h1>
+<body data-i18n-page-title="wsc.title">
+<h1 data-i18n="wsc.h1">Wii Sports Club Dashboard</h1>
 <p style="margin-bottom:1.5rem">
-  <a href="/inkay/stats/" target="_blank">← Public stats</a> &nbsp;|&nbsp;
-  <a href="/wsc-public/nat/">NAT type guide</a> &nbsp;|&nbsp;
-  <a href="/wsc-public/overlay" target="_blank">Stream overlay</a>
+  <a href="/inkay/stats/" target="_blank" data-i18n="wsc.public_stats">← Public stats</a> &nbsp;|&nbsp;
+  <a href="/wsc-public/nat/" data-i18n="wsc.nat_guide">NAT type guide</a> &nbsp;|&nbsp;
+  <a href="/wsc-public/overlay" target="_blank" data-i18n="wsc.overlay">Stream overlay</a>
 </p>
 
 <div style="display:flex;align-items:center;gap:.6rem;margin-bottom:1.5rem;font-size:.9rem">
-  <span class="badge {{if .ServerUp}}on{{else}}off{{end}}">{{if .ServerUp}}Server online{{else}}Server unreachable{{end}}</span>
-  {{if .ServerUp}}<span style="color:#666">{{len .Players}} connected{{if .Gatherings}}, {{len .Gatherings}} gathering{{if gt (len .Gatherings) 1}}s{{end}}{{end}}</span>{{end}}
-  <span style="margin-left:auto;font-size:.8rem;color:#aaa" id="refresh-label">refreshes in 15s</span>
+  <span class="badge {{if .ServerUp}}on{{else}}off{{end}}">{{if .ServerUp}}<span data-i18n="wsc.up">Server online</span>{{else}}<span data-i18n="wsc.down">Server unreachable</span>{{end}}</span>
+  {{if .ServerUp}}<span style="color:#666"><span data-i18n="wsc.connected" data-i18n-args='{"n":{{len .Players}}}'>{{len .Players}} connected</span>{{if .Gatherings}}{{if gt (len .Gatherings) 1}}<span data-i18n="wsc.gatherings" data-i18n-args='{"n":{{len .Gatherings}}}'>, {{len .Gatherings}} gatherings</span>{{else}}<span data-i18n="wsc.gathering1">, 1 gathering</span>{{end}}{{end}}</span>{{end}}
+  <span style="margin-left:auto;font-size:.8rem;color:#aaa" id="refresh-label" data-i18n="my.refresh" data-i18n-args='{"n":15}'>refreshes in 15s</span>
 </div>
 
-<h2>Connected Players{{if .Players}} <span style="background:#dcfce7;color:#166534;border-radius:999px;padding:.1rem .5rem;font-size:.75rem;font-weight:700;vertical-align:middle">{{len .Players}}</span>{{end}}</h2>
+<h2><span data-i18n="wsc.players">Connected Players</span>{{if .Players}} <span style="background:#dcfce7;color:#166534;border-radius:999px;padding:.1rem .5rem;font-size:.75rem;font-weight:700;vertical-align:middle">{{len .Players}}</span>{{end}}</h2>
 {{if .Players}}
 <table>
-<tr><th>PNID</th><th>PID</th><th>Region</th><th>Connected</th><th>NAT</th></tr>
+<tr><th>PNID</th><th>PID</th><th data-i18n="wsc.region">Region</th><th data-i18n="wsc.connected_for">Connected</th><th>NAT</th></tr>
 {{range .Players}}
 <tr>
   <td>{{if .PNID}}<strong>@{{.PNID}}</strong>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
   <td class="mono">{{.PID}}</td>
   <td>{{if .Region}}<span class="badge" style="background:#e0e7ff;color:#3730a3">{{.Region}}</span>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
   <td class="mono"><span class="conn-time"{{if .ConnectedAt}} data-since="{{.ConnectedAt}}"{{end}}>{{connectedFor .ConnectedAt}}</span></td>
-  <td>{{if eq .NATm 1}}<span class="badge on">Open</span>{{else if eq .NATm 2}}<span class="badge" style="background:#fef9c3;color:#854d0e">Moderate</span>{{else if eq .NATm 3}}<span class="badge off">Strict</span>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
+  <td>{{if eq .NATm 1}}<span class="badge on" data-i18n="nat.open">Open</span>{{else if eq .NATm 2}}<span class="badge" style="background:#fef9c3;color:#854d0e" data-i18n="nat.moderate">Moderate</span>{{else if eq .NATm 3}}<span class="badge off" data-i18n="nat.strict">Strict</span>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
 </tr>
 {{end}}
 </table>
 {{else}}
-<p style="color:#aaa;font-size:.9rem;margin-top:0">No players connected.</p>
+<p style="color:#aaa;font-size:.9rem;margin-top:0" data-i18n="wsc.no_players">No players connected.</p>
 {{end}}
 
-<h2>Active Gatherings{{if .Gatherings}} <span style="background:#dcfce7;color:#166534;border-radius:999px;padding:.1rem .5rem;font-size:.75rem;font-weight:700;vertical-align:middle">{{len .Gatherings}}</span>{{end}}</h2>
+<h2><span data-i18n="wsc.gatherings_h">Active Gatherings</span>{{if .Gatherings}} <span style="background:#dcfce7;color:#166534;border-radius:999px;padding:.1rem .5rem;font-size:.75rem;font-weight:700;vertical-align:middle">{{len .Gatherings}}</span>{{end}}</h2>
 {{if .Gatherings}}
 <table>
-<tr><th>GID</th><th>Sport</th><th>Type</th><th>Host</th><th>Players</th><th>Capacity</th><th>Open</th></tr>
+<tr><th>GID</th><th data-i18n="wsc.sport">Sport</th><th data-i18n="wsc.type">Type</th><th data-i18n="wsc.host">Host</th><th data-i18n="wsc.col_players">Players</th><th data-i18n="wsc.capacity">Capacity</th><th data-i18n="wsc.col_open">Open</th></tr>
 {{range .Gatherings}}
 <tr>
   <td class="mono">{{.GID}}</td>
-  <td><span class="tag">{{.SportName}}</span></td>
-  <td><span class="kind {{.Kind}}">{{wscKindLabel .Kind}}</span>{{if .ClubName}}<br><span style="color:#666;font-size:.8rem">{{.ClubName}}</span>{{end}}</td>
+  <td><span class="tag" data-i18n="{{sportKey .SportName}}">{{.SportName}}</span></td>
+  <td><span class="kind {{.Kind}}" data-i18n="kind.{{.Kind}}">{{wscKindLabel .Kind}}</span>{{if .ClubName}}<br><span style="color:#666;font-size:.8rem">{{.ClubName}}</span>{{end}}</td>
   <td>{{if .HostPNID}}<strong>@{{.HostPNID}}</strong>{{else}}<span class="mono">{{.Host}}</span>{{end}}</td>
   <td>
     {{range .Players}}{{if .PNID}}@{{.PNID}}{{else}}<span class="mono">{{.PID}}</span>{{end}} {{end}}
   </td>
   <td class="mono">{{.PlayerCount}}/{{.MaxPlayers}}</td>
-  <td><span class="badge {{if .Open}}on{{else}}off{{end}}">{{if .Open}}open{{else}}full{{end}}</span></td>
+  <td><span class="badge {{if .Open}}on{{else}}off{{end}}">{{if .Open}}<span data-i18n="wsc.open">open</span>{{else}}<span data-i18n="wsc.full">full</span>{{end}}</span></td>
 </tr>
 {{end}}
 </table>
 {{else}}
-<p style="color:#aaa;font-size:.9rem;margin-top:0">No active gatherings.</p>
+<p style="color:#aaa;font-size:.9rem;margin-top:0" data-i18n="wsc.no_gatherings">No active gatherings.</p>
 {{end}}
 
-<h2>Matches (last 24 h){{if .Matches}} <span style="background:#dcfce7;color:#166534;border-radius:999px;padding:.1rem .5rem;font-size:.75rem;font-weight:700;vertical-align:middle">{{len .Matches}}</span>{{end}}</h2>
+<h2><span data-i18n="wsc.matches">Matches (last 24 h)</span>{{if .Matches}} <span style="background:#dcfce7;color:#166534;border-radius:999px;padding:.1rem .5rem;font-size:.75rem;font-weight:700;vertical-align:middle">{{len .Matches}}</span>{{end}}</h2>
 {{if .Matches}}
 <table>
-<tr><th>Time</th><th>Sport</th><th>Host</th><th>Players</th></tr>
+<tr><th data-i18n="stats.time">Time</th><th data-i18n="wsc.sport">Sport</th><th data-i18n="wsc.host">Host</th><th data-i18n="wsc.col_players">Players</th></tr>
 {{range .Matches}}
 <tr>
   <td class="mono" style="white-space:nowrap">{{localTime .StartedAt "match"}}</td>
-  <td><span class="tag">{{.SportName}}</span></td>
+  <td><span class="tag" data-i18n="{{sportKey .SportName}}">{{.SportName}}</span></td>
   <td>{{if .HostPNID}}<strong>@{{.HostPNID}}</strong>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
   <td>{{range .Players}}{{.}} {{end}}</td>
 </tr>
 {{end}}
 </table>
 {{else}}
-<p style="color:#aaa;font-size:.9rem;margin-top:0">No matches recorded yet.</p>
+<p style="color:#aaa;font-size:.9rem;margin-top:0" data-i18n="wsc.no_matches">No matches recorded yet.</p>
 {{end}}
 
-<h2>NAT Hall of Shame{{if .NatShame}} <span style="background:#fee2e2;color:#991b1b;border-radius:999px;padding:.1rem .5rem;font-size:.75rem;font-weight:700;vertical-align:middle">{{len .NatShame}}</span>{{end}}</h2>
+<h2><span data-i18n="wsc.shame">NAT Hall of Shame</span>{{if .NatShame}} <span style="background:#fee2e2;color:#991b1b;border-radius:999px;padding:.1rem .5rem;font-size:.75rem;font-weight:700;vertical-align:middle">{{len .NatShame}}</span>{{end}}</h2>
 {{if .NatShame}}
-<p style="color:#aaa;font-size:.85rem;margin-top:0">Players temporarily excluded from matchmaking after a failed NAT traversal attempt.</p>
+<p style="color:#aaa;font-size:.85rem;margin-top:0" data-i18n="wsc.shame_desc">Players temporarily excluded from matchmaking after a failed NAT traversal attempt.</p>
 <table>
-<tr><th>PNID</th><th>PID</th><th>Blocked Until</th></tr>
+<tr><th>PNID</th><th>PID</th><th data-i18n="wsc.blocked_until">Blocked Until</th></tr>
 {{range .NatShame}}
 <tr>
   <td>{{if .PNID}}<strong>@{{.PNID}}</strong>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
@@ -1139,7 +1144,7 @@ tr:last-child td{border-bottom:none}
 {{end}}
 </table>
 {{else}}
-<p style="color:#aaa;font-size:.9rem;margin-top:0">Nobody currently in the penalty box.</p>
+<p style="color:#aaa;font-size:.9rem;margin-top:0" data-i18n="wsc.no_shame">Nobody currently in the penalty box.</p>
 {{end}}
 
 <script>
@@ -1147,7 +1152,7 @@ var countdown = 15;
 function tick() {
   countdown--;
   if (countdown <= 0) { location.reload(); return; }
-  document.getElementById('refresh-label').textContent = 'refreshes in ' + countdown + 's';
+  document.getElementById('refresh-label').textContent = I18N.fill(I18N.t('my.refresh', 'refreshes in {n}s'), {n: countdown});
 }
 setInterval(tick, 1000);
 // Keep the per-player connection timers running between the 15s reloads.
@@ -1168,6 +1173,7 @@ setInterval(tickConn, 1000);
 var wscNATTmpl = template.Must(template.New("wsc-nat").Parse(`<!DOCTYPE html>
 <html lang="en">
 <head>
+` + i18nScript + `
 <meta charset="utf-8">
 <title>NAT Types — Wii Sports Club</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1195,62 +1201,62 @@ td:first-child{text-align:left;font-weight:600}
 .tip{background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;padding:.75rem 1rem;font-size:.875rem;color:#1e40af;margin-bottom:1rem}
 </style>
 </head>
-<body>
-<p><a href="/wsc-public/">← WSC Dashboard</a></p>
-<h1>NAT Types — Wii Sports Club</h1>
-<p>NAT (Network Address Translation) determines whether two players can establish a direct peer-to-peer connection for online play. The server matches players based on their NAT type to avoid failed connections.</p>
+<body data-i18n-page-title="nat.title">
+<p><a href="/wsc-public/" data-i18n="nat.back">← WSC Dashboard</a></p>
+<h1 data-i18n="nat.h1">NAT Types — Wii Sports Club</h1>
+<p data-i18n="nat.intro">NAT (Network Address Translation) determines whether two players can establish a direct peer-to-peer connection for online play. The server matches players based on their NAT type to avoid failed connections.</p>
 
-<h2>Your NAT Type</h2>
+<h2 data-i18n="nat.yours">Your NAT Type</h2>
 <div class="cards">
   <div class="card">
-    <span class="badge open">Open</span>
-    <h3>NAT Type 1 — Open</h3>
-    <p>Your router forwards traffic freely. You can connect with anyone. Best experience for online play.</p>
+    <span class="badge open" data-i18n="nat.open">Open</span>
+    <h3 data-i18n="nat.t1">NAT Type 1 — Open</h3>
+    <p data-i18n="nat.t1_desc">Your router forwards traffic freely. You can connect with anyone. Best experience for online play.</p>
   </div>
   <div class="card">
-    <span class="badge mod">Moderate</span>
-    <h3>NAT Type 2 — Moderate</h3>
-    <p>Your router filters by IP address. You can connect with Open and Moderate players. Works well for most matches.</p>
+    <span class="badge mod" data-i18n="nat.moderate">Moderate</span>
+    <h3 data-i18n="nat.t2">NAT Type 2 — Moderate</h3>
+    <p data-i18n="nat.t2_desc">Your router filters by IP address. You can connect with Open and Moderate players. Works well for most matches.</p>
   </div>
   <div class="card">
-    <span class="badge strict">Strict</span>
-    <h3>NAT Type 3 — Strict</h3>
-    <p>Your router uses symmetric NAT. Port numbers change with each connection, making hole-punching unreliable. You can only be matched with other Strict players, and even then the connection may fail.</p>
+    <span class="badge strict" data-i18n="nat.strict">Strict</span>
+    <h3 data-i18n="nat.t3">NAT Type 3 — Strict</h3>
+    <p data-i18n="nat.t3_desc">Your router uses symmetric NAT. Port numbers change with each connection, making hole-punching unreliable. You can only be matched with other Strict players, and even then the connection may fail.</p>
   </div>
 </div>
 
-<h2>Compatibility Table</h2>
+<h2 data-i18n="nat.table">Compatibility Table</h2>
 <table>
 <tr>
   <th></th>
-  <th><span class="badge open">Open</span></th>
-  <th><span class="badge mod">Moderate</span></th>
-  <th><span class="badge strict">Strict</span></th>
+  <th><span class="badge open" data-i18n="nat.open">Open</span></th>
+  <th><span class="badge mod" data-i18n="nat.moderate">Moderate</span></th>
+  <th><span class="badge strict" data-i18n="nat.strict">Strict</span></th>
 </tr>
 <tr>
-  <td><span class="badge open">Open</span></td>
-  <td class="yes">✓ Works</td>
-  <td class="yes">✓ Works</td>
-  <td class="no">✗ Blocked</td>
+  <td><span class="badge open" data-i18n="nat.open">Open</span></td>
+  <td class="yes" data-i18n="nat.works">✓ Works</td>
+  <td class="yes" data-i18n="nat.works">✓ Works</td>
+  <td class="no" data-i18n="nat.blocked">✗ Blocked</td>
 </tr>
 <tr>
-  <td><span class="badge mod">Moderate</span></td>
-  <td class="yes">✓ Works</td>
-  <td class="yes">✓ Works</td>
-  <td class="no">✗ Blocked</td>
+  <td><span class="badge mod" data-i18n="nat.moderate">Moderate</span></td>
+  <td class="yes" data-i18n="nat.works">✓ Works</td>
+  <td class="yes" data-i18n="nat.works">✓ Works</td>
+  <td class="no" data-i18n="nat.blocked">✗ Blocked</td>
 </tr>
 <tr>
-  <td><span class="badge strict">Strict</span></td>
-  <td class="no">✗ Blocked</td>
-  <td class="no">✗ Blocked</td>
-  <td class="maybe">~ May fail</td>
+  <td><span class="badge strict" data-i18n="nat.strict">Strict</span></td>
+  <td class="no" data-i18n="nat.blocked">✗ Blocked</td>
+  <td class="no" data-i18n="nat.blocked">✗ Blocked</td>
+  <td class="maybe" data-i18n="nat.may_fail">~ May fail</td>
 </tr>
 </table>
-<p style="font-size:.85rem;color:#666;margin-top:-.5rem">Strict↔Strict matches are allowed by the server but peer-to-peer connection may still fail depending on each player's router configuration.</p>
+<p style="font-size:.85rem;color:#666;margin-top:-.5rem" data-i18n="nat.strict_note">Strict↔Strict matches are allowed by the server but peer-to-peer connection may still fail depending on each player's router configuration.</p>
 
-<h2>How to Improve Your NAT Type</h2>
-<div class="tip">Enable UPnP on your router, or set up a port forward for UDP port 60015 pointed at your Wii U's local IP address. This typically changes a Strict NAT to Moderate or Open.</div>
-<p>Steps vary by router model — search for "<em>your router model</em> UPnP" or "<em>your router model</em> port forwarding" for instructions.</p>
+<h2 data-i18n="nat.improve">How to Improve Your NAT Type</h2>
+<div class="tip" data-i18n="nat.tip">Enable UPnP on your router, or set up a port forward for UDP port 60015 pointed at your Wii U's local IP address. This typically changes a Strict NAT to Moderate or Open.</div>
+<p data-i18n="nat.steps">Steps vary by router model — search for "<em>your router model</em> UPnP" or "<em>your router model</em> port forwarding" for instructions.</p>
 </body>
 </html>`))
 
@@ -1387,6 +1393,7 @@ func apiWSCPlayers(w http.ResponseWriter, r *http.Request) {
 const wscOverlayHTML = `<!DOCTYPE html>
 <html>
 <head>
+` + i18nScript + `
 <meta charset="utf-8">
 <title>WSC Overlay</title>
 <style>
@@ -1412,14 +1419,16 @@ body{background:transparent;font-family:'Segoe UI',Arial,sans-serif;padding:14px
 .setup p{margin-top:8px}
 </style>
 </head>
-<body>
+<body data-no-lang-select>
 <div id="overlay"></div>
 <script>
 var params=new URLSearchParams(location.search);
 var PNID=(params.get('pnid')||'').trim();
 
 if(!PNID){
-  document.getElementById('overlay').innerHTML='<div class="setup"><h2>WSC Stream Overlay</h2><p>Add your PNID to the URL to use this overlay:</p><p><code>'+location.href+(location.search?'&':'?')+'pnid=YourPNID</code></p><p>Then add this URL as a Browser Source in OBS with <strong>transparent background</strong>.</p></div>';
+  I18N.ready(function(){
+    document.getElementById('overlay').innerHTML='<div class="setup"><h2>'+I18N.t('ov.h2','WSC Stream Overlay')+'</h2><p>'+I18N.t('ov.add_pnid','Add your PNID to the URL to use this overlay:')+'</p><p><code>'+location.href+(location.search?'&':'?')+'pnid=YourPNID</code></p><p>'+I18N.t('ov.obs','Then add this URL as a Browser Source in OBS with <strong>transparent background</strong>.')+'</p></div>';
+  });
 }else{
   function render(data){
     var el=document.getElementById('overlay');
@@ -1434,19 +1443,19 @@ if(!PNID){
     (data.gatherings||[]).forEach(function(gg){
       (gg.players||[]).forEach(function(p){if((p.pnid||'').toLowerCase()===PNID.toLowerCase())g=gg;});
     });
-    if(!g){el.innerHTML='<div class="card"><span class="offline">Not in a session</span></div>';return;}
-    var badge=g.open?'<span class="badge open">Open</span>':'<span class="badge match">In Match</span>';
-    badge='<span class="badge kind '+(g.kind||'public')+'">'+(g.kind_label||'Public')+'</span>'+badge;
+    if(!g){el.innerHTML='<div class="card"><span class="offline">'+I18N.t('ov.no_session','Not in a session')+'</span></div>';return;}
+    var badge=g.open?'<span class="badge open">'+I18N.t('ov.open','Open')+'</span>':'<span class="badge match">'+I18N.t('ov.in_match','In Match')+'</span>';
+    badge='<span class="badge kind '+(g.kind||'public')+'">'+I18N.t('kind.'+(g.kind||'public'),g.kind_label||'Public')+'</span>'+badge;
     var rows=(g.players||[]).map(function(p){
       var you=(p.pnid||'').toLowerCase()===PNID.toLowerCase();
       var nm=p.mii_name||p.pnid||('PID:'+p.pid);
       var mii='<div class="mii"><img src="https://sos-de-fra-1.exo.io/olv-data/mii/'+p.pid+'/normal_face.png" onerror="this.style.display=\'none\'"></div>';
       return '<div class="player">'+mii+'<div><div class="name'+(you?' you':'')+'">'+(you?'&#9654; ':'')+nm+'</div>'+(p.pnid?'<div class="pnid">@'+p.pnid+'</div>':'')+'</div></div>';
     }).join('');
-    el.innerHTML='<div class="card"><div class="sport">'+g.sport_name+badge+'</div>'+rows+'</div>';
+    el.innerHTML='<div class="card"><div class="sport">'+I18N.t('sport.'+String(g.sport_name).toLowerCase(),g.sport_name)+badge+'</div>'+rows+'</div>';
   }
   function refresh(){fetch('/wsc-public/api/players').then(function(r){return r.json();}).then(render).catch(function(){});}
-  refresh();
+  I18N.ready(refresh);
   setInterval(refresh,5000);
 }
 </script>
@@ -1727,6 +1736,7 @@ func certRotationLoop() {
 var landingTmpl = template.Must(template.New("landing").Parse(`<!DOCTYPE html>
 <html lang="en">
 <head>
+` + i18nScript + `
 <meta charset="utf-8">
 <title>Pretendo Bridge</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1765,32 +1775,32 @@ tr:last-child td{border-bottom:none}
 <p class="sub">netcup-server.nicochristmann.net</p>
 <div class="cards">
   <a class="card" href="/inkay/stats/">
-    <h2>Stats</h2>
-    <p>Connected PIDs, request history, active redirects</p>
+    <h2 data-i18n="land.stats">Stats</h2>
+    <p data-i18n="land.stats_desc">Connected PIDs, request history, active redirects</p>
   </a>
   <a class="card" href="/inkay/my/">
-    <h2>My Status</h2>
-    <p>Your account, coins, friends, Discord link and web password — sign in with your PNID and web password</p>
+    <h2 data-i18n="land.my">My Status</h2>
+    <p data-i18n="land.my_desc">Your account, coins, friends, Discord link and web password — sign in with your PNID and web password</p>
   </a>
   <a class="card" href="/inkay/my/badge-arcade/">
-    <h2>Badge Editor</h2>
-    <p>Design your own Badge Arcade badges and submit them for the arcade — sign in with your PNID and web password</p>
+    <h2 data-i18n="land.badges">Badge Editor</h2>
+    <p data-i18n="land.badges_desc">Design your own Badge Arcade badges and submit them for the arcade — sign in with your PNID and web password</p>
   </a>
   <a class="card" href="/wsc-public/">
-    <h2>WSC Status and Players/Sessions</h2>
-    <p>Live Wii Sports Club players and active matchmaking sessions</p>
+    <h2 data-i18n="land.wsc">WSC Status and Players/Sessions</h2>
+    <p data-i18n="land.wsc_desc">Live Wii Sports Club players and active matchmaking sessions</p>
   </a>
   <a class="card" href="/inkay/admin/">
-    <h2>Admin</h2>
-    <p>Manage redirects — requires client certificate</p>
+    <h2 data-i18n="land.admin">Admin</h2>
+    <p data-i18n="land.admin_desc">Manage redirects — requires client certificate</p>
   </a>
 </div>
 <div class="api-list">
-  <h2>API</h2>
+  <h2 data-i18n="land.api">API</h2>
   <table>
-    <tr><th>Endpoint</th><th>Description</th></tr>
-    <tr><td>GET /inkay/api/stats</td><td>Stats as JSON</td></tr>
-    <tr><td>GET /inkay/api/redirects</td><td>Active redirects as JSON</td></tr>
+    <tr><th data-i18n="land.endpoint">Endpoint</th><th data-i18n="land.description">Description</th></tr>
+    <tr><td>GET /inkay/api/stats</td><td data-i18n="land.api_stats">Stats as JSON</td></tr>
+    <tr><td>GET /inkay/api/redirects</td><td data-i18n="land.api_redirects">Active redirects as JSON</td></tr>
   </table>
 </div>
 </body>
@@ -1812,6 +1822,7 @@ const siteHost = "https://netcup-server.nicochristmann.net"
 var statsTmpl = template.Must(template.New("stats").Funcs(tmplFuncs).Parse(`<!DOCTYPE html>
 <html lang="en">
 <head>
+` + i18nScript + `
 <meta charset="utf-8">
 <title>Inkay Relay — Stats</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1842,38 +1853,38 @@ h2{font-size:1rem;margin-bottom:.75rem;margin-top:2rem}
 .tag{display:inline-block;padding:.15rem .5rem;border-radius:4px;font-size:.75rem;background:#e0e7ff;color:#3730a3;font-family:monospace}
 </style>
 </head>
-<body>
+<body data-i18n-page-title="stats.title">
 <h1>Inkay Relay</h1>
 <div class="cards">
-  <div class="card"><div class="num">{{.Stats.TotalPIDs}}</div><div class="label">Unique players</div></div>
-  <div class="card"><div class="num">{{.Stats.TotalRequests}}</div><div class="label">Total requests</div></div>
-  <div class="card"><div class="num">{{.Stats.Requests24h}}</div><div class="label">Last 24h</div></div>
-  <div class="card"><div class="num">{{.Stats.ActiveRedirects}}</div><div class="label">Active servers</div></div>
+  <div class="card"><div class="num">{{.Stats.TotalPIDs}}</div><div class="label" data-i18n="stats.players">Unique players</div></div>
+  <div class="card"><div class="num">{{.Stats.TotalRequests}}</div><div class="label" data-i18n="stats.total">Total requests</div></div>
+  <div class="card"><div class="num">{{.Stats.Requests24h}}</div><div class="label" data-i18n="stats.last24h">Last 24h</div></div>
+  <div class="card"><div class="num">{{.Stats.ActiveRedirects}}</div><div class="label" data-i18n="stats.servers">Active servers</div></div>
 </div>
 
-<h2>Banned players</h2>
+<h2 data-i18n="stats.banned">Banned players</h2>
 <table>
-<tr><th>PNID</th><th>Reason</th><th>Banned</th></tr>
+<tr><th>PNID</th><th data-i18n="stats.reason">Reason</th><th data-i18n="stats.banned_on">Banned</th></tr>
 {{range .Bans}}
 <tr>
   <td>{{if .PNID}}<strong>{{.PNID}}</strong>{{else}}<span style="font-family:monospace;color:#999;font-size:.85rem">{{.PID}}</span>{{end}}</td>
   <td>{{if .Reason}}{{.Reason}}{{else}}<span style="color:#aaa">—</span>{{end}}</td>
   <td style="font-size:.85rem;color:#666">{{.CreatedAt.Format "2006-01-02"}}</td>
 </tr>
-{{else}}<tr><td colspan="3" style="color:#aaa">No banned players</td></tr>
+{{else}}<tr><td colspan="3" style="color:#aaa" data-i18n="stats.no_bans">No banned players</td></tr>
 {{end}}
 </table>
 
-<h2>Recent requests</h2>
+<h2 data-i18n="stats.recent">Recent requests</h2>
 <table>
-<tr><th>PNID</th><th>Game</th><th>Time</th></tr>
+<tr><th>PNID</th><th data-i18n="stats.game">Game</th><th data-i18n="stats.time">Time</th></tr>
 {{range .Recent}}
 <tr>
   <td>{{if .PNID}}<strong>{{.PNID}}</strong>{{else}}<span style="font-family:monospace;color:#999;font-size:.85rem">{{.PID}}</span>{{end}}</td>
   <td><span class="tag">{{gameTitleFull .GameServerID}}</span></td>
   <td style="font-size:.85rem;color:#666">{{localTime .RequestedAt "datetime-sec"}}</td>
 </tr>
-{{else}}<tr><td colspan="3" style="color:#aaa">No requests yet</td></tr>
+{{else}}<tr><td colspan="3" style="color:#aaa" data-i18n="stats.no_requests">No requests yet</td></tr>
 {{end}}
 </table>
 ` + localTimeScript + `
@@ -3892,8 +3903,36 @@ type myFriendEntry struct {
 }
 
 type myLoginData struct {
-	Error string
-	PNID  string
+	Error     string
+	ErrorKey  string // i18n key of Error (translated in the browser)
+	ErrorArgs string // JSON values for the key's {placeholders}
+	HelpLink  string // shown under Error, e.g. the website's web password page
+	HelpText  string
+	HelpKey   string
+	PNID      string
+}
+
+// loginError is a login failure message with its i18n key.
+type loginError struct {
+	text, key, args string
+}
+
+var (
+	errLoginRequired  = loginError{"PNID and password are required.", "err.required", ""}
+	errLoginCase      = loginError{pnidCaseMismatchMessage, "err.case", ""}
+	errLoginNotOn     = loginError{pnidNotOnRevivetendoMessage, "err.not_on", ""}
+	errLoginNoPw      = loginError{"No web password is set for this account yet.", "err.no_password", ""}
+	errLoginIncorrect = loginError{"Incorrect password.", "err.incorrect", ""}
+	errLoginNoAccount = loginError{"Account not found in local database.", "err.no_account", ""}
+)
+
+// lockoutLoginError is webLockoutMessage with its i18n key and minutes.
+func lockoutLoginError(left time.Duration) loginError {
+	m := int(left.Round(time.Minute) / time.Minute)
+	if m <= 1 {
+		return loginError{webLockoutMessage(left), "err.locked1", ""}
+	}
+	return loginError{webLockoutMessage(left), "err.locked", fmt.Sprintf(`{"n":%d}`, m)}
 }
 
 type myStatusData struct {
@@ -3916,9 +3955,10 @@ type myStatusData struct {
 
 // --- Discord Link page ---
 
-var myDiscordTmpl = template.Must(template.New("my-discord").Parse(`<!DOCTYPE html>
+var myDiscordTmpl = template.Must(template.New("my-discord").Funcs(tmplFuncs).Parse(`<!DOCTYPE html>
 <html lang="en">
 <head>
+` + i18nScript + `
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Discord Link — Revivetendo</title>
@@ -3946,36 +3986,36 @@ h1{font-size:1.4rem;margin-bottom:.5rem}
 .presence .btn{margin-top:.8rem}
 </style>
 </head>
-<body>
+<body data-i18n-page-title="disc.title">
 <div class="card">
-  <h1>Discord Link</h1>
-  <p class="sub">Link your PNID to Discord to reset your web password from the bot, and (with a Wii U) to receive WiiU Chat call notifications via DM.</p>
-  {{if .Msg}}<div class="msg">{{.Msg}}</div>{{end}}
+  <h1 data-i18n="disc.h1">Discord Link</h1>
+  <p class="sub" data-i18n="disc.sub">Link your PNID to Discord to reset your web password from the bot, and (with a Wii U) to receive WiiU Chat call notifications via DM.</p>
+  {{if .Msg}}<div class="msg"{{with msgKey .Msg}} data-i18n="{{.}}"{{end}}>{{.Msg}}</div>{{end}}
   {{if .LinkedDiscordID}}
-  <div class="linked">✅ Your account is linked to Discord user ID <strong>{{.LinkedDiscordID}}</strong>.</div>
+  <div class="linked">✅ <span data-i18n="disc.linked">Your account is linked to Discord user ID</span> <strong>{{.LinkedDiscordID}}</strong></div>
   {{if .PresenceConfigured}}
   <div class="presence">
-    <h2>Rich Presence</h2>
+    <h2 data-i18n="disc.rp">Rich Presence</h2>
     {{if .PresenceOn}}
-    <p>On: while your console is online on Revivetendo, your Discord profile shows the game you're playing.</p>
-    <form method="post" action="/inkay/my/discord/presence/unlink"><button class="btn-sm" type="submit">Turn off</button></form>
+    <p data-i18n="disc.rp_on">On: while your console is online on Revivetendo, your Discord profile shows the game you're playing.</p>
+    <form method="post" action="/inkay/my/discord/presence/unlink"><button class="btn-sm" type="submit" data-i18n="disc.rp_turn_off">Turn off</button></form>
     {{else}}
-    <p>Show the game you're playing on Revivetendo on your Discord profile. Sign in to Discord with the account linked above.</p>
-    <form method="post" action="/inkay/my/discord/presence/start"><button class="btn" type="submit">Turn on Rich Presence</button></form>
+    <p data-i18n="disc.rp_off">Show the game you're playing on Revivetendo on your Discord profile. Sign in to Discord with the account linked above.</p>
+    <form method="post" action="/inkay/my/discord/presence/start"><button class="btn" type="submit" data-i18n="disc.rp_turn_on">Turn on Rich Presence</button></form>
     {{end}}
   </div>
   {{end}}
   {{end}}
-  <p style="color:#a1a1aa;font-size:.88rem;margin-bottom:.8rem">Signed in as <strong>{{.PNID}}</strong></p>
+  <p style="color:#a1a1aa;font-size:.88rem;margin-bottom:.8rem"><span data-i18n="disc.signed_in">Signed in as</span> <strong>{{.PNID}}</strong></p>
   <div class="code-box">{{.Code}}</div>
-  <p class="expiry">Expires in {{.ExpiresIn}} · <a href="/inkay/my/discord" style="color:#a78bfa">Refresh</a></p>
+  <p class="expiry"><span data-i18n="disc.expires">Expires in</span> {{.ExpiresIn}} · <a href="/inkay/my/discord" style="color:#a78bfa" data-i18n="disc.refresh">Refresh</a></p>
   <ol class="steps">
-    <li>Join the Revivetendo Discord server</li>
-    <li>Run the slash command:<br><code>/link_pnid {{.Code}}</code></li>
-    <li>Done! You can now use <code>/reset_web_password</code>, and Wii U owners get call notifications as Discord DMs.</li>
+    <li data-i18n="disc.step1">Join the Revivetendo Discord server</li>
+    <li><span data-i18n="disc.step2">Run the slash command:</span><br><code>/link_pnid {{.Code}}</code></li>
+    <li data-i18n="disc.step3">Done! You can now use <code>/reset_web_password</code>, and Wii U owners get call notifications as Discord DMs.</li>
   </ol>
-  <a class="btn-sm" href="/inkay/my/">← Back to My Status</a>
-  <a class="btn-sm" href="/inkay/my/logout" style="margin-left:.4rem">Sign out</a>
+  <a class="btn-sm" href="/inkay/my/" data-i18n="nav.back_my">← Back to My Status</a>
+  <a class="btn-sm" href="/inkay/my/logout" style="margin-left:.4rem" data-i18n="nav.signout">Sign out</a>
 </div>
 </body>
 </html>`))
@@ -4053,6 +4093,7 @@ func myDiscordHandler(w http.ResponseWriter, r *http.Request) {
 var myLoginTmpl = template.Must(template.New("my-login").Parse(`<!DOCTYPE html>
 <html lang="en">
 <head>
+` + i18nScript + `
 <meta charset="utf-8">
 <title>My Status — Pretendo Bridge</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -4069,25 +4110,26 @@ button.submit:hover{background:#4f46e5}
 .hint{font-size:.8rem;color:#888;margin-top:2rem;text-align:center}
 </style>
 </head>
-<body>
-<p><a href="/">← Back</a></p>
-<h1>My Status</h1>
-<p class="sub">Sign in with your PNID and web password.</p>
-{{if .Error}}<div class="error">{{.Error}}</div>{{end}}
+<body data-i18n-page-title="login.title">
+<p><a href="/" data-i18n="common.back">← Back</a></p>
+<h1 data-i18n="land.my">My Status</h1>
+<p class="sub" data-i18n="login.sub">Sign in with your PNID and web password.</p>
+{{if .Error}}<div class="error"><span data-i18n="{{.ErrorKey}}"{{if .ErrorArgs}} data-i18n-args="{{.ErrorArgs}}"{{end}}>{{.Error}}</span>{{if .HelpLink}}<br><a href="{{.HelpLink}}" data-i18n="{{.HelpKey}}">{{.HelpText}}</a>{{end}}</div>{{end}}
 <form method="post" action="/inkay/my/login">
   <label for="pnid">PNID</label>
   <input id="pnid" type="text" name="pnid" autocomplete="username" value="{{.PNID}}" required>
-  <label for="password">Web Password</label>
+  <label for="password" data-i18n="login.password">Web Password</label>
   <input id="password" type="password" name="password" autocomplete="current-password" required>
-  <button class="submit" type="submit">Sign in</button>
+  <button class="submit" type="submit" data-i18n="login.submit">Sign in</button>
 </form>
-<p class="hint">Set your web password in the Juxt console portal.</p>
+<p class="hint" data-i18n="login.hint">No web password yet? <a href="https://revivetendo.nicochristmann.net/web-password.html">Here is how to set one</a>.</p>
 </body>
 </html>`))
 
 var myStatusTmpl = template.Must(template.New("my-status").Funcs(tmplFuncs).Parse(`<!DOCTYPE html>
 <html lang="en">
 <head>
+` + i18nScript + `
 <meta charset="utf-8">
 <title>My Status — Pretendo Bridge</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -4121,22 +4163,22 @@ button.logout-btn{background:none;border:none;color:#dc2626;font-size:.875rem;cu
 .btn-verify:hover{background:#4f46e5}
 </style>
 </head>
-<body>
-<div class="nav">
-  <a href="/">← Back</a>
+<body data-i18n-page-title="my.title">
+<div class="nav" data-lang-slot>
+  <a href="/" data-i18n="common.back">← Back</a>
   <span style="color:#d1d5db">|</span>
-  <a href="/inkay/my/patreon">🪙 Coins &amp; Patreon</a>
+  <a href="/inkay/my/patreon" data-i18n="nav.coins">🪙 Coins &amp; Patreon</a>
   <span style="color:#d1d5db">|</span>
-  <a href="/inkay/my/account">Account</a>
+  <a href="/inkay/my/account" data-i18n="nav.account">Account</a>
   <span style="color:#d1d5db">|</span>
   <a href="/inkay/my/discord">Discord{{if .DiscordLinked}} ✓{{end}}</a>
   <span style="color:#d1d5db">|</span>
   <form class="logout-form" method="post" action="/inkay/my/logout">
-    <button class="logout-btn" type="submit">Sign out</button>
+    <button class="logout-btn" type="submit" data-i18n="nav.signout">Sign out</button>
   </form>
-  {{if .ShowWiiU}}<span class="refresh" id="refresh-label">refreshes in 30s</span>{{end}}
+  {{if .ShowWiiU}}<span class="refresh" id="refresh-label" data-i18n="my.refresh" data-i18n-args='{"n":30}'>refreshes in 30s</span>{{end}}
 </div>
-<h1>My Status</h1>
+<h1 data-i18n="land.my">My Status</h1>
 <div class="me">
   <img class="mii" src="https://sos-de-fra-1.exo.io/olv-data/mii/{{.PID}}/normal_face.png" alt="" onerror="this.style.display='none'">
   <div class="me-info">
@@ -4145,7 +4187,7 @@ button.logout-btn{background:none;border:none;color:#dc2626;font-size:.875rem;cu
     {{if .ShowWiiU}}
     <div class="status-line">
       <span class="dot {{if .IsOnline}}dot-on{{else}}dot-off{{end}}"></span>
-      {{if .IsOnline}}Online{{with resolveGameName .TitleID .GameServerHex}} · <span class="game">{{.}}</span>{{end}}{{else}}Offline{{end}}
+      {{if .IsOnline}}<span data-i18n="my.online">Online</span>{{with resolveGameName .TitleID .GameServerHex}} · <span class="game">{{.}}</span>{{end}}{{else}}<span data-i18n="my.offline">Offline</span>{{end}}
     </div>
     {{end}}
   </div>
@@ -4154,15 +4196,15 @@ button.logout-btn{background:none;border:none;color:#dc2626;font-size:.875rem;cu
 <div class="me">
   <div class="me-info">
     <div class="me-name">{{.WalletBalance}} RevivetendoCoin</div>
-    <div class="me-pnid">Badge Arcade wallet · <a href="/inkay/my/patreon">manage coins</a></div>
+    <div class="me-pnid" data-i18n="my.wallet">Badge Arcade wallet · <a href="/inkay/my/patreon">manage coins</a></div>
   </div>
 </div>
 {{end}}
 {{if .ShowWiiU}}
-<h2>Friends ({{len .Friends}})</h2>
+<h2><span data-i18n="my.friends">Friends</span> ({{len .Friends}})</h2>
 {{if .Friends}}
 <table>
-<tr><th></th><th>Name</th><th>PNID</th><th>Status</th><th>Game</th><th>Last Online</th></tr>
+<tr><th></th><th data-i18n="my.col_name">Name</th><th>PNID</th><th data-i18n="my.col_status">Status</th><th data-i18n="stats.game">Game</th><th data-i18n="my.col_last">Last Online</th></tr>
 {{range .Friends}}
 <tr>
   <td style="width:38px;padding-right:0">
@@ -4170,20 +4212,20 @@ button.logout-btn{background:none;border:none;color:#dc2626;font-size:.875rem;cu
   </td>
   <td>{{if .MiiName}}{{.MiiName}}{{else}}<span style="color:#aaa">—</span>{{end}}</td>
   <td style="font-size:.8rem;color:#888">@{{.PNID}}</td>
-  <td>{{if .IsOnline}}<span class="badge-on">Online</span>{{else}}<span class="badge-off">Offline</span>{{end}}</td>
+  <td>{{if .IsOnline}}<span class="badge-on" data-i18n="my.online">Online</span>{{else}}<span class="badge-off" data-i18n="my.offline">Offline</span>{{end}}</td>
   <td style="font-size:.85rem">{{with resolveGameName .TitleID .GameServerHex}}{{.}}{{else}}<span style="color:#aaa">—</span>{{end}}</td>
   <td style="font-size:.8rem;color:#aaa">{{if .LastOnline.Valid}}{{localTime .LastOnline.Time "match"}}{{else}}—{{end}}</td>
 </tr>
 {{end}}
 </table>
-{{else}}<p class="empty">No friends yet.</p>{{end}}
+{{else}}<p class="empty" data-i18n="my.no_friends">No friends yet.</p>{{end}}
 {{end}}
 {{if .ShowWiiU}}<script>
 var countdown = 30;
 function tick() {
   countdown--;
   if (countdown <= 0) { location.reload(); return; }
-  document.getElementById('refresh-label').textContent = 'refreshes in ' + countdown + 's';
+  document.getElementById('refresh-label').textContent = I18N.fill(I18N.t('my.refresh', 'refreshes in {n}s'), {n: countdown});
 }
 setInterval(tick, 1000);
 </script>{{end}}
@@ -4304,31 +4346,56 @@ func myLoginHandler(w http.ResponseWriter, r *http.Request) {
 	pnid := strings.TrimSpace(r.FormValue("pnid"))
 	password := r.FormValue("password")
 
-	fail := func(msg string) {
+	render := func(d myLoginData) {
+		d.PNID = pnid
 		w.Header().Set("Content-Type", "text/html")
-		myLoginTmpl.Execute(w, myLoginData{Error: msg, PNID: pnid})
+		myLoginTmpl.Execute(w, d)
+	}
+	fail := func(e loginError) {
+		render(myLoginData{Error: e.text, ErrorKey: e.key, ErrorArgs: e.args})
 	}
 
 	if pnid == "" || password == "" {
-		fail("PNID and password are required.")
+		fail(errLoginRequired)
 		return
 	}
 
+	if left := webPasswordLocked(pnid); left > 0 {
+		fail(lockoutLoginError(left))
+		return
+	}
+
+	if canonicalPNID(pnid) != pnid {
+		fail(errLoginCase)
+		return
+	}
 	storedHash := webPasswordHash(pnid)
 	if storedHash == "" {
-		fail("Invalid PNID or no web password set.")
+		if !pnidOnRevivetendo(pnid) {
+			render(myLoginData{Error: errLoginNotOn.text, ErrorKey: errLoginNotOn.key,
+				HelpLink: revivetendoGuideURL, HelpText: "How to connect to Revivetendo", HelpKey: "help.connect"})
+			return
+		}
+		render(myLoginData{Error: errLoginNoPw.text, ErrorKey: errLoginNoPw.key,
+			HelpLink: webPasswordHelpURL, HelpText: "How to set your web password", HelpKey: "help.webpw"})
 		return
 	}
 
 	h := sha256.Sum256([]byte(password))
 	if hex.EncodeToString(h[:]) != storedHash {
-		fail("Incorrect password.")
+		if webPasswordFailed(pnid) {
+			log.Printf("[my] %q locked for %s after %d wrong web passwords", pnid, webPasswordLockout, webPasswordMaxFails)
+			fail(lockoutLoginError(webPasswordLockout))
+			return
+		}
+		fail(errLoginIncorrect)
 		return
 	}
+	webPasswordSucceeded(pnid)
 
 	pid, err := pidForPNID(pnid)
 	if err != nil || pid == 0 {
-		fail("Account not found in local database.")
+		fail(errLoginNoAccount)
 		return
 	}
 
@@ -4365,6 +4432,7 @@ func myLogoutHandler(w http.ResponseWriter, r *http.Request) {
 var myAccountTmpl = template.Must(template.New("my-account").Parse(`<!DOCTYPE html>
 <html lang="en">
 <head>
+` + i18nScript + `
 <meta charset="utf-8">
 <title>My Account — Pretendo Bridge</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -4384,25 +4452,25 @@ button.submit{margin-top:1.5rem;width:100%;background:#6366f1;color:#fff;border:
 button.submit:hover{background:#4f46e5}
 </style>
 </head>
-<body>
-<div class="nav">
-  <a href="/inkay/my/">← Back to My Status</a>
+<body data-i18n-page-title="acct.title">
+<div class="nav" data-lang-slot>
+  <a href="/inkay/my/" data-i18n="nav.back_my">← Back to My Status</a>
   <span style="color:#d1d5db">|</span>
   <form class="logout-form" method="post" action="/inkay/my/logout">
-    <button class="logout-btn" type="submit">Sign out</button>
+    <button class="logout-btn" type="submit" data-i18n="nav.signout">Sign out</button>
   </form>
 </div>
-<h1>My Account</h1>
-{{if .Error}}<div class="error">{{.Error}}</div>{{end}}
-{{if .Success}}<div class="success">{{.Success}}</div>{{end}}
+<h1 data-i18n="acct.h1">My Account</h1>
+{{if .Error}}<div class="error" data-i18n="{{.Key}}">{{.Error}}</div>{{end}}
+{{if .Success}}<div class="success" data-i18n="{{.Key}}">{{.Success}}</div>{{end}}
 <form method="post" action="/inkay/my/account">
-  <label for="current_password">Current Web Password</label>
+  <label for="current_password" data-i18n="acct.current">Current Web Password</label>
   <input id="current_password" type="password" name="current_password" autocomplete="current-password" required>
-  <label for="new_password">New Web Password</label>
+  <label for="new_password" data-i18n="acct.new">New Web Password</label>
   <input id="new_password" type="password" name="new_password" autocomplete="new-password" minlength="8" required>
-  <label for="confirm_password">Confirm New Password</label>
+  <label for="confirm_password" data-i18n="acct.confirm">Confirm New Password</label>
   <input id="confirm_password" type="password" name="confirm_password" autocomplete="new-password" minlength="8" required>
-  <button class="submit" type="submit">Change Password</button>
+  <button class="submit" type="submit" data-i18n="acct.submit">Change Password</button>
 </form>
 </body>
 </html>`))
@@ -4410,6 +4478,7 @@ button.submit:hover{background:#4f46e5}
 type myAccountData struct {
 	Error   string
 	Success string
+	Key     string // i18n key of Error or Success
 }
 
 func myAccountHandler(w http.ResponseWriter, r *http.Request) {
@@ -4428,7 +4497,7 @@ func myAccountHandler(w http.ResponseWriter, r *http.Request) {
 
 	pnid, err := pnidForPID(pid)
 	if err != nil || pnid == "" {
-		myAccountTmpl.Execute(w, myAccountData{Error: "Could not resolve your account, try signing in again."})
+		myAccountTmpl.Execute(w, myAccountData{Error: "Could not resolve your account, try signing in again.", Key: "acct.err_resolve"})
 		return
 	}
 
@@ -4438,34 +4507,34 @@ func myAccountHandler(w http.ResponseWriter, r *http.Request) {
 
 	storedHash := webPasswordHash(pnid)
 	if storedHash == "" {
-		myAccountTmpl.Execute(w, myAccountData{Error: "No web password set for this account."})
+		myAccountTmpl.Execute(w, myAccountData{Error: "No web password set for this account.", Key: "acct.err_nopw"})
 		return
 	}
 
 	currentHash := sha256.Sum256([]byte(current))
 	if hex.EncodeToString(currentHash[:]) != storedHash {
-		myAccountTmpl.Execute(w, myAccountData{Error: "Current password is incorrect."})
+		myAccountTmpl.Execute(w, myAccountData{Error: "Current password is incorrect.", Key: "acct.err_current"})
 		return
 	}
 
 	if len(newPassword) < 8 {
-		myAccountTmpl.Execute(w, myAccountData{Error: "New password must be at least 8 characters."})
+		myAccountTmpl.Execute(w, myAccountData{Error: "New password must be at least 8 characters.", Key: "acct.err_short"})
 		return
 	}
 	if newPassword != confirm {
-		myAccountTmpl.Execute(w, myAccountData{Error: "New passwords do not match."})
+		myAccountTmpl.Execute(w, myAccountData{Error: "New passwords do not match.", Key: "acct.err_match"})
 		return
 	}
 
 	newHash := sha256.Sum256([]byte(newPassword))
 	if err := setWebPasswordHash(pnid, hex.EncodeToString(newHash[:])); err != nil {
 		log.Printf("myAccountHandler: db error updating password for %q: %v", pnid, err)
-		myAccountTmpl.Execute(w, myAccountData{Error: "Failed to update password, try again later."})
+		myAccountTmpl.Execute(w, myAccountData{Error: "Failed to update password, try again later.", Key: "acct.err_failed"})
 		return
 	}
 
 	log.Printf("myAccountHandler: web password changed for %q (PID %d)", pnid, pid)
-	myAccountTmpl.Execute(w, myAccountData{Success: "Password updated."})
+	myAccountTmpl.Execute(w, myAccountData{Success: "Password updated.", Key: "acct.ok"})
 }
 
 // ──────────────────────────────────────────────

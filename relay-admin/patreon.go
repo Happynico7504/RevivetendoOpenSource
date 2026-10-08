@@ -348,6 +348,7 @@ func myPatreonUnlink(w http.ResponseWriter, r *http.Request) {
 var myPatreonTmpl = template.Must(template.New("my-patreon").Funcs(tmplFuncs).Parse(`<!DOCTYPE html>
 <html lang="en">
 <head>
+` + i18nScript + `
 <meta charset="utf-8">
 <title>Coins &amp; Patreon — Pretendo Bridge</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -366,34 +367,34 @@ td{padding:.35rem .5rem;border-bottom:1px solid #f4f4f5}
 .pos{color:#166534}.neg{color:#b91c1c}.muted{color:#888;font-size:.85rem}
 </style>
 </head>
-<body>
-<p><a href="/inkay/my/">← Back</a></p>
-<h1>Coins &amp; Patreon</h1>
-{{if .Msg}}<div class="msg">{{.Msg}}</div>{{end}}
+<body data-i18n-page-title="pt.title">
+<p><a href="/inkay/my/" data-i18n="common.back">← Back</a></p>
+<h1 data-i18n="pt.h1">Coins &amp; Patreon</h1>
+{{if .Msg}}<div class="msg"{{with msgKey .Msg}} data-i18n="{{.}}"{{end}}>{{.Msg}}</div>{{end}}
 <div class="box">
   <div class="muted">@{{.PNID}}</div>
   <div class="big">{{if .HasWallet}}{{.Balance}}{{else}}—{{end}} <span style="font-size:1rem;font-weight:400">RevivetendoCoin</span></div>
-  <div class="muted">One "5 Runden" pack in Badge Arcade costs 1 coin. Everyone gets 1 free coin per day while under 500.</div>
+  <div class="muted" data-i18n="pt.rules">One "5 Runden" pack in Badge Arcade costs 1 coin. Everyone gets 1 free coin per day while under 500.</div>
 </div>
 
 <h2>Patreon</h2>
 <div class="box">
 {{if not .Configured}}
-  <p style="margin:0">Patreon linking isn't set up yet.</p>
+  <p style="margin:0" data-i18n="pt.not_setup">Patreon linking isn't set up yet.</p>
 {{else if .Linked}}
-  <p style="margin:0 0 .6rem">Linked to Patreon account <strong>{{if .PatreonName}}{{.PatreonName}}{{else}}(name hidden){{end}}</strong>.</p>
-  <p class="muted" style="margin:0 0 .8rem">{{if .Crediting}}Each successful monthly payment adds coins to your wallet automatically.{{else}}Automatic crediting isn't switched on yet.{{end}}</p>
-  <form method="post" action="/inkay/my/patreon/unlink" onsubmit="return confirm('Unlink this Patreon account?')"><button class="ghost" type="submit">Unlink</button></form>
+  <p style="margin:0 0 .6rem"><span data-i18n="pt.linked">Linked to Patreon account</span> <strong>{{if .PatreonName}}{{.PatreonName}}{{else}}<span data-i18n="pt.name_hidden">(name hidden)</span>{{end}}</strong></p>
+  <p class="muted" style="margin:0 0 .8rem">{{if .Crediting}}<span data-i18n="pt.crediting">Each successful monthly payment adds coins to your wallet automatically.</span>{{else}}<span data-i18n="pt.not_crediting">Automatic crediting isn't switched on yet.</span>{{end}}</p>
+  <form method="post" action="/inkay/my/patreon/unlink" onsubmit="return confirm(I18N.t('pt.confirm', 'Unlink this Patreon account?'))"><button class="ghost" type="submit" data-i18n="pt.unlink">Unlink</button></form>
 {{else}}
-  <p style="margin:0 0 .8rem">Link your Patreon account to receive coins automatically when you support us. Use the Patreon account you pay with.</p>
-  <form method="post" action="/inkay/my/patreon/start"><button type="submit">Link Patreon</button></form>
+  <p style="margin:0 0 .8rem" data-i18n="pt.intro">Link your Patreon account to receive coins automatically when you support us. Use the Patreon account you pay with.</p>
+  <form method="post" action="/inkay/my/patreon/start"><button type="submit" data-i18n="pt.link">Link Patreon</button></form>
 {{end}}
 </div>
 
 {{if .History}}
-<h2>Recent coin activity</h2>
+<h2 data-i18n="pt.history">Recent coin activity</h2>
 <table>
-<tr><th>When</th><th>Change</th><th>Balance</th><th>Reason</th></tr>
+<tr><th data-i18n="pt.when">When</th><th data-i18n="pt.change">Change</th><th data-i18n="pt.balance">Balance</th><th data-i18n="stats.reason">Reason</th></tr>
 {{range .History}}
 <tr><td class="muted">{{localTime .CreatedAt "datetime"}}</td>
 <td>{{if gt .Delta 0}}<span class="pos">+{{.Delta}}</span>{{else}}<span class="neg">{{.Delta}}</span>{{end}}</td>
