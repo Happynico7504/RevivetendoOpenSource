@@ -142,3 +142,12 @@ func TestP2PHardToReachConsoleInOneRegion(t *testing.T) {
 		t.Fatal("parse nat")
 	}
 }
+
+func TestP2PUnknownRegionsPreferTheMain(t *testing.T) {
+	fr := &fakeRelayP2P{}
+	r := newP2PRouter(t, "*", fr)
+	res, err := r.Open(context.Background(), P2PRequest{Key: "a", Stations: []relaylink.P2PStation{st(1, "192.0.2.1"), st(2, "192.0.2.2")}})
+	if err != nil || res.Instance != MainInstance || len(fr.calls) != 0 {
+		t.Fatalf("%+v %v calls=%v", res, err, fr.calls)
+	}
+}

@@ -191,7 +191,7 @@ type p2pCandidate struct {
 
 // candidates lists where the tunnel could run, best first: an instance in the region of as many
 // consoles as possible, then one in the host's region, then the relay with the fastest link to
-// the main, the main last. A tunnel in a console's own region keeps that console's leg short; for
+// the main, the main last (first if no console's region is known). A tunnel in a console's own region keeps that console's leg short; for
 // an international pair either end is roughly on the path, and the host's region wins the tie.
 func (r *P2PRouter) candidates(ctx context.Context, regions []string) []p2pCandidate {
 	var out []p2pCandidate
@@ -225,6 +225,10 @@ func (r *P2PRouter) candidates(ctx context.Context, regions []string) []p2pCandi
 		}
 		r.mu.Unlock()
 	}
+	known := false // without any console's region, the main is the safe choice
+	for _, reg := range regions {
+		known = known || reg != ""
+	}
 	sort.SliceStable(out, func(i, j int) bool {
 		a, b := out[i], out[j]
 		if a.score != b.score {
@@ -234,7 +238,7 @@ func (r *P2PRouter) candidates(ctx context.Context, regions []string) []p2pCandi
 			return a.hostRegion
 		}
 		if (a.id == MainInstance) != (b.id == MainInstance) {
-			return b.id == MainInstance
+			return (a.id == MainInstance) != known
 		}
 		return a.rtt < b.rtt
 	})
