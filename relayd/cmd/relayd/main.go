@@ -190,7 +190,7 @@ func main() {
 			return nil, errors.New("unknown method")
 		}
 		if cfg.P2P != nil && cfg.P2P.Enabled {
-			tun := relaylink.NewP2PTunnels(relaylink.P2PConfig{PortMin: cfg.P2P.PortMin, PortMax: cfg.P2P.PortMax, Logf: log.Printf})
+			tun := relaylink.NewP2PTunnels(relaylink.P2PConfig{PortMin: cfg.P2P.PortMin, PortMax: cfg.P2P.PortMax, TracePackets: cfg.P2P.Trace, Logf: log.Printf})
 			go tun.Run(ctx.Done())
 			calls[relaylink.MethodP2POpen] = func(_ context.Context, body []byte) ([]byte, error) {
 				var req relaylink.P2POpen

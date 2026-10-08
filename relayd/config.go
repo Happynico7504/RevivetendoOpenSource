@@ -42,8 +42,9 @@ type Config struct {
 // other directly on this relay (see relaylink.P2PTunnels).
 type P2PConfig struct {
 	Enabled bool `json:"enabled"`
-	PortMin int  `json:"port_min"` // default 61000
-	PortMax int  `json:"port_max"` // default 61999
+	PortMin int  `json:"port_min"`      // default 61000
+	PortMax int  `json:"port_max"`      // default 61999
+	Trace   int  `json:"trace_packets"` // log the first N packets of each session in hex (0 = off)
 }
 
 // ComponentConfig is one separately shipped binary (for example the WSC edge). relayd

@@ -1596,6 +1596,7 @@ func register(err error, client *nex.Client, callID uint32, stationUrls []*nex.S
 	}
 
 	localStation := stationUrls[0]
+	p2pPorts.Delete(client.PID()) // a new connection: its P2P port is not known yet
 
 	connectionID := uint32(nexServer.ConnectionIDCounter().Increment())
 	client.SetConnectionID(connectionID)
@@ -1638,6 +1639,11 @@ func replaceURL(err error, client *nex.Client, callID uint32, oldStation *nex.St
 
 	address := client.Address().IP.String()
 	port := strconv.Itoa(client.Address().Port)
+
+	// What the console says about itself, before it is overwritten with what this server sees:
+	// its own public address may name the port its P2P traffic really uses (see p2pNotePort).
+	fmt.Printf("ReplaceURL: PID=%d console says old=%s new=%s\n", client.PID(), oldStation.EncodeToString(), newStation.EncodeToString())
+	p2pNotePort(client.PID(), newStation.EncodeToString(), "ReplaceURL")
 
 	newStation.SetAddress(address)
 	newStation.SetPort(port)
@@ -2314,10 +2320,11 @@ func requestProbeInitiationExt(err error, client *nex.Client, callID uint32, tar
 	// consoles know each other's real addresses stay direct.
 	var tunnel *p2pTunnel
 	var tunneled []byte
+	portChanged := p2pNotePort(client.PID(), stationToProbe, "probe")
 	if gid := dbFindGatheringForPID(client.PID()); gid != 0 {
 		if v, ok := p2pTunnels.Load(gid); ok {
 			tunnel = v.(*p2pTunnel)
-			if tunnel.Ports[client.PID()] == 0 {
+			if tunnel.Ports[client.PID()] == 0 || portChanged {
 				tunnel = p2pOpen(gid, dbGetGatheringHost(gid), true)
 			}
 			if tunnel != nil {

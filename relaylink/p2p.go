@@ -21,6 +21,7 @@ import (
 	"math/rand"
 	"net"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -55,15 +56,16 @@ type P2PClose struct {
 
 // P2PConfig configures a tunnel host. Zero values pick the defaults.
 type P2PConfig struct {
-	ListenIP    string        // address the alias sockets bind to (default all)
-	PortMin     int           // alias port range (default 61000-61999)
-	PortMax     int           //
-	OpenGrace   time.Duration // how long a session may wait for its first packet (default 2m)
-	IdleTimeout time.Duration // a session that forwarded nothing for this long is closed (default 90s)
-	MaxLifetime time.Duration // hard cap on a session's age (default 4h)
-	MaxSessions int           // default 200
-	MaxStations int           // per session (default 8)
-	Logf        func(string, ...any)
+	ListenIP     string        // address the alias sockets bind to (default all)
+	PortMin      int           // alias port range (default 61000-61999)
+	PortMax      int           //
+	OpenGrace    time.Duration // how long a session may wait for its first packet (default 2m)
+	IdleTimeout  time.Duration // a session that forwarded nothing for this long is closed (default 90s)
+	MaxLifetime  time.Duration // hard cap on a session's age (default 4h)
+	MaxSessions  int           // default 200
+	MaxStations  int           // per session (default 8)
+	TracePackets int           // log the first N forwarded packets of each session in hex (0 = off)
+	Logf         func(string, ...any)
 }
 
 var (
@@ -100,6 +102,8 @@ type p2pStation struct {
 	conn   *net.UDPConn
 	last   *net.UDPAddr         // last source address seen from this console
 	toward map[int]*net.UDPAddr // alias port it sent to -> its source address for that alias
+	sent   uint64               // packets this console sent into the tunnel
+	got    uint64               // packets the tunnel sent to this console
 }
 
 func NewP2PTunnels(cfg P2PConfig) *P2PTunnels {
@@ -224,8 +228,13 @@ func (t *P2PTunnels) closeLocked(sess *p2pSession, why string) {
 		st.conn.Close()
 		delete(t.ports, st.alias)
 	}
-	t.logf("p2p: session %s %s after %v: %d packets, %d bytes forwarded, %d dropped",
-		sess.key, why, t.now().Sub(sess.created).Round(time.Second), sess.packets, sess.bytes, sess.dropped)
+	var per []string
+	for pid, st := range sess.stations {
+		per = append(per, fmt.Sprintf("%d sent %d got %d (last seen at %v)", pid, st.sent, st.got, st.last))
+	}
+	sort.Strings(per)
+	t.logf("p2p: session %s %s after %v: %d packets, %d bytes forwarded, %d dropped; %s",
+		sess.key, why, t.now().Sub(sess.created).Round(time.Second), sess.packets, sess.bytes, sess.dropped, strings.Join(per, "; "))
 }
 
 // Run closes idle and expired sessions until stop is closed, then shuts everything down.
@@ -326,7 +335,14 @@ func (t *P2PTunnels) serve(sess *p2pSession, dst *p2pStation) {
 		sess.packets++
 		sess.bytes += uint64(n)
 		sess.lastFwd = t.now()
+		from.sent++
+		dst.got++
+		trace := t.cfg.TracePackets > 0 && sess.packets <= uint64(t.cfg.TracePackets)
+		seq := sess.packets
 		t.mu.Unlock()
+		if trace {
+			t.logf("p2p: trace %s #%d %d(%v) -> %d(%v) via :%d->:%d %dB %x", sess.key, seq, from.pid, src, dst.pid, to, dst.alias, from.alias, n, buf[:n])
+		}
 		out.WriteToUDP(buf[:n], to)
 	}
 }

@@ -184,6 +184,7 @@ func cmdServe(args []string) {
 	p2pPorts := fs.String("p2p-ports", "61000-61999", "UDP port range of the main's P2P tunnel host (\"\" = the main hosts no tunnels)")
 	p2pIP := fs.String("p2p-ip", "", "public IPv4 consoles reach the main's tunnels at (default: WSC's secure server address)")
 	p2pRegion := fs.String("p2p-region", "eu", "the main's region for choosing where a tunnel runs")
+	p2pTrace := fs.Int("p2p-trace", 60, "log the first N packets of each tunnel session on the main in hex (0 = off)")
 	fs.Parse(args)
 
 	db := openDB(*envFile)
@@ -328,7 +329,7 @@ func cmdServe(args []string) {
 		if net.ParseIP(ip).To4() == nil {
 			log.Printf("p2p: the main hosts no tunnels (no public IPv4; set -p2p-ip)")
 		} else {
-			p2pRouter.Local = relaylink.NewP2PTunnels(relaylink.P2PConfig{PortMin: lo, PortMax: hi, Logf: log.Printf})
+			p2pRouter.Local = relaylink.NewP2PTunnels(relaylink.P2PConfig{PortMin: lo, PortMax: hi, TracePackets: *p2pTrace, Logf: log.Printf})
 			p2pRouter.LocalIP = ip
 			go p2pRouter.Local.Run(make(chan struct{}))
 			log.Printf("p2p: the main hosts tunnels at %s, UDP %d-%d", ip, lo, hi)

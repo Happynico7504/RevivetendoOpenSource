@@ -47,6 +47,41 @@ var p2pTunnels sync.Map
 
 var p2pHTTP = &http.Client{Timeout: 1500 * time.Millisecond}
 
+// p2pPorts: pid -> the public port a console says its P2P traffic uses. Its secure connection's
+// port (what this server sees) is a different socket mapping: captured 2026-10-08, two consoles
+// played through a tunnel from ports 56553 and 64478 - the ports in their own probe URLs - while
+// their server connections used 64110 and 50490. A tunnel that starts out sending to the
+// server-connection port is talking to the wrong mapping until the console speaks first.
+var p2pPorts sync.Map
+
+// p2pNotePort remembers the port from a station URL the console sent about itself (its own
+// public address, not a tunnel alias). It reports whether the remembered port changed.
+func p2pNotePort(pid uint32, station, from string) bool {
+	u := nex.NewStationURL(station)
+	ip := net.ParseIP(u.Address())
+	port, err := strconv.Atoi(u.Port())
+	if ip == nil || err != nil || port <= 0 || port > 65535 || ip.IsPrivate() || ip.IsLoopback() {
+		return false
+	}
+	isTunnel := false
+	p2pTunnels.Range(func(_, v any) bool {
+		if v.(*p2pTunnel).IP == u.Address() {
+			isTunnel = true
+			return false
+		}
+		return true
+	})
+	if isTunnel {
+		return false
+	}
+	old, had := p2pPorts.Swap(pid, port)
+	if had && old.(int) == port {
+		return false
+	}
+	fmt.Printf("P2PPort: PID=%d says its P2P port is %d (%s)\n", pid, port, from)
+	return true
+}
+
 func p2pKey(gid uint32) string { return "wsc:" + strconv.FormatUint(uint64(gid), 10) }
 
 // p2pStationFor describes a console as the hub needs it: the address its secure connection
@@ -65,6 +100,9 @@ func p2pStationFor(pid uint32) (p2pStation, bool) {
 		su := nex.NewStationURL(u)
 		if su.Type() == "3" {
 			st.Port, _ = strconv.Atoi(su.Port())
+			if v, ok := p2pPorts.Load(pid); ok {
+				st.Port = v.(int) // the port its P2P traffic uses, as the console itself said
+			}
 		} else if a := net.ParseIP(su.Address()); a != nil && cgnatRange.Contains(a) {
 			st.Hard = "local address " + su.Address() + " is carrier-grade NAT"
 		}
