@@ -319,7 +319,8 @@ func TestBuildDNSConfig(t *testing.T) {
 	if cfg.Zone != "z.example" || cfg.Default == nil {
 		t.Fatalf("base fields lost: %s", out)
 	}
-	if len(cfg.Regions) != 2 || cfg.Regions[0].Name != "jp" || cfg.Regions[1].Name != "na" {
+	// asia has no relay of its own, so jp-1 serves it too (RegionFallback).
+	if len(cfg.Regions) != 3 || cfg.Regions[0].Name != "jp" || cfg.Regions[1].Name != "na" || cfg.Regions[2].Name != "asia" || cfg.Regions[2].Targets[0] != "203.0.113.20" {
 		t.Fatalf("regions (country-specific must come first, disabled/stale dropped): %s", out)
 	}
 	na := cfg.Regions[1]

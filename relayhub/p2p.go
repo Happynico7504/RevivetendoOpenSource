@@ -76,10 +76,10 @@ type P2PResult struct {
 
 // P2PInstance is a relay that can host tunnels.
 type P2PInstance struct {
-	ID     string
-	Region string
-	IP     string
-	RTT    time.Duration
+	ID      string
+	Regions []string // the regions it serves (its own, plus any it is the fallback for)
+	IP      string
+	RTT     time.Duration
 }
 
 type P2PRouter struct {
@@ -183,10 +183,10 @@ func (r *P2PRouter) decide(regions []string, stations []relaylink.P2PStation) st
 }
 
 type p2pCandidate struct {
-	id, ip, region string
-	rtt            time.Duration
-	score          int // consoles in the instance's region
-	hostRegion     bool
+	id, ip     string
+	rtt        time.Duration
+	score      int // consoles in a region the instance serves
+	hostRegion bool
 }
 
 // candidates lists where the tunnel could run, best first: an instance in the region of as many
@@ -195,10 +195,14 @@ type p2pCandidate struct {
 // an international pair either end is roughly on the path, and the host's region wins the tie.
 func (r *P2PRouter) candidates(ctx context.Context, regions []string) []p2pCandidate {
 	var out []p2pCandidate
-	add := func(id, ip, region string, rtt time.Duration) {
-		c := p2pCandidate{id: id, ip: ip, region: region, rtt: rtt}
+	add := func(id, ip string, served []string, rtt time.Duration) {
+		c := p2pCandidate{id: id, ip: ip, rtt: rtt}
+		serves := map[string]bool{}
+		for _, reg := range served {
+			serves[reg] = true
+		}
 		for i, reg := range regions {
-			if reg == region && reg != "" {
+			if reg != "" && serves[reg] {
 				c.score++
 				if i == 0 {
 					c.hostRegion = true
@@ -208,7 +212,7 @@ func (r *P2PRouter) candidates(ctx context.Context, regions []string) []p2pCandi
 		out = append(out, c)
 	}
 	if r.Local != nil && r.LocalIP != "" {
-		add(MainInstance, r.LocalIP, r.localRegion(), 0)
+		add(MainInstance, r.LocalIP, []string{r.localRegion()}, 0)
 	}
 	if r.Relays != nil && r.CallRelay != nil {
 		relays, err := r.Relays(ctx)
@@ -221,7 +225,7 @@ func (r *P2PRouter) candidates(ctx context.Context, regions []string) []p2pCandi
 			if until, bad := r.broken[x.ID]; bad && now.Before(until) {
 				continue
 			}
-			add(x.ID, x.IP, x.Region, x.RTT)
+			add(x.ID, x.IP, x.Regions, x.RTT)
 		}
 		r.mu.Unlock()
 	}
@@ -389,7 +393,7 @@ func RelayLister(reg Registry, streams *StreamHub, resolve func(string) (string,
 			if err != nil {
 				continue
 			}
-			out = append(out, P2PInstance{ID: x.ID, Region: x.Region, IP: ip, RTT: rtt})
+			out = append(out, P2PInstance{ID: x.ID, Regions: RegionsServedBy(relays, x.ID), IP: ip, RTT: rtt})
 		}
 		return out, nil
 	}

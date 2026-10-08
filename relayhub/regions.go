@@ -29,3 +29,43 @@ func RegionNames() []string {
 	sort.Strings(n)
 	return n
 }
+
+// RegionFallback names the region whose relays serve a region that has none of its own: a Tokyo
+// relay is far closer to Australia or Singapore than the main is, and the other way round.
+var RegionFallback = map[string]string{"asia": "jp", "jp": "asia"}
+
+// ServingRelays maps each catalog region to the enabled relays that serve it: its own, or if it
+// has none, those of its fallback region.
+func ServingRelays(relays []*Relay) map[string][]*Relay {
+	own := map[string][]*Relay{}
+	for _, r := range relays {
+		if r.Enabled {
+			own[r.Region] = append(own[r.Region], r)
+		}
+	}
+	out := map[string][]*Relay{}
+	for name := range RegionCatalog {
+		rs := own[name]
+		if len(rs) == 0 {
+			rs = own[RegionFallback[name]]
+		}
+		if len(rs) > 0 {
+			out[name] = rs
+		}
+	}
+	return out
+}
+
+// RegionsServedBy lists the catalog regions a relay serves (see ServingRelays), sorted.
+func RegionsServedBy(relays []*Relay, id string) []string {
+	var out []string
+	for name, rs := range ServingRelays(relays) {
+		for _, r := range rs {
+			if r.ID == id {
+				out = append(out, name)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}

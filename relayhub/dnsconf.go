@@ -8,21 +8,16 @@ import (
 
 // BuildDNSConfig returns a regiondns config: the base config with its
 // "regions" replaced by one region per catalog entry that has at least one
-// enabled relay. The default region (base config) stays the main.
+// enabled relay serving it (its own, or its RegionFallback's). The default region (base config) stays the main.
 func BuildDNSConfig(base []byte, relays []*Relay) ([]byte, error) {
 	var cfg map[string]any
 	if err := json.Unmarshal(base, &cfg); err != nil {
 		return nil, fmt.Errorf("base config: %w", err)
 	}
-	byRegion := map[string][]*Relay{}
-	for _, r := range relays {
-		if r.Enabled {
-			byRegion[r.Region] = append(byRegion[r.Region], r)
-		}
-	}
+	byRegion := ServingRelays(relays)
 	regions := []map[string]any{}
 	for _, name := range regionOrder {
-		rs := byRegion[name]
+		rs := append([]*Relay(nil), byRegion[name]...)
 		if len(rs) == 0 {
 			continue
 		}

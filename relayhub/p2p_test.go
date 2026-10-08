@@ -42,7 +42,7 @@ func newP2PRouter(t *testing.T, policy string, fr *fakeRelayP2P) *P2PRouter {
 		Local: local, LocalIP: "198.51.100.1", Geo: p2pGeo,
 		Policy: func() P2PPolicy { return ParseP2PPolicy(policy) },
 		Relays: func(context.Context) ([]P2PInstance, error) {
-			return []P2PInstance{{ID: "us-1", Region: "na", IP: "198.51.100.2"}}, nil
+			return []P2PInstance{{ID: "us-1", Regions: []string{"na"}, IP: "198.51.100.2"}}, nil
 		},
 		CallRelay: fr.call,
 	}

@@ -437,11 +437,15 @@ func (a *NexAssigner) Assign(ctx context.Context, req AssignRequest) (*AssignRes
 	for _, s := range a.Streams.Status() {
 		connected[s.ID] = true
 	}
+	serving := map[string]bool{}
+	for _, r := range ServingRelays(relays)[region] {
+		serving[r.ID] = true
+	}
 	// The relays that could serve this console for a given auth game, fastest first.
 	pick := func(name string) []*Relay {
 		var cands []*Relay
 		for _, r := range relays {
-			if r.Enabled && (forced || r.Region == region) && connected[r.ID] && a.hostsGame(r.ID, name) {
+			if r.Enabled && (forced || serving[r.ID]) && connected[r.ID] && a.hostsGame(r.ID, name) {
 				cands = append(cands, r)
 			}
 		}
