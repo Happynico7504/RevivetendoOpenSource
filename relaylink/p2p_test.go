@@ -168,7 +168,7 @@ func TestRewritePIAStationList(t *testing.T) {
 	other := [4]byte{198, 51, 100, 7}
 	pkt := piaPacket(piaLoc(pub, 51765, 1001), piaLoc(lan, 51765, 1001), piaLoc(other, 62080, 1002), piaLoc(other, 4000, 9999))
 	aliases := map[uint32]piaAlias{1001: {ip: [4]byte{192, 0, 2, 1}, port: 61113}, 1002: {ip: [4]byte{192, 0, 2, 1}, port: 61314}}
-	if n := rewritePIA(pkt, aliases); n != 2 {
+	if n := rewritePIA(pkt, aliases, 0); n != 2 {
 		t.Fatalf("rewrote %d locations, want 2 (public of 1001 and 1002; never LAN, never a stranger)", n)
 	}
 	want := piaPacket(piaLoc([4]byte{192, 0, 2, 1}, 61113, 1001), piaLoc(lan, 51765, 1001), piaLoc([4]byte{192, 0, 2, 1}, 61314, 1002), piaLoc(other, 4000, 9999))
@@ -178,7 +178,7 @@ func TestRewritePIAStationList(t *testing.T) {
 	if !piaSigned(pkt) {
 		t.Fatal("rewritten packet is not signed correctly")
 	}
-	if n := rewritePIA(pkt, aliases); n != 0 {
+	if n := rewritePIA(pkt, aliases, 0); n != 0 {
 		t.Fatalf("second pass rewrote %d", n)
 	}
 }
@@ -188,11 +188,11 @@ func TestRewritePIALeavesForeignPackets(t *testing.T) {
 	pkt := piaPacket(piaLoc([4]byte{203, 0, 113, 5}, 1, 1001))
 	pkt[len(pkt)-1] ^= 1 // signed with some other key
 	orig := append([]byte(nil), pkt...)
-	if rewritePIA(pkt, aliases) != 0 || !bytes.Equal(pkt, orig) {
+	if rewritePIA(pkt, aliases, 0) != 0 || !bytes.Equal(pkt, orig) {
 		t.Fatal("touched a packet that is not signed with the empty key")
 	}
 	notPIA := append([]byte{1, 2, 3, 4}, piaLoc([4]byte{203, 0, 113, 5}, 1, 1001)...)
-	if rewritePIA(notPIA, aliases) != 0 {
+	if rewritePIA(notPIA, aliases, 0) != 0 {
 		t.Fatal("touched a non-PIA packet")
 	}
 }
@@ -214,5 +214,18 @@ func TestP2PRewritesInBandLocations(t *testing.T) {
 	want := piaPacket(piaLoc([4]byte{127, 0, 0, 1}, uint16(ports[3]), 3))
 	if got != string(want) {
 		t.Fatalf("got %x want %x", got, want)
+	}
+}
+
+func TestRewritePIAKeepsTheReceiversOwnLocation(t *testing.T) {
+	me, other := [4]byte{203, 0, 113, 5}, [4]byte{198, 51, 100, 7}
+	pkt := piaPacket(piaLoc(me, 51765, 1001), piaLoc(other, 62080, 1002))
+	aliases := map[uint32]piaAlias{1001: {ip: [4]byte{192, 0, 2, 1}, port: 61113}, 1002: {ip: [4]byte{192, 0, 2, 1}, port: 61314}}
+	if n := rewritePIA(pkt, aliases, 1001); n != 1 {
+		t.Fatalf("rewrote %d, want only the other console's location", n)
+	}
+	want := piaPacket(piaLoc(me, 51765, 1001), piaLoc([4]byte{192, 0, 2, 1}, 61314, 1002))
+	if !bytes.Equal(pkt, want) {
+		t.Fatalf("got  %x\nwant %x", pkt, want)
 	}
 }

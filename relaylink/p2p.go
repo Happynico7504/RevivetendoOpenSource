@@ -349,7 +349,7 @@ func (t *P2PTunnels) serve(sess *p2pSession, dst *p2pStation) {
 		dst.got++
 		rewrote := 0
 		if sess.ip != nil {
-			rewrote = rewritePIA(buf[:n], sess.aliasesLocked())
+			rewrote = rewritePIA(buf[:n], sess.aliasesLocked(), dst.pid)
 			sess.rewrites += uint64(rewrote)
 		}
 		rewrites := sess.rewrites
@@ -463,8 +463,11 @@ func lanAddress(ip []byte) bool {
 }
 
 // rewritePIA replaces, in place, the public locations of the given consoles with their aliases
-// and re-signs the packet. It returns how many locations it changed.
-func rewritePIA(pkt []byte, aliases map[uint32]piaAlias) int {
+// and re-signs the packet. It returns how many locations it changed. The receiver's own location
+// is never changed: a console recognises itself in a station list by its real location, and
+// after the rewrite it no longer did (2026-10-09: right after this went live, hosts stopped
+// seeing joiners).
+func rewritePIA(pkt []byte, aliases map[uint32]piaAlias, receiver uint32) int {
 	if !piaSigned(pkt) {
 		return 0
 	}
@@ -474,8 +477,9 @@ func rewritePIA(pkt []byte, aliases map[uint32]piaAlias) int {
 		if pkt[i+6] != 0 || pkt[i+7] != 0 {
 			continue
 		}
-		a, ok := aliases[binary.BigEndian.Uint32(pkt[i+8:i+12])]
-		if !ok || lanAddress(pkt[i:i+4]) {
+		pid := binary.BigEndian.Uint32(pkt[i+8 : i+12])
+		a, ok := aliases[pid]
+		if !ok || pid == receiver || lanAddress(pkt[i:i+4]) {
 			continue
 		}
 		if bytes.Equal(pkt[i:i+4], a.ip[:]) && binary.BigEndian.Uint16(pkt[i+4:i+6]) == a.port {
