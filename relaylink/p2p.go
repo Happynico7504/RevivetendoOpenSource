@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -349,7 +350,7 @@ func (t *P2PTunnels) serve(sess *p2pSession, dst *p2pStation) {
 		dst.got++
 		rewrote := 0
 		if sess.ip != nil {
-			rewrote = rewritePIA(buf[:n], sess.aliasesLocked(), dst.pid)
+			rewrote = rewritePIA(buf[:n], sess.aliasesLocked(), from.pid, dst.pid)
 			sess.rewrites += uint64(rewrote)
 		}
 		rewrites := sess.rewrites
@@ -462,12 +463,15 @@ func lanAddress(ip []byte) bool {
 	return ip[0] == 10 || ip[0] == 127 || ip[0] == 0 || (ip[0] == 172 && ip[1]&0xf0 == 16) || (ip[0] == 192 && ip[1] == 168)
 }
 
-// rewritePIA replaces, in place, the public locations of the given consoles with their aliases
-// and re-signs the packet. It returns how many locations it changed. The receiver's own location
-// is never changed: a console recognises itself in a station list by its real location, and
-// after the rewrite it no longer did (2026-10-09: right after this went live, hosts stopped
-// seeing joiners).
-func rewritePIA(pkt []byte, aliases map[uint32]piaAlias, receiver uint32) int {
+// rewritePIA replaces, in place, the public locations of other members (third parties) with
+// their aliases and re-signs the packet. It returns how many locations it changed.
+//
+// The sender's and the receiver's own locations are never changed. A console recognises itself
+// in a station list by its real location, and the connection handshake between two consoles
+// carries each one's own location next to a value apparently derived from it: rewriting those
+// broke 2-player joins that worked without rewriting (2026-10-09, sessions 11009 and 233736).
+// The 3+ player mesh only needs the third parties: the host telling joiner B where joiner A is.
+func rewritePIA(pkt []byte, aliases map[uint32]piaAlias, keep ...uint32) int {
 	if !piaSigned(pkt) {
 		return 0
 	}
@@ -479,7 +483,7 @@ func rewritePIA(pkt []byte, aliases map[uint32]piaAlias, receiver uint32) int {
 		}
 		pid := binary.BigEndian.Uint32(pkt[i+8 : i+12])
 		a, ok := aliases[pid]
-		if !ok || pid == receiver || lanAddress(pkt[i:i+4]) {
+		if !ok || slices.Contains(keep, pid) || lanAddress(pkt[i:i+4]) {
 			continue
 		}
 		if bytes.Equal(pkt[i:i+4], a.ip[:]) && binary.BigEndian.Uint16(pkt[i+4:i+6]) == a.port {

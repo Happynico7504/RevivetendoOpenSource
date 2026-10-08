@@ -217,6 +217,19 @@ func TestP2PRewritesInBandLocations(t *testing.T) {
 	}
 }
 
+func TestRewritePIAKeepsSenderAndReceiver(t *testing.T) {
+	a, b, c := [4]byte{203, 0, 113, 5}, [4]byte{198, 51, 100, 7}, [4]byte{198, 51, 100, 9}
+	pkt := piaPacket(piaLoc(a, 1, 1001), piaLoc(b, 2, 1002), piaLoc(c, 3, 1003))
+	al := [4]byte{192, 0, 2, 1}
+	aliases := map[uint32]piaAlias{1001: {ip: al, port: 61001}, 1002: {ip: al, port: 61002}, 1003: {ip: al, port: 61003}}
+	if n := rewritePIA(pkt, aliases, 1001, 1002); n != 1 {
+		t.Fatalf("rewrote %d, want only the third party", n)
+	}
+	if want := piaPacket(piaLoc(a, 1, 1001), piaLoc(b, 2, 1002), piaLoc(al, 61003, 1003)); !bytes.Equal(pkt, want) {
+		t.Fatalf("got  %x\nwant %x", pkt, want)
+	}
+}
+
 func TestRewritePIAKeepsTheReceiversOwnLocation(t *testing.T) {
 	me, other := [4]byte{203, 0, 113, 5}, [4]byte{198, 51, 100, 7}
 	pkt := piaPacket(piaLoc(me, 51765, 1001), piaLoc(other, 62080, 1002))
