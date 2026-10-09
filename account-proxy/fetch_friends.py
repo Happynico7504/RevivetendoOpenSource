@@ -186,7 +186,11 @@ def _nna_complete(loaded: bool, local: dict) -> bool:
 
 
 async def fetch_friends(pid: int, nex_password: str, auth_host: str, auth_port: int, db_uri: str, keep_alive: bool = False):
-    s = nex_settings.default()
+    # The Friends server speaks PRUDP v0 to Wii U consoles (NintendoClients' "friends" profile).
+    # With the default profile (v1) the handshake still worked, but Pretendo sends its
+    # notifications as v0 and every one was dropped as "(V1) Invalid magic number" - no friend
+    # presence change ever reached a keep-alive (found 2026-10-09).
+    s = nex_settings.load("friends")
     s["prudp.access_key"] = ACCESS_KEY
     s["nex.version"] = NEX_VERSION
     s["kerberos.key_size"] = 16
