@@ -2807,6 +2807,9 @@ func handleOpenParticipation(packet *nex.PacketV1) {
 	stream := nex.NewStreamIn(request.Parameters(), nexServer)
 	gid := stream.ReadUInt32LE()
 	fmt.Printf("OpenParticipation: PID=%d gid=%d\n", client.PID(), gid)
+	if dbGetGatheringHost(gid) == client.PID() {
+		dbReopenGathering(gid)
+	}
 	sendResponse(client, matchmake_extension.ProtocolID, request.CallID(), matchmake_extension.MethodOpenParticipation, nil)
 }
 

@@ -355,7 +355,7 @@ func dbJoinGathering(gid, pid uint32) {
 		bson.D{{Key: "$set", Value: bson.D{
 			{Key: "players", Value: newPlayers},
 			{Key: "player_count", Value: count},
-			{Key: "open", Value: count < maxPlayers},
+			{Key: "open", Value: gatheringJoinable(result, count, maxPlayers)},
 		}}})
 }
 
@@ -419,7 +419,7 @@ func dbLeaveGathering(gid, pid uint32) {
 		bson.D{{Key: "$set", Value: bson.D{
 			{Key: "players", Value: newPlayers},
 			{Key: "player_count", Value: count},
-			{Key: "open", Value: count < maxPlayers},
+			{Key: "open", Value: gatheringJoinable(result, count, maxPlayers)},
 			{Key: "host", Value: newHost},
 		}}})
 }
@@ -435,10 +435,37 @@ func dbFindGatheringForPID(pid uint32) uint32 {
 	return uint32(result["gid"].(int64))
 }
 
+// dbCloseGathering closes a gathering on purpose (the host's CloseParticipation at match start,
+// or our quick-exit protection). participation_closed keeps it closed when players later join or
+// leave; only the host's OpenParticipation reopens it.
 func dbCloseGathering(gid uint32) {
 	gatheringsCol.UpdateOne(context.Background(),
 		bson.D{{Key: "gid", Value: gid}},
-		bson.D{{Key: "$set", Value: bson.D{{Key: "open", Value: false}}}})
+		bson.D{{Key: "$set", Value: bson.D{{Key: "open", Value: false}, {Key: "participation_closed", Value: true}}}})
+}
+
+// dbReopenGathering is the host's OpenParticipation: new players may join again (if there is room).
+func dbReopenGathering(gid uint32) {
+	gatheringMembersMu.Lock()
+	defer gatheringMembersMu.Unlock()
+	var result bson.M
+	if gatheringsCol.FindOne(context.Background(), bson.D{{Key: "gid", Value: gid}}).Decode(&result) != nil {
+		return
+	}
+	count, _ := result["player_count"].(int64)
+	maxPlayers, _ := result["max_players"].(int64)
+	gatheringsCol.UpdateOne(context.Background(),
+		bson.D{{Key: "gid", Value: gid}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "open", Value: count < maxPlayers}, {Key: "participation_closed", Value: false}}}})
+}
+
+// gatheringJoinable: a gathering takes new players only while it has room and was not closed on
+// purpose. Recomputing "open" from the player count alone reopened a running match whenever a
+// player dropped out, and matchmaking then sent newcomers into it - their join failed and they got
+// the "partner's device" penalty (reported 2026-10-09).
+func gatheringJoinable(g bson.M, count, maxPlayers int64) bool {
+	closed, _ := g["participation_closed"].(bool)
+	return !closed && count < maxPlayers
 }
 
 // dbGetGatheringPlayers returns every PID currently listed in a gathering's
