@@ -242,3 +242,32 @@ func TestRewritePIAKeepsTheReceiversOwnLocation(t *testing.T) {
 		t.Fatalf("got  %x\nwant %x", pkt, want)
 	}
 }
+
+// A console whose NAT changes its port: after it speaks once from the new port, packets from
+// every member reach it there - not only from the member it happened to send to.
+func TestP2PFollowsAPortChangeForAllMembers(t *testing.T) {
+	tun := newTestTunnels(t)
+	a, b, c := udpOn(t, "127.0.0.2"), udpOn(t, "127.0.0.3"), udpOn(t, "127.0.0.4")
+	ports, err := tun.Open("k", "", []P2PStation{
+		{PID: 1, IP: "127.0.0.2", Port: a.LocalAddr().(*net.UDPAddr).Port},
+		{PID: 2, IP: "127.0.0.3", Port: b.LocalAddr().(*net.UDPAddr).Port},
+		{PID: 3, IP: "127.0.0.4", Port: c.LocalAddr().(*net.UDPAddr).Port},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A talks to B and C from its first port.
+	a.WriteToUDP([]byte("a1"), alias(ports[2]))
+	recv(t, b)
+	a.WriteToUDP([]byte("a1"), alias(ports[3]))
+	recv(t, c)
+	// Its NAT moves it: the new socket speaks to B only.
+	a2 := udpOn(t, "127.0.0.2")
+	a2.WriteToUDP([]byte("a2"), alias(ports[2]))
+	recv(t, b)
+	// C's next packet must reach A at the new port.
+	c.WriteToUDP([]byte("from c"), alias(ports[1]))
+	if msg, _ := recv(t, a2); msg != "from c" {
+		t.Fatalf("A's new port got %q", msg)
+	}
+}

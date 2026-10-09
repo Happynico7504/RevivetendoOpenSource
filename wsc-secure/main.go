@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -1240,6 +1241,9 @@ func main() {
 
 	nexServer = nex.NewServer()
 	nexServer.SetPRUDPVersion(1)
+	nexServer.OnRebind(func(c *nex.Client, from, to *net.UDPAddr) {
+		fmt.Printf("NATRebind: PID=%d moved from %v to %v (its NAT changed the port; session kept)\n", c.PID(), from, to)
+	})
 	nexServer.SetPRUDPProtocolMinorVersion(3)
 	nexServer.SetDefaultNEXVersion(&nex.NEXVersion{Major: 3, Minor: 4, Patch: 0})
 	nexServer.SetMatchMakingProtocolVersion(&nex.NEXVersion{Major: 3, Minor: 4, Patch: 0})

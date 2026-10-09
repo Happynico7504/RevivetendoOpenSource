@@ -4,12 +4,14 @@ import (
 	"crypto/rc4"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 // Client represents a connected or non-connected PRUDP client
 type Client struct {
 	address                   *net.UDPAddr
+	rebound                   atomic.Pointer[net.UDPAddr] // set when the client's NAT moved it to a new address (see Server.rebind)
 	server                    *Server
 	mu                        sync.Mutex // protects cipher and decipher (RC4 is not goroutine-safe)
 	cipher                    *rc4.Cipher
@@ -169,6 +171,9 @@ func (client *Client) ResendStalePackets(server *Server, timeout time.Duration, 
 
 // Address returns the clients UDP address
 func (client *Client) Address() *net.UDPAddr {
+	if a := client.rebound.Load(); a != nil {
+		return a
+	}
 	return client.address
 }
 

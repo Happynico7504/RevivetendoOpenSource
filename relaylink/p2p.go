@@ -339,6 +339,19 @@ func (t *P2PTunnels) serve(sess *p2pSession, dst *p2pStation) {
 			}
 			continue
 		}
+		moved := ""
+		if prev := from.toward[dst.alias]; prev != nil && !sameAddr(prev, src) {
+			// Its NAT gave it a new port mid-session (carrier-grade NAT does). Everything that
+			// still points at the old mapping follows, or the other members' packets would keep
+			// going to a port that no longer exists until it happens to talk to them too. A NAT
+			// with a separate mapping per destination is unaffected: its other entries differ.
+			for k, a := range from.toward {
+				if sameAddr(a, prev) {
+					from.toward[k] = src
+				}
+			}
+			moved = fmt.Sprintf("p2p: session %s: %d moved from %v to %v", sess.key, from.pid, prev, src)
+		}
 		from.last = src
 		from.toward[dst.alias] = src
 		to := dst.target(from.alias)
@@ -361,6 +374,9 @@ func (t *P2PTunnels) serve(sess *p2pSession, dst *p2pStation) {
 		trace := t.cfg.TracePackets > 0 && sess.packets <= uint64(t.cfg.TracePackets)
 		seq := sess.packets
 		t.mu.Unlock()
+		if moved != "" {
+			t.logf("%s", moved)
+		}
 		if rewrote > 0 && rewrites <= 20 {
 			t.logf("p2p: session %s: rewrote %d station address(es) in a PIA packet %d -> %d", sess.key, rewrote, from.pid, dst.pid)
 			if before != nil {
@@ -515,3 +531,5 @@ func rewritePIA(pkt []byte, aliases map[uint32]piaAlias, keep ...uint32) int {
 	}
 	return n
 }
+
+func sameAddr(a, b *net.UDPAddr) bool { return a.Port == b.Port && a.IP.Equal(b.IP) }

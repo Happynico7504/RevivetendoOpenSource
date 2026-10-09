@@ -110,6 +110,9 @@ func (e *Edge) Serve() {
 	srv.On("Kick", e.onDisconnect) // nex-go's own timeout ends a session like a disconnect
 	srv.On("Data", e.onData)
 	srv.On("Packet", e.onPacket)
+	srv.OnRebind(func(c *nex.Client, from, to *net.UDPAddr) {
+		e.logf("wscedge: PID=%d moved from %v to %v (its NAT changed the port; session kept)", c.PID(), from, to)
+	})
 	go e.reportAlive()
 	go e.probeLoop()
 

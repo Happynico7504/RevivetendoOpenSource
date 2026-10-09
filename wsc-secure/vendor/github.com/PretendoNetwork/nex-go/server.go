@@ -21,6 +21,7 @@ import (
 type Server struct {
 	socket                     *net.UDPConn
 	clientsMu                  sync.RWMutex
+	rebindHook                 func(client *Client, from, to *net.UDPAddr)
 	clients                    map[string]*Client
 	genericEventHandles        map[string][]func(PacketInterface)
 	prudpV0EventHandles        map[string][]func(*PacketV0)
@@ -106,11 +107,11 @@ func (server *Server) handleSocketMessage() error {
 	discriminator := addr.String()
 
 	server.clientsMu.Lock()
-	if _, ok := server.clients[discriminator]; !ok {
-		newClient := NewClient(addr, server)
-		server.clients[discriminator] = newClient
+	client, known := server.clients[discriminator]
+	if !known {
+		client = NewClient(addr, server)
+		server.clients[discriminator] = client
 	}
-	client := server.clients[discriminator]
 	server.clientsMu.Unlock()
 
 	data := buffer[0:length]
@@ -124,7 +125,16 @@ func (server *Server) handleSocketMessage() error {
 	}
 
 	if err != nil {
-		return nil
+		if known || server.PRUDPVersion() == 0 {
+			return nil
+		}
+		// An unknown address whose packet does not verify as a new connection: maybe a known
+		// client whose NAT just gave it a new public port (carrier-grade NAT does this mid-session).
+		moved, movedPacket := server.rebind(addr, data)
+		if moved == nil {
+			return nil
+		}
+		client, packet = moved, movedPacket
 	}
 
 	client.IncreasePingTimeoutTime(server.PingTimeout())
@@ -707,4 +717,46 @@ func NewServer() *Server {
 	}
 
 	return server
+}
+
+// OnRebind, if set, is told whenever a client is moved to a new address by rebind.
+func (server *Server) OnRebind(fn func(client *Client, from, to *net.UDPAddr)) {
+	server.rebindHook = fn
+}
+
+// rebind finds the established client (same IP, another port) that a packet from an unknown
+// address belongs to, and moves it to that address. A PRUDP v1 packet is signed with its
+// connection's session key and connection signature, and the signature is checked before
+// anything is deciphered (see PacketV1.Decode), so trying the candidates has no side effects
+// until the one that really sent it matches - nobody can take over another client's session
+// this way. Returns the client and the packet decoded with it, or nil.
+func (server *Server) rebind(addr *net.UDPAddr, data []byte) (*Client, PacketInterface) {
+	server.clientsMu.RLock()
+	var candidates []*Client
+	for _, c := range server.clients {
+		a := c.Address()
+		if c.PID() != 0 && a != nil && a.IP.Equal(addr.IP) && a.Port != addr.Port {
+			candidates = append(candidates, c)
+		}
+	}
+	server.clientsMu.RUnlock()
+	for _, c := range candidates {
+		packet, err := NewPacketV1(c, data)
+		if err != nil {
+			continue
+		}
+		old := c.Address()
+		c.rebound.Store(addr)
+		server.clientsMu.Lock()
+		if server.clients[old.String()] == c {
+			delete(server.clients, old.String())
+		}
+		server.clients[addr.String()] = c // replaces the throwaway client made for this address
+		server.clientsMu.Unlock()
+		if server.rebindHook != nil {
+			server.rebindHook(c, old, addr)
+		}
+		return c, packet
+	}
+	return nil, nil
 }
