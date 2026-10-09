@@ -499,6 +499,8 @@ func dbRecordMatch(gid uint32) {
 	if err := gatheringsCol.FindOne(ctx, bson.D{{Key: "gid", Value: int64(gid)}}).Decode(&g); err != nil {
 		return
 	}
+	count, _ := g["player_count"].(int64)
+	conn, via := gatheringConnection(gid, count)
 	matchHistoryCol.InsertOne(ctx, bson.D{
 		{Key: "gid", Value: int64(gid)},
 		{Key: "sport_type", Value: g["sport_type"]},
@@ -507,6 +509,8 @@ func dbRecordMatch(gid uint32) {
 		{Key: "players", Value: g["players"]},
 		{Key: "player_count", Value: g["player_count"]},
 		{Key: "started_at", Value: time.Now().Unix()},
+		{Key: "connection", Value: conn},
+		{Key: "tunnel_via", Value: via},
 	})
 }
 

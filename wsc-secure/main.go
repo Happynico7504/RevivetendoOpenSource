@@ -1072,6 +1072,8 @@ type wscMatchInfo struct {
 	Players     []int64 `json:"players"`
 	PlayerCount int64   `json:"player_count"`
 	StartedAt   int64   `json:"started_at"`
+	Connection  string  `json:"connection,omitempty"` // "tunnel" or "direct" (empty for matches recorded before 2026-10-09)
+	TunnelVia   string  `json:"tunnel_via,omitempty"`
 }
 
 type wscNatShameInfo struct {
@@ -1091,6 +1093,21 @@ type wscGatheringInfo struct {
 	Kind        string  `json:"kind"` // "friend", "club" or "public"; see gatheringKind
 	ClubCode    int64   `json:"club_code,omitempty"`
 	ClubName    string  `json:"club_name,omitempty"`
+	Connection  string  `json:"connection,omitempty"` // "tunnel" or "direct"; empty while the host is alone
+	TunnelVia   string  `json:"tunnel_via,omitempty"` // tunnel host: "main" or a relay id
+}
+
+// gatheringConnection says how a gathering's consoles reach each other: through a P2P tunnel (and
+// which tunnel host), or directly. Undecided ("") until someone joins, since the tunnel is only
+// opened when a joiner asks for the host's address.
+func gatheringConnection(gid uint32, playerCount int64) (string, string) {
+	if v, ok := p2pTunnels.Load(gid); ok {
+		return "tunnel", v.(*p2pTunnel).Instance
+	}
+	if playerCount < 2 {
+		return "", ""
+	}
+	return "direct", ""
 }
 
 // gatheringKind classifies a gathering for the dashboards. Friend sessions are
@@ -1156,6 +1173,7 @@ func startStatusServer() {
 				}
 				g.Open, _ = d["open"].(bool)
 				g.Kind = gatheringKind(d)
+				g.Connection, g.TunnelVia = gatheringConnection(uint32(g.GID), g.PlayerCount)
 				if code := bsonInt(d["club_code"]); code > 0 {
 					g.ClubCode = code
 					g.ClubName, _ = resolveClubName(dsClubRegionPrefix(uint32(g.Host)), uint32(code))
@@ -1181,6 +1199,8 @@ func startStatusServer() {
 				PlayerCount: bsonInt(d["player_count"]),
 				StartedAt:   bsonInt(d["started_at"]),
 			}
+			m.Connection, _ = d["connection"].(string)
+			m.TunnelVia, _ = d["tunnel_via"].(string)
 			if raw, ok := d["players"].(bson.A); ok {
 				for _, p := range raw {
 					m.Players = append(m.Players, bsonInt(p))

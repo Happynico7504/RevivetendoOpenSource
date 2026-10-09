@@ -158,9 +158,10 @@ var tmplFuncs = template.FuncMap{
 	// msgKey is the i18n key of a fixed ?msg= notice ("" when it has none).
 	"msgKey": func(msg string) string { return msgKeys[msg] },
 	// sportKey is the i18n key of a WSC sport name ("Bowling" -> "sport.bowling").
-	"sportKey":     func(name string) string { return "sport." + strings.ToLower(name) },
-	"wscKindLabel": wscKindLabel,
-	"add1":         func(i int) int { return i + 1 },
+	"sportKey":        func(name string) string { return "sport." + strings.ToLower(name) },
+	"wscKindLabel":    wscKindLabel,
+	"wscTunnelRegion": wscTunnelRegion,
+	"add1":            func(i int) int { return i + 1 },
 	// connectedFor renders how long a connection established at the given unix
 	// time has been up, as hh:mm:ss ("—" when unknown).
 	"connectedFor": func(since int64) string {
@@ -830,6 +831,8 @@ type WSCGatheringRow struct {
 	Open        bool
 	Kind        string // "friend", "club" or "public" (wsc-secure's gatheringKind)
 	ClubName    string // host's club, when wsc-secure knows its name
+	Connection  string // "tunnel", "direct" or "" (host still alone)
+	TunnelVia   string // tunnel host: "main" or a relay id
 }
 
 // wscKindLabel is how a session kind is shown on the dashboard and overlay.
@@ -851,6 +854,20 @@ type WSCMatchRow struct {
 	Players     []string // PNIDs (or "PID:xxx" fallback)
 	PlayerCount int64
 	StartedAt   time.Time
+	Connection  string // "tunnel", "direct" or "" (recorded before connection types existed)
+	TunnelVia   string
+}
+
+// wscTunnelRegion is where a P2P tunnel runs, as a region label: the main is in Germany, a
+// relay is named after its region ("us-1" -> "US").
+func wscTunnelRegion(via string) string {
+	if via == "" || via == "main" {
+		return "EU"
+	}
+	if i := strings.IndexByte(via, '-'); i > 0 {
+		return strings.ToUpper(via[:i])
+	}
+	return strings.ToUpper(via)
 }
 
 type WSCNatShameRow struct {
@@ -923,6 +940,8 @@ func fetchWSCStatus() WSCDashData {
 			Open        bool    `json:"open"`
 			Kind        string  `json:"kind"`
 			ClubName    string  `json:"club_name"`
+			Connection  string  `json:"connection"`
+			TunnelVia   string  `json:"tunnel_via"`
 		} `json:"gatherings"`
 		Matches []struct {
 			GID         int64   `json:"gid"`
@@ -931,6 +950,8 @@ func fetchWSCStatus() WSCDashData {
 			Players     []int64 `json:"players"`
 			PlayerCount int64   `json:"player_count"`
 			StartedAt   int64   `json:"started_at"`
+			Connection  string  `json:"connection"`
+			TunnelVia   string  `json:"tunnel_via"`
 		} `json:"matches"`
 		NatHallOfShame []struct {
 			PID          int64 `json:"pid"`
@@ -994,6 +1015,8 @@ func fetchWSCStatus() WSCDashData {
 			Open:        g.Open,
 			Kind:        g.Kind,
 			ClubName:    g.ClubName,
+			Connection:  g.Connection,
+			TunnelVia:   g.TunnelVia,
 		}
 		for _, pid := range g.Players {
 			row.Players = append(row.Players, WSCPlayerRow{
@@ -1015,6 +1038,8 @@ func fetchWSCStatus() WSCDashData {
 			HostPNID:    pnids[m.Host],
 			PlayerCount: m.PlayerCount,
 			StartedAt:   time.Unix(m.StartedAt, 0),
+			Connection:  m.Connection,
+			TunnelVia:   m.TunnelVia,
 		}
 		for _, pid := range m.Players {
 			if pnid := pnids[pid]; pnid != "" {
@@ -1055,6 +1080,7 @@ tr:last-child td{border-bottom:none}
 .badge{display:inline-block;padding:.2rem .5rem;border-radius:4px;font-size:.75rem;font-weight:600}
 .on{background:#dcfce7;color:#166534}.off{background:#fee2e2;color:#991b1b}
 .tag{display:inline-block;padding:.15rem .4rem;border-radius:4px;font-size:.75rem;background:#e0e7ff;color:#3730a3}
+.conn{display:inline-block;padding:.15rem .4rem;border-radius:4px;font-size:.75rem;background:#f4f4f5;color:#3f3f46}.conn.tunnel{background:#dbeafe;color:#1e40af}
 .kind{display:inline-block;padding:.15rem .4rem;border-radius:4px;font-size:.75rem;background:#f4f4f5;color:#3f3f46}.kind.friend{background:#f3e8ff;color:#6b21a8}.kind.club{background:#fef3c7;color:#92400e}
 .mono{font-family:monospace;font-size:.85rem}
 </style>
@@ -1094,7 +1120,7 @@ tr:last-child td{border-bottom:none}
 <h2><span data-i18n="wsc.gatherings_h">Active Gatherings</span>{{if .Gatherings}} <span style="background:#dcfce7;color:#166534;border-radius:999px;padding:.1rem .5rem;font-size:.75rem;font-weight:700;vertical-align:middle">{{len .Gatherings}}</span>{{end}}</h2>
 {{if .Gatherings}}
 <table>
-<tr><th>GID</th><th data-i18n="wsc.sport">Sport</th><th data-i18n="wsc.type">Type</th><th data-i18n="wsc.host">Host</th><th data-i18n="wsc.col_players">Players</th><th data-i18n="wsc.capacity">Capacity</th><th data-i18n="wsc.col_open">Open</th></tr>
+<tr><th>GID</th><th data-i18n="wsc.sport">Sport</th><th data-i18n="wsc.type">Type</th><th data-i18n="wsc.host">Host</th><th data-i18n="wsc.col_players">Players</th><th data-i18n="wsc.capacity">Capacity</th><th data-i18n="wsc.col_open">Open</th><th data-i18n="wsc.connection">Connection</th></tr>
 {{range .Gatherings}}
 <tr>
   <td class="mono">{{.GID}}</td>
@@ -1106,6 +1132,7 @@ tr:last-child td{border-bottom:none}
   </td>
   <td class="mono">{{.PlayerCount}}/{{.MaxPlayers}}</td>
   <td><span class="badge {{if .Open}}on{{else}}off{{end}}">{{if .Open}}<span data-i18n="wsc.open">open</span>{{else}}<span data-i18n="wsc.full">full</span>{{end}}</span></td>
+  <td>{{if eq .Connection "tunnel"}}<span class="conn tunnel"><span data-i18n="conn.tunnel">Tunnel</span> · {{wscTunnelRegion .TunnelVia}}</span>{{else if eq .Connection "direct"}}<span class="conn" data-i18n="conn.direct">Direct</span>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
 </tr>
 {{end}}
 </table>
@@ -1116,13 +1143,14 @@ tr:last-child td{border-bottom:none}
 <h2><span data-i18n="wsc.matches">Matches (last 24 h)</span>{{if .Matches}} <span style="background:#dcfce7;color:#166534;border-radius:999px;padding:.1rem .5rem;font-size:.75rem;font-weight:700;vertical-align:middle">{{len .Matches}}</span>{{end}}</h2>
 {{if .Matches}}
 <table>
-<tr><th data-i18n="stats.time">Time</th><th data-i18n="wsc.sport">Sport</th><th data-i18n="wsc.host">Host</th><th data-i18n="wsc.col_players">Players</th></tr>
+<tr><th data-i18n="stats.time">Time</th><th data-i18n="wsc.sport">Sport</th><th data-i18n="wsc.host">Host</th><th data-i18n="wsc.col_players">Players</th><th data-i18n="wsc.connection">Connection</th></tr>
 {{range .Matches}}
 <tr>
   <td class="mono" style="white-space:nowrap">{{localTime .StartedAt "match"}}</td>
   <td><span class="tag" data-i18n="{{sportKey .SportName}}">{{.SportName}}</span></td>
   <td>{{if .HostPNID}}<strong>@{{.HostPNID}}</strong>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
   <td>{{range .Players}}{{.}} {{end}}</td>
+  <td>{{if eq .Connection "tunnel"}}<span class="conn tunnel"><span data-i18n="conn.tunnel">Tunnel</span> · {{wscTunnelRegion .TunnelVia}}</span>{{else if eq .Connection "direct"}}<span class="conn" data-i18n="conn.direct">Direct</span>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
 </tr>
 {{end}}
 </table>
