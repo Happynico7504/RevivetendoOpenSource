@@ -33,10 +33,12 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -275,6 +277,7 @@ func init() {
 }
 
 func main() {
+	adoptKeepAlives()
 	godotenv.Load("/nico-pretendo-bridge/wiiu-chat-secure/.env")
 	// Prefixed load (godotenv.Load does not override already-set vars) so
 	// this can't collide with wiiu-chat-secure's own env - see
@@ -2419,7 +2422,7 @@ func syncViaKeepAlive(pid uint32) bool {
 	}
 	resp, _ := io.ReadAll(conn)
 	if !bytes.Contains(resp, []byte(`"ok":true`)) {
-		log.Printf("fetchFriendsPRUDP PID=%d: keep-alive sync failed (%s), using a separate login", pid, bytes.TrimSpace(resp))
+		log.Printf("fetchFriendsPRUDP PID=%d: keep-alive sync failed (%s)", pid, bytes.TrimSpace(resp))
 		return false
 	}
 	log.Printf("fetchFriendsPRUDP PID=%d: synced on the keep-alive connection", pid)
@@ -2428,6 +2431,13 @@ func syncViaKeepAlive(pid uint32) bool {
 
 func fetchFriendsPRUDP(ownerPID uint32, nexPassword, authHost string, authPort uint16) {
 	if syncViaKeepAlive(ownerPID) {
+		return
+	}
+	if keepAliveRunning(uint64(ownerPID)) {
+		// A second login would take over the keep-alive's place at Pretendo and, when it ends,
+		// leave the player "offline" there. Restart the keep-alive instead; it syncs on login.
+		log.Printf("fetchFriendsPRUDP PID=%d: keep-alive did not sync, restarting it instead of a separate login", ownerPID)
+		launchKeepAlive(ownerPID, nexPassword, authHost, authPort)
 		return
 	}
 	script := "/nico-pretendo-bridge/account-proxy/fetch_friends.py"
@@ -2906,14 +2916,98 @@ func handleInternalLookup(w http.ResponseWriter, r *http.Request) {
 	w.Write(out)
 }
 
-// keepAliveProcs tracks long-running fetch_friends.py --keep-alive processes (pid → *exec.Cmd).
+// keepAliveProcs tracks long-running fetch_friends.py --keep-alive processes (pid → *keepAliveProc).
 var keepAliveProcs sync.Map
 
+type keepAliveProc struct {
+	cmd  *exec.Cmd
+	done chan struct{} // closed when the process has exited
+}
+
+// keepAliveRunning reports whether a keep-alive process is running for the PID.
+func keepAliveRunning(pid uint64) bool {
+	v, ok := keepAliveProcs.Load(pid)
+	if !ok {
+		return false
+	}
+	select {
+	case <-v.(*keepAliveProc).done:
+		return false
+	default:
+		return true
+	}
+}
+
+// killKeepAlive stops a keep-alive and waits for it: SIGTERM makes it log out of Pretendo
+// properly (see fetch_friends.py _run_until_stopped), SIGKILL only if it does not finish in 5s.
+// Pretendo forgets a PID's connection whenever ANY connection of that PID ends; an old one that
+// was just killed is only noticed later, by timeout - after its replacement logged in - and then
+// the replacement is the one forgotten: friends see the player offline and its notifications stop.
 func killKeepAlive(pid uint64) {
-	if v, ok := keepAliveProcs.LoadAndDelete(pid); ok {
-		if cmd := v.(*exec.Cmd); cmd.Process != nil {
-			_ = cmd.Process.Kill()
+	v, ok := keepAliveProcs.LoadAndDelete(pid)
+	if !ok {
+		return
+	}
+	p := v.(*keepAliveProc)
+	if p.cmd.Process == nil {
+		return
+	}
+	_ = p.cmd.Process.Signal(syscall.SIGTERM)
+	select {
+	case <-p.done:
+	case <-time.After(5 * time.Second):
+		_ = p.cmd.Process.Kill()
+		<-p.done
+	}
+}
+
+// adoptKeepAlives takes over keep-alives that outlived a previous account-proxy (found by command
+// line in /proc), so they are reused or stopped properly instead of running next to a new one for
+// the same PID - two connections of one PID push each other out at Pretendo.
+func adoptKeepAlives() {
+	dirs, _ := os.ReadDir("/proc")
+	for _, d := range dirs {
+		procPID, err := strconv.Atoi(d.Name())
+		if err != nil || procPID == os.Getpid() {
+			continue
 		}
+		raw, err := os.ReadFile("/proc/" + d.Name() + "/cmdline")
+		if err != nil {
+			continue
+		}
+		args := strings.Split(strings.TrimRight(string(raw), "\x00"), "\x00")
+		if len(args) < 2 || !strings.HasSuffix(args[1], "fetch_friends.py") || !slices.Contains(args, "--keep-alive") {
+			continue
+		}
+		i := slices.Index(args, "--pid")
+		if i < 0 || i+1 >= len(args) {
+			continue
+		}
+		pid, err := strconv.ParseUint(args[i+1], 10, 32)
+		if err != nil {
+			continue
+		}
+		proc, err := os.FindProcess(procPID)
+		if err != nil {
+			continue
+		}
+		ka := &keepAliveProc{cmd: &exec.Cmd{Process: proc}, done: make(chan struct{})}
+		if old, loaded := keepAliveProcs.LoadOrStore(pid, ka); loaded {
+			// Two for one PID already: keep the first, stop this one properly.
+			log.Printf("adoptKeepAlives: PID=%d has a second keep-alive (process %d), stopping it", pid, procPID)
+			_ = proc.Signal(syscall.SIGTERM)
+			_ = old
+			continue
+		}
+		go func(pid uint64, procPID int, ka *keepAliveProc) {
+			for syscall.Kill(procPID, 0) == nil { // not our child: poll until it is gone
+				time.Sleep(2 * time.Second)
+			}
+			close(ka.done)
+			keepAliveProcs.CompareAndDelete(pid, ka)
+			log.Printf("keepAlive PID=%d: adopted process %d exited", pid, procPID)
+		}(pid, procPID, ka)
+		log.Printf("adoptKeepAlives: PID=%d keep-alive process %d adopted", pid, procPID)
 	}
 }
 
@@ -2934,10 +3028,12 @@ func launchKeepAlive(pid uint32, nexPassword, authHost string, authPort uint16) 
 		log.Printf("launchKeepAlive PID=%d: %v", pid, err)
 		return
 	}
-	keepAliveProcs.Store(uint64(pid), cmd)
+	proc := &keepAliveProc{cmd: cmd, done: make(chan struct{})}
+	keepAliveProcs.Store(uint64(pid), proc)
 	go func() {
 		_ = cmd.Wait()
-		keepAliveProcs.CompareAndDelete(uint64(pid), cmd)
+		close(proc.done)
+		keepAliveProcs.CompareAndDelete(uint64(pid), proc)
 		log.Printf("keepAlive PID=%d: process exited", pid)
 	}()
 }
@@ -2959,6 +3055,17 @@ func handlePresenceStart(w http.ResponseWriter, r *http.Request) {
 		FROM nex_accounts WHERE pid = $1 AND friends_nex_password IS NOT NULL AND last_auth_host IS NOT NULL`, pid).
 		Scan(&nexPassword, &authHost, &portInt); err != nil {
 		http.Error(w, "no credentials for pid", http.StatusNotFound)
+		return
+	}
+	if keepAliveRunning(pid) {
+		// The console logged in again (Friends reconnect): keep the existing Pretendo connection -
+		// replacing it is what races Pretendo's one-connection-per-PID bookkeeping - and resync it.
+		go func() {
+			if !syncViaKeepAlive(uint32(pid)) {
+				launchKeepAlive(uint32(pid), nexPassword, authHost, uint16(portInt))
+			}
+		}()
+		w.WriteHeader(http.StatusAccepted)
 		return
 	}
 	go launchKeepAlive(uint32(pid), nexPassword, authHost, uint16(portInt))

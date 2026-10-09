@@ -6,6 +6,7 @@ full friend list via UpdateAndGetAllInformation, and upsert into pretendo_friend
 
 import argparse
 import asyncio
+import signal
 import json
 import os
 import sys
@@ -629,11 +630,17 @@ async def fetch_friends(pid: int, nex_password: str, auth_host: str, auth_port: 
                     # 24 h, but end as soon as Pretendo closes it: a dead keep-alive
                     # gets no notifications and every forwarded command fails.
                     # fetch_friends_loop reconnects 5 s after the error.
+                    closed = asyncio.ensure_future(forwarder.closed.wait())
+                    stop = asyncio.ensure_future(STOP.wait()) if STOP else None
+                    waits = [closed] + ([stop] if stop else [])
                     try:
-                        await asyncio.wait_for(forwarder.closed.wait(), timeout=86400)
-                    except asyncio.TimeoutError:
-                        pass
-                    else:
+                        await asyncio.wait(waits, timeout=86400, return_when=asyncio.FIRST_COMPLETED)
+                    finally:
+                        for w in waits:
+                            w.cancel()
+                    if STOP and STOP.is_set():
+                        pass  # leave normally: the connection logs out on the way out
+                    elif forwarder.closed.is_set():
                         print(f"  keep-alive PID={pid}: Pretendo closed the connection, reconnecting", flush=True)
                         raise RuntimeError("Pretendo connection closed")
                 finally:
@@ -685,22 +692,43 @@ def main():
                         help="Hold the Pretendo connection open after sync so this user appears online")
     args = parser.parse_args()
 
-    asyncio.run(fetch_friends_loop(
+    asyncio.run(_run_until_stopped(args))
+
+
+# Set by SIGTERM: the keep-alive leaves its connection normally, which is what makes
+# NintendoClients send the PRUDP DISCONNECT (cancelling would skip it), and does not reconnect.
+STOP = None
+
+
+async def _run_until_stopped(args):
+    # account-proxy stops a keep-alive with SIGTERM and waits for it. Pretendo keeps ONE connection
+    # per PID and forgets it whenever any connection of that PID ends - if the old connection's end
+    # is only noticed (by timeout) after the replacement logged in, Pretendo drops the NEW one: the
+    # player looks offline to friends and gets no presence notifications (2026-10-09).
+    global STOP
+    STOP = asyncio.Event()
+    asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, STOP.set)
+    await fetch_friends_loop(
         args.pid, args.nex_password,
         args.auth_host, args.auth_port,
         args.db_uri, args.keep_alive,
-    ))
+    )
+    if STOP.is_set():
+        print(f"  keep-alive PID={args.pid}: stopped, logged out of Pretendo", flush=True)
 
 
 async def fetch_friends_loop(pid, nex_password, auth_host, auth_port, db_uri, keep_alive):
-    while True:
+    while not (STOP and STOP.is_set()):
         try:
             await fetch_friends(pid, nex_password, auth_host, auth_port, db_uri, keep_alive)
         except Exception as e:
             if not keep_alive:
                 raise
             print(f"  keep-alive PID={pid}: connection lost ({e}), reconnecting in 5s", flush=True)
-            await asyncio.sleep(5)
+            try:
+                await asyncio.wait_for(STOP.wait(), timeout=5) if STOP else await asyncio.sleep(5)
+            except asyncio.TimeoutError:
+                pass
             continue
         if not keep_alive:
             break
