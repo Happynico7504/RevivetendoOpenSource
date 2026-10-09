@@ -818,6 +818,8 @@ type WSCPlayerRow struct {
 	Port        string
 	Region      string // "US"/"EU"/"JP", "" if unknown
 	ConnectedAt int64  // unix seconds the connection was established, 0 if unknown
+	Connection  string // the player's current gathering: "tunnel", "direct" or "" (in none / host alone)
+	TunnelVia   string
 }
 
 type WSCGatheringRow struct {
@@ -988,6 +990,14 @@ func fetchWSCStatus() WSCDashData {
 	}
 	pnids := lookupPNIDs(pids)
 
+	// Each player's live connection is that of the gathering they are in right now.
+	type liveConn struct{ conn, via string }
+	playerConn := map[int64]liveConn{}
+	for _, g := range raw.Gatherings {
+		for _, p := range g.Players {
+			playerConn[p] = liveConn{g.Connection, g.TunnelVia}
+		}
+	}
 	for _, s := range raw.Sessions {
 		data.Players = append(data.Players, WSCPlayerRow{
 			PID:         s.PID,
@@ -997,6 +1007,8 @@ func fetchWSCStatus() WSCDashData {
 			Port:        s.Port,
 			Region:      s.Region,
 			ConnectedAt: s.ConnectedAt,
+			Connection:  playerConn[s.PID].conn,
+			TunnelVia:   playerConn[s.PID].via,
 		})
 	}
 
@@ -1102,7 +1114,7 @@ tr:last-child td{border-bottom:none}
 <h2><span data-i18n="wsc.players">Connected Players</span>{{if .Players}} <span style="background:#dcfce7;color:#166534;border-radius:999px;padding:.1rem .5rem;font-size:.75rem;font-weight:700;vertical-align:middle">{{len .Players}}</span>{{end}}</h2>
 {{if .Players}}
 <table>
-<tr><th>PNID</th><th>PID</th><th data-i18n="wsc.region">Region</th><th data-i18n="wsc.connected_for">Connected</th><th>NAT</th></tr>
+<tr><th>PNID</th><th>PID</th><th data-i18n="wsc.region">Region</th><th data-i18n="wsc.connected_for">Connected</th><th>NAT</th><th data-i18n="wsc.connection">Connection</th></tr>
 {{range .Players}}
 <tr>
   <td>{{if .PNID}}<strong>@{{.PNID}}</strong>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
@@ -1110,6 +1122,7 @@ tr:last-child td{border-bottom:none}
   <td>{{if .Region}}<span class="badge" style="background:#e0e7ff;color:#3730a3">{{.Region}}</span>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
   <td class="mono"><span class="conn-time"{{if .ConnectedAt}} data-since="{{.ConnectedAt}}"{{end}}>{{connectedFor .ConnectedAt}}</span></td>
   <td>{{if eq .NATm 1}}<span class="badge on" data-i18n="nat.open">Open</span>{{else if eq .NATm 2}}<span class="badge" style="background:#fef9c3;color:#854d0e" data-i18n="nat.moderate">Moderate</span>{{else if eq .NATm 3}}<span class="badge off" data-i18n="nat.strict">Strict</span>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
+  <td>{{if eq .Connection "tunnel"}}<span class="conn tunnel"><span data-i18n="conn.tunnel">Tunnel</span> · {{wscTunnelRegion .TunnelVia}}</span>{{else if eq .Connection "direct"}}<span class="conn" data-i18n="conn.direct">Direct</span>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
 </tr>
 {{end}}
 </table>
@@ -1143,14 +1156,13 @@ tr:last-child td{border-bottom:none}
 <h2><span data-i18n="wsc.matches">Matches (last 24 h)</span>{{if .Matches}} <span style="background:#dcfce7;color:#166534;border-radius:999px;padding:.1rem .5rem;font-size:.75rem;font-weight:700;vertical-align:middle">{{len .Matches}}</span>{{end}}</h2>
 {{if .Matches}}
 <table>
-<tr><th data-i18n="stats.time">Time</th><th data-i18n="wsc.sport">Sport</th><th data-i18n="wsc.host">Host</th><th data-i18n="wsc.col_players">Players</th><th data-i18n="wsc.connection">Connection</th></tr>
+<tr><th data-i18n="stats.time">Time</th><th data-i18n="wsc.sport">Sport</th><th data-i18n="wsc.host">Host</th><th data-i18n="wsc.col_players">Players</th></tr>
 {{range .Matches}}
 <tr>
   <td class="mono" style="white-space:nowrap">{{localTime .StartedAt "match"}}</td>
   <td><span class="tag" data-i18n="{{sportKey .SportName}}">{{.SportName}}</span></td>
   <td>{{if .HostPNID}}<strong>@{{.HostPNID}}</strong>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
   <td>{{range .Players}}{{.}} {{end}}</td>
-  <td>{{if eq .Connection "tunnel"}}<span class="conn tunnel"><span data-i18n="conn.tunnel">Tunnel</span> · {{wscTunnelRegion .TunnelVia}}</span>{{else if eq .Connection "direct"}}<span class="conn" data-i18n="conn.direct">Direct</span>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
 </tr>
 {{end}}
 </table>
