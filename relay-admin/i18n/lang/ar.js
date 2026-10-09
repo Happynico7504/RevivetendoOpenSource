@@ -278,6 +278,7 @@ I18N.register("ar", {
  "vid.st_rejected": "مرفوض",
  "vid.st_submitted": "بانتظار المراجعة",
  "vid.st_uploading": "لم يكتمل الرفع",
+ "vid.stats": "المشاهدات: {views} · الإعجابات: {likes} · التعليقات: {comments}",
  "vid.title": "فيديوهاتي — Revivetendo TV",
  "vid.uploaded": "تم الرفع! يجري تحويله الآن ثم ينتقل إلى المراجعة.",
  "vid.uploading": "جارٍ الرفع… أبقِ هذه الصفحة مفتوحة.",

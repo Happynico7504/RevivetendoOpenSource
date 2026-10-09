@@ -278,6 +278,7 @@ I18N.register("pl", {
  "vid.st_rejected": "Odrzucony",
  "vid.st_submitted": "Czeka na sprawdzenie",
  "vid.st_uploading": "Przesyłanie nieukończone",
+ "vid.stats": "{views} wyświetleń · {likes} polubień · {comments} komentarzy",
  "vid.title": "Moje filmy — Revivetendo TV",
  "vid.uploaded": "Przesłano! Film jest teraz konwertowany, a potem trafi do sprawdzenia.",
  "vid.uploading": "Przesyłanie… nie zamykaj tej strony.",

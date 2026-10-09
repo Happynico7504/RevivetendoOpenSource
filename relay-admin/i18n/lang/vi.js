@@ -278,6 +278,7 @@ I18N.register("vi", {
  "vid.st_rejected": "Bị từ chối",
  "vid.st_submitted": "Đang chờ duyệt",
  "vid.st_uploading": "Chưa tải lên xong",
+ "vid.stats": "{views} lượt xem · {likes} lượt thích · {comments} bình luận",
  "vid.title": "Video của tôi — Revivetendo TV",
  "vid.uploaded": "Đã tải lên! Video đang được chuyển đổi, sau đó sẽ được duyệt.",
  "vid.uploading": "Đang tải lên… hãy giữ trang này mở.",

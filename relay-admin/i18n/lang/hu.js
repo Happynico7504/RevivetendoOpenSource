@@ -278,6 +278,7 @@ I18N.register("hu", {
  "vid.st_rejected": "Elutasítva",
  "vid.st_submitted": "Ellenőrzésre vár",
  "vid.st_uploading": "A feltöltés nem fejeződött be",
+ "vid.stats": "{views} megtekintés · {likes} kedvelés · {comments} hozzászólás",
  "vid.title": "Videóim — Revivetendo TV",
  "vid.uploaded": "Feltöltve! Most átalakítjuk, utána ellenőrzésre kerül.",
  "vid.uploading": "Feltöltés… hagyd nyitva ezt az oldalt.",

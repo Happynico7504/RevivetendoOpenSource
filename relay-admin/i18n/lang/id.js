@@ -278,6 +278,7 @@ I18N.register("id", {
  "vid.st_rejected": "Ditolak",
  "vid.st_submitted": "Menunggu peninjauan",
  "vid.st_uploading": "Unggahan belum selesai",
+ "vid.stats": "{views} kali ditonton · {likes} suka · {comments} komentar",
  "vid.title": "Video Saya — Revivetendo TV",
  "vid.uploaded": "Terunggah! Sekarang sedang dikonversi, lalu masuk peninjauan.",
  "vid.uploading": "Mengunggah… biarkan halaman ini tetap terbuka.",

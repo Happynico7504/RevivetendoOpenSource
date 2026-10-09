@@ -278,6 +278,7 @@ I18N.register("tr", {
  "vid.st_rejected": "Reddedildi",
  "vid.st_submitted": "İnceleme bekliyor",
  "vid.st_uploading": "Yükleme tamamlanmadı",
+ "vid.stats": "{views} görüntülenme · {likes} beğeni · {comments} yorum",
  "vid.title": "Videolarım — Revivetendo TV",
  "vid.uploaded": "Yüklendi! Şimdi dönüştürülüyor, ardından incelemeye gidecek.",
  "vid.uploading": "Yükleniyor… bu sayfayı açık tut.",

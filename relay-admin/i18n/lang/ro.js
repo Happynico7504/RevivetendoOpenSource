@@ -278,6 +278,7 @@ I18N.register("ro", {
  "vid.st_rejected": "Respins",
  "vid.st_submitted": "Așteaptă verificarea",
  "vid.st_uploading": "Încărcare neterminată",
+ "vid.stats": "{views} vizualizări · {likes} aprecieri · {comments} comentarii",
  "vid.title": "Videoclipurile mele — Revivetendo TV",
  "vid.uploaded": "Încărcat! Acum se convertește, apoi trece la verificare.",
  "vid.uploading": "Se încarcă… ține pagina deschisă.",

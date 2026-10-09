@@ -278,6 +278,7 @@ I18N.register("hi", {
  "vid.st_rejected": "अस्वीकृत",
  "vid.st_submitted": "समीक्षा की प्रतीक्षा में",
  "vid.st_uploading": "अपलोड पूरा नहीं हुआ",
+ "vid.stats": "{views} बार देखा गया · {likes} पसंद · {comments} टिप्पणियाँ",
  "vid.title": "मेरे वीडियो — Revivetendo TV",
  "vid.uploaded": "अपलोड हो गया! अभी यह कन्वर्ट हो रहा है, फिर समीक्षा के लिए जाएगा।",
  "vid.uploading": "अपलोड हो रहा है… यह पेज खुला रखें।",

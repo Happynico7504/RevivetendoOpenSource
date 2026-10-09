@@ -278,6 +278,7 @@ I18N.register("it", {
  "vid.st_rejected": "Rifiutato",
  "vid.st_submitted": "In attesa di controllo",
  "vid.st_uploading": "Caricamento non completato",
+ "vid.stats": "{views} visualizzazioni · {likes} Mi piace · {comments} commenti",
  "vid.title": "I miei video — Revivetendo TV",
  "vid.uploaded": "Caricato! Ora viene convertito e poi passa al controllo.",
  "vid.uploading": "Caricamento in corso… tieni aperta questa pagina.",

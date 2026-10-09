@@ -278,6 +278,7 @@ I18N.register("fr", {
  "vid.st_rejected": "Refusée",
  "vid.st_submitted": "En attente de vérification",
  "vid.st_uploading": "Envoi non terminé",
+ "vid.stats": "{views} vues · {likes} j'aime · {comments} commentaires",
  "vid.title": "Mes vidéos — Revivetendo TV",
  "vid.uploaded": "Envoyée ! Elle est en cours de conversion, puis passera en vérification.",
  "vid.uploading": "Envoi en cours… garde cette page ouverte.",

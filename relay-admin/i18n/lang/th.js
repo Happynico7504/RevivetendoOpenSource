@@ -278,6 +278,7 @@ I18N.register("th", {
  "vid.st_rejected": "ถูกปฏิเสธ",
  "vid.st_submitted": "รอการตรวจสอบ",
  "vid.st_uploading": "อัปโหลดยังไม่เสร็จ",
+ "vid.stats": "ดู {views} ครั้ง · ถูกใจ {likes} · ความคิดเห็น {comments}",
  "vid.title": "วิดีโอของฉัน — Revivetendo TV",
  "vid.uploaded": "อัปโหลดแล้ว! ตอนนี้กำลังแปลงไฟล์ จากนั้นจะเข้าสู่การตรวจสอบ",
  "vid.uploading": "กำลังอัปโหลด… โปรดเปิดหน้านี้ไว้",

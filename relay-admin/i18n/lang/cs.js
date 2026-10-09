@@ -278,6 +278,7 @@ I18N.register("cs", {
  "vid.st_rejected": "Zamítnuto",
  "vid.st_submitted": "Čeká na kontrolu",
  "vid.st_uploading": "Nahrávání nedokončeno",
+ "vid.stats": "{views} zhlédnutí · {likes} To se mi líbí · {comments} komentářů",
  "vid.title": "Moje videa — Revivetendo TV",
  "vid.uploaded": "Nahráno! Teď se převádí a pak půjde ke kontrole.",
  "vid.uploading": "Nahrávání… nech tuto stránku otevřenou.",

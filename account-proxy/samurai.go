@@ -294,18 +294,32 @@ body{margin:0;background:#141414;color:#fff;font-family:sans-serif}
 .v{display:inline-block;vertical-align:top;width:260px;margin:0 18px 18px 0;background:#222;border-radius:10px;overflow:hidden}
 .v img{display:block;width:260px;height:109px;background:#333}
 .v p{margin:8px 12px 12px;font-size:18px}
-#player{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:#000;text-align:center}
-#player video{width:1280px;height:640px;max-width:100%;background:#000}
+#player{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:#000;text-align:center;overflow-y:auto}
+#player video{width:1280px;height:600px;max-width:100%;background:#000}
 #player h2{margin:8px 0 0;font-size:24px}
 #player .err{display:none;font-size:22px;color:#ff8a80}
-#player button{position:absolute;top:12px;right:12px;font-size:22px;padding:10px 22px;border:0;border-radius:8px}
+#player #back{position:absolute;top:12px;right:12px;font-size:22px;padding:10px 22px;border:0;border-radius:8px}
+.v .st{margin:-6px 12px 12px;font-size:15px;color:#aaa}
+#social{display:none;text-align:left;max-width:900px;margin:12px auto 40px;padding:0 20px}
+#social .bar{display:-webkit-box;-webkit-box-align:center;margin-bottom:14px}
+#stats{-webkit-box-flex:1;font-size:20px;color:#ccc}
+#social button{font-size:22px;padding:10px 22px;border:0;border-radius:8px;background:#333;color:#fff;margin-left:10px}
+#social button.on{background:#e2231a}
+.cform{display:-webkit-box;margin-bottom:10px}
+#ctext{-webkit-box-flex:1;font-size:22px;padding:10px;border:0;border-radius:8px}
+#smsg{color:#ff8a80;font-size:18px;min-height:22px;margin:4px 0 10px}
+.c{border-top:1px solid #333;padding:10px 0;font-size:20px;word-wrap:break-word}
+.c b{color:#fff}.c span{color:#888;font-size:16px;margin-left:8px}.c div{color:#ddd;margin-top:4px;white-space:pre-wrap}
 </style></head><body>
 <div id="top"><h1>Revivetendo TV</h1><button id="close" onclick="closeApp()">Close</button></div>
 {{range .Telops}}<div id="telop">{{.}}</div>{{end}}
 {{range .Channels}}<div class="ch"><h2>{{.Name}}</h2><div class="row">
-{{range .Videos}}<a class="v" href="#" onclick="play('{{.URL}}','{{.Name}}');return false"><img src="{{.Banner}}" alt=""><p>{{.Name}}</p></a>{{end}}
+{{range .Videos}}<a class="v" href="#" onclick="play('{{.URL}}','{{.Name}}',{{.ID}},{{.Social}});return false"><img src="{{.Banner}}" alt=""><p>{{.Name}}</p>{{if .Social}}<p class="st">{{.Views}} views &middot; {{.Likes}} likes</p>{{end}}</a>{{end}}
 </div></div>{{end}}
-<div id="player"><video id="vid" controls onerror="vidErr()"></video><h2 id="vname"></h2><p id="verr" class="err">This video can't be loaded right now. Please try again later.</p><button onclick="stop()">Back</button></div>
+<div id="player"><video id="vid" controls onerror="vidErr()"></video><h2 id="vname"></h2><p id="verr" class="err">This video can't be loaded right now. Please try again later.</p><button id="back" onclick="stop()">Back</button>
+<div id="social"><div class="bar"><span id="stats"></span><button id="like" onclick="like()">Like</button></div>
+<div class="cform"><input id="ctext" type="text" maxlength="200" placeholder="Write a comment..."><button onclick="comment()">Post</button></div>
+<p id="smsg"></p><div id="clist"></div></div></div>
 <script>
 // The applet (wood) keeps its loading curtain up until the page ends startup.
 // Unlike Miiverse, wood's endStartUp takes one argument (no-arg call throws
@@ -321,13 +335,33 @@ function closeApp(){if(window.wiiuBrowser&&wiiuBrowser.closeApplication){wiiuBro
 // (tested 2026-10-10: webkitEnterFullscreen works and wiiu.videoplayer.viewMode
 // switches, but nothing reaches the TV). Videos play inline on the GamePad.
 function vidErr(){document.getElementById('verr').style.display='block'}
-function play(u,n){document.getElementById('verr').style.display='none';var v=document.getElementById('vid');document.getElementById('vname').textContent=n;document.getElementById('player').style.display='block';v.src=u;v.play()}
+function $(i){return document.getElementById(i)}
+function play(u,n,id,social){$('verr').style.display='none';var v=$('vid');$('vname').textContent=n;$('player').style.display='block';$('player').scrollTop=0;v.src=u;v.play();
+curID=id;$('social').style.display=social?'block':'none';$('clist').innerHTML='';$('stats').textContent='';$('smsg').textContent='';if(social)tvLoad()}
+// Views, likes and comments (samurai_social.go). The server checks the
+// account against this console's recent logins.
+var curID=0,PID='';
+try{if(window.wiiuNNA){var p=wiiuNNA.principalId;PID=String(typeof p==='function'?wiiuNNA.principalId():p)}}catch(e){}
+function tvReq(method,path,body,cb){var x=new XMLHttpRequest();x.open(method,'/ninja/tv/'+path+'?id='+curID,true);x.setRequestHeader('X-TV-PID',PID);x.setRequestHeader('Content-Type','application/json');
+x.onreadystatechange=function(){if(x.readyState!==4)return;var d={};try{d=JSON.parse(x.responseText)}catch(e){}if(x.status===200)cb(d);else $('smsg').textContent=d.error||'Something went wrong, please try again.'};x.send(body?JSON.stringify(body):null)}
+function tvLoad(){tvReq('GET','video',null,tvRender)}
+function tvRender(d){$('smsg').textContent='';$('stats').textContent=d.views+' views \u00b7 '+d.likes+' likes \u00b7 '+d.commentCount+' comments';
+var b=$('like');b.textContent=d.liked?'Liked':'Like';b.className=d.liked?'on':'';
+var l=$('clist');l.innerHTML='';for(var i=0;i<d.comments.length;i++){var c=d.comments[i],e=document.createElement('div'),h=document.createElement('b'),t=document.createElement('span'),m=document.createElement('div');
+e.className='c';h.textContent=c.name||'?';t.textContent=c.date;m.textContent=c.body;e.appendChild(h);e.appendChild(t);e.appendChild(m);l.appendChild(e)}
+if(!d.comments.length){var n=document.createElement('div');n.className='c';n.textContent='No comments yet.';l.appendChild(n)}}
+function like(){tvReq('POST','like',{},tvRender)}
+function comment(){var t=$('ctext').value.replace(/^\s+|\s+$/g,'');if(!t)return;tvReq('POST','comment',{body:t},function(d){$('ctext').value='';tvRender(d)})}
 function stop(){var v=document.getElementById('vid');v.pause();v.removeAttribute('src');v.load();document.getElementById('player').style.display='none'}
 </script></body></html>`))
 
 func handleWiiUShop(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/media/") {
 		serveSamuraiMedia(w, r)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/ninja/tv/") {
+		handleTVAPI(w, r)
 		return
 	}
 	log.Printf("wiiu shop: %s %s from %s (UA %q)", r.Method, r.URL.RequestURI(), realIP(r), r.UserAgent())
@@ -343,7 +377,12 @@ func handleWiiUShop(w http.ResponseWriter, r *http.Request) {
 	}
 	// Media links are relative to the host the page came from, so they keep
 	// the page's own (http) scheme and stay inside the applet's allowlist.
-	type pageVideo struct{ Name, Banner, URL string }
+	type pageVideo struct {
+		Name, Banner, URL string
+		ID                int64
+		Social            bool // an upload: has views, likes and comments
+		Views, Likes      int64
+	}
 	type pageChannel struct {
 		Name   string
 		Videos []pageVideo
@@ -352,11 +391,23 @@ func handleWiiUShop(w http.ResponseWriter, r *http.Request) {
 		Telops   []string
 		Channels []pageChannel
 	}{Telops: cat.Telops}
+	var uploads []int64
+	for _, v := range cat.Videos {
+		if id, ok := tvUploadID(v.ID); ok {
+			uploads = append(uploads, id)
+		}
+	}
+	stats := tvStatsFor(uploads)
 	for _, ch := range cat.Channels {
 		pc := pageChannel{Name: ch.Name}
 		for _, id := range ch.Videos {
 			if v := cat.video(id); v != nil && v.MP4 != "" {
-				pc.Videos = append(pc.Videos, pageVideo{Name: v.Name, Banner: "/media/" + v.Banner, URL: "/media/" + v.MP4})
+				pv := pageVideo{Name: v.Name, Banner: "/media/" + v.Banner, URL: "/media/" + v.MP4, ID: v.ID}
+				if uid, ok := tvUploadID(v.ID); ok {
+					st := stats[uid]
+					pv.Social, pv.Views, pv.Likes = true, st.Views, st.Likes
+				}
+				pc.Videos = append(pc.Videos, pv)
 			}
 		}
 		if len(pc.Videos) > 0 {
@@ -425,6 +476,9 @@ func serveSamuraiUpload(w http.ResponseWriter, r *http.Request, rel string, m []
 	if !samuraiListed(strings.TrimPrefix(rel, "/")) {
 		http.NotFound(w, r)
 		return
+	}
+	if m[2] == "video.moflex" || m[2] == "video.mp4" {
+		tvCountView(r, m[1])
 	}
 	w.Header().Set("Content-Type", samuraiContentType(m[2]))
 	// A conversion that never reached S3 (no S3 configured) is still local.

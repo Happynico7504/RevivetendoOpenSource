@@ -278,6 +278,7 @@ I18N.register("uk", {
  "vid.st_rejected": "Відхилено",
  "vid.st_submitted": "Очікує перевірки",
  "vid.st_uploading": "Завантаження не завершено",
+ "vid.stats": "Перегляди: {views} · Вподобання: {likes} · Коментарі: {comments}",
  "vid.title": "Мої відео — Revivetendo TV",
  "vid.uploaded": "Завантажено! Зараз відео конвертується, потім піде на перевірку.",
  "vid.uploading": "Завантаження… не закривай цю сторінку.",

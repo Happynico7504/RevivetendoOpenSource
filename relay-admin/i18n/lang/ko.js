@@ -278,6 +278,7 @@ I18N.register("ko", {
  "vid.st_rejected": "거절됨",
  "vid.st_submitted": "검토 대기 중",
  "vid.st_uploading": "업로드 미완료",
+ "vid.stats": "조회 {views}회 · 좋아요 {likes} · 댓글 {comments}",
  "vid.title": "내 동영상 — Revivetendo TV",
  "vid.uploaded": "업로드 완료! 지금 변환 중이며 이후 검토로 넘어갑니다.",
  "vid.uploading": "업로드 중… 이 페이지를 열어 두세요.",

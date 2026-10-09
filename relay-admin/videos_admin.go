@@ -201,9 +201,38 @@ type adminVideoItem struct {
 	ReviewNote  string
 	Error       string
 	MoflexMB    string
+	Views       int64
+	Likes       int64
+	Comments    []adminVideoComment
 	CreatedAt   time.Time
 	SubmittedAt sql.NullTime
 	ReviewedAt  sql.NullTime
+}
+
+type adminVideoComment struct {
+	ID        int64
+	PID       int64
+	PNID      string
+	Body      string
+	CreatedAt time.Time
+}
+
+// adminVideoComments lists a video's comments, newest first.
+func adminVideoComments(id int64) []adminVideoComment {
+	rows, err := db.Query(`SELECT id, pid, body, created_at FROM eshop_video_comments WHERE video_id = $1 ORDER BY created_at DESC LIMIT 200`, id)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []adminVideoComment
+	for rows.Next() {
+		var c adminVideoComment
+		if rows.Scan(&c.ID, &c.PID, &c.Body, &c.CreatedAt) == nil {
+			c.PNID, _ = pnidForPID(c.PID)
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 var adminVideoStatuses = []string{"submitted", "live", "rejected", "processing", "failed", "uploading"}
@@ -236,8 +265,9 @@ func adminVideos(w http.ResponseWriter, r *http.Request) {
 	if status != "submitted" {
 		order = "updated_at DESC"
 	}
-	rows, err := db.Query(`SELECT id, pid, title, description, status, seconds, COALESCE(channel_id, 0), review_note, error, created_at, submitted_at, reviewed_at
-		FROM eshop_videos WHERE status = $1 ORDER BY `+order+` LIMIT 200`, status)
+	rows, err := db.Query(`SELECT id, pid, title, description, status, seconds, COALESCE(channel_id, 0), review_note, error, created_at, submitted_at, reviewed_at,
+			views, (SELECT COUNT(*) FROM eshop_video_likes l WHERE l.video_id = v.id)
+		FROM eshop_videos v WHERE status = $1 ORDER BY `+order+` LIMIT 200`, status)
 	if err != nil {
 		http.Error(w, "database error", http.StatusInternalServerError)
 		return
@@ -246,7 +276,7 @@ func adminVideos(w http.ResponseWriter, r *http.Request) {
 	var items []adminVideoItem
 	for rows.Next() {
 		var it adminVideoItem
-		if rows.Scan(&it.ID, &it.PID, &it.Title, &it.Description, &it.Status, &it.Seconds, &it.Channel, &it.ReviewNote, &it.Error, &it.CreatedAt, &it.SubmittedAt, &it.ReviewedAt) != nil {
+		if rows.Scan(&it.ID, &it.PID, &it.Title, &it.Description, &it.Status, &it.Seconds, &it.Channel, &it.ReviewNote, &it.Error, &it.CreatedAt, &it.SubmittedAt, &it.ReviewedAt, &it.Views, &it.Likes) != nil {
 			continue
 		}
 		it.PNID, _ = pnidForPID(it.PID)
@@ -254,6 +284,12 @@ func adminVideos(w http.ResponseWriter, r *http.Request) {
 			it.MoflexMB = fmt.Sprintf("%.1f MB", float64(st.Size())/(1<<20))
 		}
 		items = append(items, it)
+	}
+	rows.Close()
+	for i := range items {
+		if items[i].Status == "live" || items[i].Status == "rejected" {
+			items[i].Comments = adminVideoComments(items[i].ID)
+		}
 	}
 	w.Header().Set("Content-Type", "text/html")
 	if err := adminVideosTmpl.Execute(w, map[string]any{
@@ -297,6 +333,15 @@ func adminVideosReview(w http.ResponseWriter, r *http.Request) {
 	case "reopen":
 		res, err = db.Exec(`UPDATE eshop_videos SET status = 'submitted', reviewed_at = NULL, updated_at = NOW(),
 			submitted_at = COALESCE(submitted_at, NOW()) WHERE id = $1 AND status = 'rejected'`, id)
+	case "delcomment":
+		cid, _ := strconv.ParseInt(r.FormValue("comment"), 10, 64)
+		if _, err := db.Exec(`DELETE FROM eshop_video_comments WHERE id = $1 AND video_id = $2`, cid, id); err != nil {
+			redirect("Delete failed: " + err.Error())
+			return
+		}
+		log.Printf("videos: comment %d on #%d deleted by staff", cid, id)
+		redirect("Comment deleted.")
+		return
 	case "delete":
 		var status string
 		if err := db.QueryRow(`SELECT status FROM eshop_videos WHERE id = $1`, id).Scan(&status); err != nil {
@@ -379,6 +424,8 @@ button{font:inherit;cursor:pointer;border:none;border-radius:4px;padding:.35rem 
 .ok{background:#dcfce7;color:#166534}.no{background:#fee2e2;color:#991b1b}.re{background:#e0e7ff;color:#3730a3}.del{background:#f4f4f5;color:#52525b}
 .note{font-size:.85rem;background:#fff7ed;border:1px solid #fed7aa;border-radius:6px;padding:.4rem .7rem;margin-bottom:.5rem;white-space:pre-wrap}
 .empty{color:#666}
+.comments{margin:.6rem 0;font-size:.85rem}.comments summary{cursor:pointer;color:#2563eb}
+.cmt{border-top:1px solid #f1f1f4;padding:.4rem 0;white-space:pre-wrap;word-break:break-word}.cmt .who{color:#666;font-size:.75rem}.cmt form{margin:.2rem 0 0}
 </style>
 </head>
 <body>
@@ -401,7 +448,7 @@ button{font:inherit;cursor:pointer;border:none;border-radius:4px;padding:.35rem 
   </div>
   <div>
     <h2>#{{.ID}} {{.Title}}</h2>
-    <div class="meta">by <strong>{{if .PNID}}{{.PNID}}{{else}}?{{end}}</strong> (PID {{.PID}}){{if .Seconds}} · {{mmss .Seconds}}{{end}}{{if .MoflexMB}} · 3DS file {{.MoflexMB}}{{end}}<br>
+    <div class="meta">by <strong>{{if .PNID}}{{.PNID}}{{else}}?{{end}}</strong> (PID {{.PID}}){{if .Seconds}} · {{mmss .Seconds}}{{end}}{{if .MoflexMB}} · 3DS file {{.MoflexMB}}{{end}}{{if or (eq .Status "live") (eq .Status "rejected")}} · {{.Views}} views · {{.Likes}} likes · {{len .Comments}} comments{{end}}<br>
       uploaded {{.CreatedAt.Format "2006-01-02 15:04"}}{{if .ReviewedAt.Valid}} · reviewed {{.ReviewedAt.Time.Format "2006-01-02 15:04"}}{{end}}</div>
     {{if .Description}}<div class="desc">{{.Description}}</div>{{end}}
     {{if .Error}}<div class="note">Conversion: {{.Error}}</div>{{end}}
@@ -417,6 +464,10 @@ button{font:inherit;cursor:pointer;border:none;border-radius:4px;padding:.35rem 
     {{if eq .Status "rejected"}}
     <form method="post" action="/inkay/admin/videos/review"><input type="hidden" name="id" value="{{.ID}}"><input type="hidden" name="from" value="{{.Status}}"><input type="hidden" name="action" value="reopen"><button class="re">Back to review</button></form>
     {{end}}
+    {{if .Comments}}<details class="comments"><summary>Comments ({{len .Comments}})</summary>
+    {{$vid := .ID}}{{$st2 := .Status}}{{range .Comments}}<div class="cmt"><span class="who">{{if .PNID}}{{.PNID}}{{else}}PID {{.PID}}{{end}} · {{.CreatedAt.Format "2006-01-02 15:04"}}</span><div>{{.Body}}</div>
+    <form method="post" action="/inkay/admin/videos/review"><input type="hidden" name="id" value="{{$vid}}"><input type="hidden" name="from" value="{{$st2}}"><input type="hidden" name="action" value="delcomment"><input type="hidden" name="comment" value="{{.ID}}"><button class="del">Delete comment</button></form></div>{{end}}
+    </details>{{end}}
     {{if ne .Status "processing"}}
     <form method="post" action="/inkay/admin/videos/review" onsubmit="return confirm('Delete video #{{.ID}} and its files for good?')"><input type="hidden" name="id" value="{{.ID}}"><input type="hidden" name="from" value="{{.Status}}"><input type="hidden" name="action" value="delete"><button class="del">Delete</button></form>
     {{end}}

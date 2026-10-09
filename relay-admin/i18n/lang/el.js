@@ -278,6 +278,7 @@ I18N.register("el", {
  "vid.st_rejected": "Απορρίφθηκε",
  "vid.st_submitted": "Αναμένει έλεγχο",
  "vid.st_uploading": "Το ανέβασμα δεν ολοκληρώθηκε",
+ "vid.stats": "{views} προβολές · {likes} «μου αρέσει» · {comments} σχόλια",
  "vid.title": "Τα βίντεό μου — Revivetendo TV",
  "vid.uploaded": "Ανέβηκε! Τώρα μετατρέπεται και μετά πηγαίνει για έλεγχο.",
  "vid.uploading": "Ανέβασμα… κράτα αυτή τη σελίδα ανοιχτή.",

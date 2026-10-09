@@ -278,6 +278,7 @@ I18N.register("ja", {
  "vid.st_rejected": "却下",
  "vid.st_submitted": "確認待ち",
  "vid.st_uploading": "アップロード未完了",
+ "vid.stats": "再生 {views} 回 · いいね {likes} · コメント {comments}",
  "vid.title": "マイ動画 — Revivetendo TV",
  "vid.uploaded": "アップロードしました!現在変換中で、そのあと確認に回ります。",
  "vid.uploading": "アップロード中… このページを開いたままにしてください。",

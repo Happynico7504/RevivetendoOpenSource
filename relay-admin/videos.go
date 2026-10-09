@@ -61,6 +61,23 @@ CREATE TABLE IF NOT EXISTS eshop_videos (
 );
 CREATE INDEX IF NOT EXISTS eshop_videos_pid ON eshop_videos (pid);
 CREATE INDEX IF NOT EXISTS eshop_videos_status ON eshop_videos (status, submitted_at);
+-- Views, likes and comments come from the consoles (account-proxy/samurai_social.go).
+ALTER TABLE eshop_videos ADD COLUMN IF NOT EXISTS views BIGINT NOT NULL DEFAULT 0;
+CREATE TABLE IF NOT EXISTS eshop_video_likes (
+	video_id   BIGINT      NOT NULL REFERENCES eshop_videos (id) ON DELETE CASCADE,
+	pid        BIGINT      NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	PRIMARY KEY (video_id, pid)
+);
+CREATE TABLE IF NOT EXISTS eshop_video_comments (
+	id         BIGSERIAL   PRIMARY KEY,
+	video_id   BIGINT      NOT NULL REFERENCES eshop_videos (id) ON DELETE CASCADE,
+	pid        BIGINT      NOT NULL,
+	body       TEXT        NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS eshop_video_comments_video ON eshop_video_comments (video_id, created_at);
+CREATE INDEX IF NOT EXISTS eshop_video_comments_pid ON eshop_video_comments (pid, created_at);
 `
 
 const (
@@ -149,11 +166,16 @@ type videoSummary struct {
 	Error       string `json:"error,omitempty"`
 	ErrorKey    string `json:"errorKey,omitempty"`
 	Created     string `json:"created"`
+	Views       int64  `json:"views"`
+	Likes       int64  `json:"likes"`
+	Comments    int64  `json:"comments"`
 }
 
 func videoListFor(pid int64) []videoSummary {
-	rows, err := db.Query(`SELECT id, title, description, status, received, upload_size, seconds, review_note, error, created_at
-		FROM eshop_videos WHERE pid = $1 ORDER BY created_at DESC LIMIT 100`, pid)
+	rows, err := db.Query(`SELECT id, title, description, status, received, upload_size, seconds, review_note, error, created_at, views,
+			(SELECT COUNT(*) FROM eshop_video_likes l WHERE l.video_id = v.id),
+			(SELECT COUNT(*) FROM eshop_video_comments c WHERE c.video_id = v.id)
+		FROM eshop_videos v WHERE pid = $1 ORDER BY created_at DESC LIMIT 100`, pid)
 	if err != nil {
 		return nil
 	}
@@ -162,7 +184,7 @@ func videoListFor(pid int64) []videoSummary {
 	for rows.Next() {
 		var v videoSummary
 		var created time.Time
-		if rows.Scan(&v.ID, &v.Title, &v.Description, &v.Status, &v.Received, &v.Size, &v.Seconds, &v.ReviewNote, &v.Error, &created) != nil {
+		if rows.Scan(&v.ID, &v.Title, &v.Description, &v.Status, &v.Received, &v.Size, &v.Seconds, &v.ReviewNote, &v.Error, &created, &v.Views, &v.Likes, &v.Comments) != nil {
 			continue
 		}
 		v.Created = created.UTC().Format("2006-01-02")

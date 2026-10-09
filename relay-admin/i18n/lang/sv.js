@@ -278,6 +278,7 @@ I18N.register("sv", {
  "vid.st_rejected": "Avvisad",
  "vid.st_submitted": "Väntar på granskning",
  "vid.st_uploading": "Uppladdningen inte klar",
+ "vid.stats": "{views} visningar · {likes} gillningar · {comments} kommentarer",
  "vid.title": "Mina videor — Revivetendo TV",
  "vid.uploaded": "Uppladdad! Den konverteras nu och går sedan till granskning.",
  "vid.uploading": "Laddar upp… håll sidan öppen.",

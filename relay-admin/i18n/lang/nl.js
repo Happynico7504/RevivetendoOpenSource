@@ -278,6 +278,7 @@ I18N.register("nl", {
  "vid.st_rejected": "Afgewezen",
  "vid.st_submitted": "Wacht op controle",
  "vid.st_uploading": "Upload niet voltooid",
+ "vid.stats": "{views} weergaven · {likes} likes · {comments} reacties",
  "vid.title": "Mijn video's — Revivetendo TV",
  "vid.uploaded": "Geüpload! Hij wordt nu omgezet en gaat daarna naar de controle.",
  "vid.uploading": "Bezig met uploaden… houd deze pagina open.",

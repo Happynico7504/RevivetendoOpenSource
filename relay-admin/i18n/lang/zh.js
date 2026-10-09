@@ -278,6 +278,7 @@ I18N.register("zh", {
  "vid.st_rejected": "已拒绝",
  "vid.st_submitted": "等待审核",
  "vid.st_uploading": "上传未完成",
+ "vid.stats": "{views} 次观看 · {likes} 个赞 · {comments} 条评论",
  "vid.title": "我的视频 — Revivetendo TV",
  "vid.uploaded": "已上传!正在转换,之后会进入审核。",
  "vid.uploading": "上传中… 请保持此页面打开。",

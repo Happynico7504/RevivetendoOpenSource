@@ -278,6 +278,7 @@ I18N.register("ru", {
  "vid.st_rejected": "Отклонено",
  "vid.st_submitted": "Ждёт проверки",
  "vid.st_uploading": "Загрузка не завершена",
+ "vid.stats": "Просмотры: {views} · Лайки: {likes} · Комментарии: {comments}",
  "vid.title": "Мои видео — Revivetendo TV",
  "vid.uploaded": "Загружено! Сейчас видео конвертируется, затем отправится на проверку.",
  "vid.uploading": "Загрузка… не закрывай эту страницу.",

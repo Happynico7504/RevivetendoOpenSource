@@ -109,6 +109,7 @@ button.submit:disabled{opacity:.6;cursor:default}
     rejected: ['vid.st_rejected', 'Rejected']
   };
   function t(k, f) { return window.I18N ? I18N.t(k, f) : f; }
+  function fmt(s, a) { return s.replace(/\{(\w+)\}/g, function (m, k) { return k in a ? String(a[k]) : m; }); }
   function $(id) { return document.getElementById(id); }
   function api(method, url, body) {
     return fetch('/inkay/my/videos/api/' + url, {
@@ -140,6 +141,7 @@ button.submit:disabled{opacity:.6;cursor:default}
         var meta = v.created + (v.seconds ? ' · ' + mmss(v.seconds) : '');
         if (v.status === 'uploading') meta += ' · ' + Math.floor(100 * v.received / v.size) + '%';
         info.appendChild(el('div', 'meta', meta));
+        if (v.status === 'live') info.appendChild(el('div', 'meta', fmt(t('vid.stats', '{views} views · {likes} likes · {comments} comments'), { views: v.views, likes: v.likes, comments: v.comments })));
         if (v.reviewNote) info.appendChild(el('div', 'note', v.reviewNote));
         if (v.status === 'failed') info.appendChild(el('div', 'note', t(v.errorKey || 'vid.failed_help', v.error || 'This video could not be converted. Try another file (MP4 works best).')));
         var acts = el('div', 'acts');

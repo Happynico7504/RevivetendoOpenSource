@@ -278,6 +278,7 @@ I18N.register("fa", {
  "vid.st_rejected": "رد شد",
  "vid.st_submitted": "در انتظار بررسی",
  "vid.st_uploading": "بارگذاری کامل نشده",
+ "vid.stats": "بازدید: {views} · پسند: {likes} · نظر: {comments}",
  "vid.title": "ویدیوهای من — Revivetendo TV",
  "vid.uploaded": "بارگذاری شد! اکنون در حال تبدیل است و سپس برای بررسی می‌رود.",
  "vid.uploading": "در حال بارگذاری… این صفحه را باز نگه دار.",

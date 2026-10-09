@@ -278,6 +278,7 @@ I18N.register("de", {
  "vid.st_rejected": "Abgelehnt",
  "vid.st_submitted": "Wartet auf Prüfung",
  "vid.st_uploading": "Upload nicht abgeschlossen",
+ "vid.stats": "{views} Aufrufe · {likes} Likes · {comments} Kommentare",
  "vid.title": "Meine Videos — Revivetendo TV",
  "vid.uploaded": "Hochgeladen! Es wird jetzt umgewandelt und geht dann zur Prüfung.",
  "vid.uploading": "Wird hochgeladen… lass diese Seite geöffnet.",
