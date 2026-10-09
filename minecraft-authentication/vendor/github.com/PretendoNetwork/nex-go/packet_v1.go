@@ -29,6 +29,7 @@ var OptionMaxSubstreamID uint8 = 4
 // PacketV1 reresents a PRUDPv1 packet
 type PacketV1 struct {
 	Packet
+	duplicate                 bool // a reliable data packet already processed (resent by the client): acknowledge, do not process
 	magic                     []byte
 	substreamID               uint8
 	prudpProtocolMinorVersion int
@@ -162,7 +163,28 @@ func (packet *PacketV1) Decode() error {
 
 		client := packet.Sender()
 		client.mu.Lock()
+		// The payload is RC4 with one keystream per connection, so reliable packets must be
+		// deciphered exactly once each, in sequence order. A client resends a packet whose
+		// acknowledgement it did not get in time; deciphering that copy again moved the
+		// keystream ahead of the client's for good (every later packet deciphered to garbage
+		// and was dropped unacknowledged). A copy of an earlier packet is acknowledged but not
+		// deciphered; one from beyond a gap waits (unacknowledged, so it is resent).
+		reliable := packet.HasFlag(FlagReliable)
+		if reliable && client.inSeqKnown {
+			if ahead := int16(packet.SequenceID() - client.inSeqNext); ahead < 0 {
+				client.mu.Unlock()
+				packet.duplicate = true
+				return nil
+			} else if ahead > 0 {
+				client.mu.Unlock()
+				return errors.New("[PRUDPv1] reliable data packet ahead of a missing one, waiting for it")
+			}
+		}
 		client.Decipher().XORKeyStream(ciphered, payloadCrypted)
+		if reliable {
+			client.inSeqNext = packet.SequenceID() + 1
+			client.inSeqKnown = true
+		}
 		client.mu.Unlock()
 
 		request := NewRMCRequest()
@@ -333,3 +355,7 @@ func NewPacketV1(client *Client, data []byte) (*PacketV1, error) {
 
 	return &packetv1, nil
 }
+
+// Duplicate reports a reliable data packet the client resent after it had already been
+// processed. It is acknowledged again, but not deciphered or handled a second time.
+func (packet *PacketV1) Duplicate() bool { return packet.duplicate }

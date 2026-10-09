@@ -154,6 +154,9 @@ func (server *Server) handleSocketMessage() error {
 
 		server.Emit("Connect", packet)
 	case DataPacket:
+		if p1, ok := packet.(*PacketV1); ok && p1.Duplicate() {
+			break // already handled; the acknowledgement above is what the client was missing
+		}
 		server.Emit("Data", packet)
 	case DisconnectPacket:
 		server.Emit("Disconnect", packet)

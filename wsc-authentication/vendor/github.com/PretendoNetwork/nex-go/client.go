@@ -15,6 +15,8 @@ type Client struct {
 	sendMu                    sync.Mutex // serializes outgoing packets: sequence ID + RC4 keystream position must stay in step
 	cipher                    *rc4.Cipher
 	decipher                  *rc4.Cipher
+	inSeqNext                 uint16 // sequence ID of the next reliable data packet to decipher
+	inSeqKnown                bool   // inSeqNext is set (false until the first one after a key change)
 	prudpProtocolMinorVersion int
 	supportedFunctions        int
 	signatureKey              []byte
@@ -88,6 +90,7 @@ func (client *Client) UpdateRC4Key(key []byte) {
 
 	decipher, _ := rc4.NewCipher(key)
 	client.decipher = decipher
+	client.inSeqKnown = false // a fresh keystream: the next reliable data packet sets the order
 }
 
 // Cipher returns the RC4 cipher stream for out-bound packets

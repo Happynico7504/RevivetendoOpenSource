@@ -159,6 +159,9 @@ func (server *Server) handleSocketMessage() error {
 
 		server.Emit("Connect", packet)
 	case DataPacket:
+		if p1, ok := packet.(*PacketV1); ok && p1.Duplicate() {
+			break // already handled; the acknowledgement above is what the client was missing
+		}
 		server.Emit("Data", packet)
 	case DisconnectPacket:
 		server.Emit("Disconnect", packet)
@@ -257,7 +260,7 @@ func (server *Server) HPPListen(address string) {
 
 		server.Emit("Data", hppPacket)
 
-		rmcResponseBytes := <- server.hppClientResponses[client]
+		rmcResponseBytes := <-server.hppClientResponses[client]
 
 		if len(rmcResponseBytes) > 0 {
 			_, err = w.Write(rmcResponseBytes)
@@ -410,9 +413,9 @@ func (server *Server) GracefulKickAll() {
 		packet.SetSource(0xA1)
 		packet.SetDestination(0xAF)
 		packet.SetType(DisconnectPacket)
-	
+
 		packet.AddFlag(FlagReliable)
-	
+
 		server.Send(packet)
 
 		server.Emit("Kick", packet)

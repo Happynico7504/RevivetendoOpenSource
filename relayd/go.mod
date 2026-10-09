@@ -24,3 +24,5 @@ replace github.com/Happynico7504/relaylink => ../relaylink
 
 // Patched copy: tickets carry the real issue time (see third_party/nex-protocols-common-go/PATCHED.md).
 replace github.com/PretendoNetwork/nex-protocols-common-go => ./third_party/nex-protocols-common-go
+
+replace github.com/PretendoNetwork/nex-go => ./third_party/nex-go
