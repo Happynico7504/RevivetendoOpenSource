@@ -208,7 +208,9 @@ func handleEdgeClose(m *edgeMsg) error {
 	}
 	pkt, err := nex.NewPacketV1(s.client, nil)
 	if err == nil {
+		closedByEdge.Store(m.PID, struct{}{})
 		nexServer.Emit("Disconnect", pkt) // the normal cleanup, with its stale-event guard
+		closedByEdge.Delete(m.PID)
 	}
 	s.close()
 	nexServer.UnregisterClient(s.client)

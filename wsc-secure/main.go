@@ -1326,7 +1326,7 @@ func main() {
 			return
 		}
 		currentClient.Delete(pid)
-		fmt.Printf("Disconnect: PID=%d — cleaning up gatherings and session\n", pid)
+		fmt.Printf("Disconnect: PID=%d — cleaning up gatherings and session (%s)\n", pid, disconnectDiagnosis(pid, packet))
 		connectedPIDs.Delete(pid)
 		pidConnectedAt.Delete(pid)
 		// pidNATm/pidNATf intentionally kept — NAT type is stable across reconnects
@@ -1340,6 +1340,7 @@ func main() {
 	nexServer.On("Data", func(packet *nex.PacketV1) {
 		request := packet.RMCRequest()
 		fmt.Printf("==WSC Secure== proto=%#v method=%#v\n", request.ProtocolID(), request.MethodID())
+		noteCall(packet.Sender().PID(), request.ProtocolID(), request.MethodID())
 		// Handle AutoMatchmake manually — the library's parser panics on WSC packets
 		// because WSC sends VacantParticipants (uint16) in each MatchmakeSessionSearchCriteria,
 		// which the library only reads for MatchMakingProtocolVersion >= 3.5.
@@ -1580,6 +1581,7 @@ func searchObject77(client *nex.Client, callID uint32, param *datastore.DataStor
 }
 
 func sendResponse(client *nex.Client, protocolID uint8, callID uint32, methodID uint32, payload []byte) {
+	noteAnswer(client.PID())
 	rmcResponse := nex.NewRMCResponse(protocolID, callID)
 	rmcResponse.SetSuccess(methodID, payload)
 	pkt, _ := nex.NewPacketV1(client, nil)

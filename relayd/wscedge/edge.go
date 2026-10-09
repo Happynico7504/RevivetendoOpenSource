@@ -65,13 +65,21 @@ type Edge struct {
 	clients   map[uint32]*nex.Client // pid -> live client
 	seen      map[uint32]struct{}    // players heard from since the last liveness report
 	lastTrace map[uint32]time.Time   // last loss-triggered traceroute per player
+	lastCall  map[uint32]*callNote   // the player's last RMC call and when it was answered
+}
+
+type callNote struct {
+	proto    uint8
+	method   uint32
+	at       time.Time
+	answered time.Time
 }
 
 func New(cfg Config, b Backend) *Edge {
 	if cfg.AccessKey == "" {
 		cfg.AccessKey = "4d324052"
 	}
-	return &Edge{cfg: cfg, backend: b, clients: map[uint32]*nex.Client{}, seen: map[uint32]struct{}{}}
+	return &Edge{cfg: cfg, backend: b, clients: map[uint32]*nex.Client{}, seen: map[uint32]struct{}{}, lastCall: map[uint32]*callNote{}}
 }
 
 func (e *Edge) logf(f string, a ...any) {
@@ -107,7 +115,7 @@ func (e *Edge) Serve() {
 
 	srv.On("Connect", e.onConnect)
 	srv.On("Disconnect", e.onDisconnect)
-	srv.On("Kick", e.onDisconnect) // nex-go's own timeout ends a session like a disconnect
+	srv.On("Kick", e.onKick) // nex-go's own timeout ends a session like a disconnect
 	srv.On("Data", e.onData)
 	srv.On("Packet", e.onPacket)
 	srv.OnRebind(func(c *nex.Client, from, to *net.UDPAddr) {
@@ -185,7 +193,19 @@ func (e *Edge) onConnect(packet *nex.PacketV1) {
 	}
 }
 
+func (e *Edge) onKick(packet *nex.PacketV1) { e.endSession(packet, "nex-go timed it out") }
+
 func (e *Edge) onDisconnect(packet *nex.PacketV1) {
+	why := "console sent DISCONNECT"
+	if packet.Type() == nex.SynPacket {
+		why = "console opened a new connection from the same address"
+	}
+	e.endSession(packet, why)
+}
+
+// endSession closes a player's session, logging why and what the edge still had in flight to
+// it: a console also gives up when the server's answers do not reach it.
+func (e *Edge) endSession(packet *nex.PacketV1, why string) {
 	pid := packet.Sender().PID()
 	if pid == 0 {
 		return
@@ -197,9 +217,19 @@ func (e *Edge) onDisconnect(packet *nex.PacketV1) {
 		return
 	}
 	delete(e.clients, pid)
+	last := "no call seen"
+	if n := e.lastCall[pid]; n != nil {
+		state := "unanswered"
+		if !n.answered.IsZero() {
+			state = fmt.Sprintf("answered after %v", n.answered.Sub(n.at).Round(time.Millisecond))
+		}
+		last = fmt.Sprintf("last call proto=%#x method=%#x %v ago, %s", n.proto, n.method, time.Since(n.at).Round(time.Second), state)
+		delete(e.lastCall, pid)
+	}
 	e.mu.Unlock()
 	e.backend.Close(pid)
-	e.logf("wscedge: disconnect PID=%d", pid)
+	count, oldest, retries := packet.Sender().PendingStats()
+	e.logf("wscedge: disconnect PID=%d (%s; %d unacknowledged, oldest %v, resent up to %dx; %s)", pid, why, count, oldest.Round(time.Millisecond), retries, last)
 }
 
 func (e *Edge) onData(packet *nex.PacketV1) {
@@ -216,6 +246,9 @@ func (e *Edge) onData(packet *nex.PacketV1) {
 	if client.PID() == 0 || cur != client {
 		return // never completed the handshake here (or was refused by the main)
 	}
+	e.mu.Lock()
+	e.lastCall[client.PID()] = &callNote{proto: req.ProtocolID(), method: req.MethodID(), at: time.Now()}
+	e.mu.Unlock()
 	addr := client.Address()
 	call := Call{
 		PID: client.PID(), CallID: req.CallID(), Protocol: req.ProtocolID(), Custom: req.CustomID(),
@@ -266,6 +299,9 @@ func (e *Edge) reportAlive() {
 func (e *Edge) Out(pid uint32, payload []byte) {
 	e.mu.Lock()
 	client := e.clients[pid]
+	if n := e.lastCall[pid]; n != nil && n.answered.IsZero() {
+		n.answered = time.Now() // any message from the main after the call (normally its answer)
+	}
 	e.mu.Unlock()
 	if client == nil {
 		e.logf("wscedge: message for PID=%d, who is not connected here", pid)

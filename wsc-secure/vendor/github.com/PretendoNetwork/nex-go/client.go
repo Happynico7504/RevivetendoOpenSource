@@ -65,6 +65,7 @@ func (client *Client) OutHook() func(packet PacketInterface) {
 type pendingPacket struct {
 	data    []byte
 	sentAt  time.Time
+	first   time.Time // first transmission (sentAt moves with every resend)
 	retries int
 }
 
@@ -101,7 +102,27 @@ func (client *Client) TrackPending(sequenceID uint16, data []byte) {
 		client.pendingPackets = make(map[uint16]*pendingPacket)
 	}
 
-	client.pendingPackets[sequenceID] = &pendingPacket{data: data, sentAt: time.Now()}
+	now := time.Now()
+	client.pendingPackets[sequenceID] = &pendingPacket{data: data, sentAt: now, first: now}
+}
+
+// PendingStats describes the reliable packets this server sent the client that it has not
+// acknowledged yet: how many, how long the oldest has waited and the most resends of any.
+// A console that gives up while these pile up is not getting the server's packets.
+func (client *Client) PendingStats() (count int, oldest time.Duration, maxRetries int) {
+	client.pendingMu.Lock()
+	defer client.pendingMu.Unlock()
+	now := time.Now()
+	for _, p := range client.pendingPackets {
+		count++
+		if age := now.Sub(p.first); age > oldest {
+			oldest = age
+		}
+		if p.retries > maxRetries {
+			maxRetries = p.retries
+		}
+	}
+	return
 }
 
 // AcknowledgePending removes a single tracked packet, identified by the sequence ID
