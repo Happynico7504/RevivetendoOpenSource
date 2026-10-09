@@ -38,9 +38,14 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	minio "github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
 const samuraiDir = "/nico-pretendo-bridge/eshop-video"
@@ -292,6 +297,7 @@ body{margin:0;background:#141414;color:#fff;font-family:sans-serif}
 #player{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:#000;text-align:center}
 #player video{width:1280px;height:640px;max-width:100%;background:#000}
 #player h2{margin:8px 0 0;font-size:24px}
+#player .err{display:none;font-size:22px;color:#ff8a80}
 #player button{position:absolute;top:12px;right:12px;font-size:22px;padding:10px 22px;border:0;border-radius:8px}
 </style></head><body>
 <div id="top"><h1>Revivetendo TV</h1><button id="close" onclick="closeApp()">Close</button></div>
@@ -299,7 +305,7 @@ body{margin:0;background:#141414;color:#fff;font-family:sans-serif}
 {{range .Channels}}<div class="ch"><h2>{{.Name}}</h2><div class="row">
 {{range .Videos}}<a class="v" href="#" onclick="play('{{.URL}}','{{.Name}}');return false"><img src="{{.Banner}}" alt=""><p>{{.Name}}</p></a>{{end}}
 </div></div>{{end}}
-<div id="player"><video id="vid" controls></video><h2 id="vname"></h2><button onclick="stop()">Back</button></div>
+<div id="player"><video id="vid" controls onerror="vidErr()"></video><h2 id="vname"></h2><p id="verr" class="err">This video can't be loaded right now. Please try again later.</p><button onclick="stop()">Back</button></div>
 <script>
 // The applet (wood) keeps its loading curtain up until the page ends startup.
 // Unlike Miiverse, wood's endStartUp takes one argument (no-arg call throws
@@ -314,7 +320,8 @@ function closeApp(){if(window.wiiuBrowser&&wiiuBrowser.closeApplication){wiiuBro
 // GamePad to input text"), even for fullscreen video in its native player
 // (tested 2026-10-10: webkitEnterFullscreen works and wiiu.videoplayer.viewMode
 // switches, but nothing reaches the TV). Videos play inline on the GamePad.
-function play(u,n){var v=document.getElementById('vid');document.getElementById('vname').textContent=n;document.getElementById('player').style.display='block';v.src=u;v.play()}
+function vidErr(){document.getElementById('verr').style.display='block'}
+function play(u,n){document.getElementById('verr').style.display='none';var v=document.getElementById('vid');document.getElementById('vname').textContent=n;document.getElementById('player').style.display='block';v.src=u;v.play()}
 function stop(){var v=document.getElementById('vid');v.pause();v.removeAttribute('src');v.load();document.getElementById('player').style.display='none'}
 </script></body></html>`))
 
@@ -363,9 +370,96 @@ func handleWiiUShop(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// Uploaded videos (relay-admin/videos*.go) are listed in the catalog as
+// u/{id}/{file} and stored in S3 as videos/{id}/{file} in a private bucket;
+// the consoles can't reach Exoscale themselves, so they are streamed through
+// here, and only while the catalog lists them (videos in review stay private).
+const samuraiVideoBucket = "revivetendo-tv"
+
+var (
+	samuraiS3Once   sync.Once
+	samuraiS3Client *minio.Client
+	samuraiUploadRe = regexp.MustCompile(`^/u/([0-9]+)/(video\.moflex|video\.mp4|thumb\.jpg|banner\.jpg)$`)
+)
+
+func samuraiS3() *minio.Client {
+	samuraiS3Once.Do(func() {
+		if s3Endpoint == "" || s3AccessKey == "" {
+			return
+		}
+		c, err := minio.New(s3Endpoint, &minio.Options{Creds: credentials.NewStaticV4(s3AccessKey, s3SecretKey, ""), Region: s3Region, Secure: true})
+		if err != nil {
+			log.Printf("samurai: S3 client: %v", err)
+			return
+		}
+		samuraiS3Client = c
+	})
+	return samuraiS3Client
+}
+
+// samuraiListed reports whether the catalog points at media path p (e.g. "u/7/video.mp4").
+func samuraiListed(p string) bool {
+	cat, err := loadSamuraiCatalog()
+	if err != nil {
+		return false
+	}
+	for _, v := range cat.Videos {
+		if v.File == p || v.MP4 == p || v.Thumbnail == p || v.Banner == p {
+			return true
+		}
+	}
+	return false
+}
+
+func samuraiContentType(name string) string {
+	switch strings.ToLower(path.Ext(name)) {
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".mp4":
+		return "video/mp4"
+	}
+	return "application/octet-stream"
+}
+
+func serveSamuraiUpload(w http.ResponseWriter, r *http.Request, rel string, m []string) {
+	if !samuraiListed(strings.TrimPrefix(rel, "/")) {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", samuraiContentType(m[2]))
+	// A conversion that never reached S3 (no S3 configured) is still local.
+	if f, err := os.Open(filepath.Join(samuraiDir, "submissions", m[1], m[2])); err == nil {
+		defer f.Close()
+		if st, err := f.Stat(); err == nil {
+			http.ServeContent(w, r, "", st.ModTime(), f)
+			return
+		}
+	}
+	c := samuraiS3()
+	if c == nil {
+		http.Error(w, "storage unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	obj, err := c.GetObject(r.Context(), samuraiVideoBucket, "videos/"+m[1]+"/"+m[2], minio.GetObjectOptions{})
+	if err == nil {
+		defer obj.Close()
+		var st minio.ObjectInfo
+		if st, err = obj.Stat(); err == nil {
+			http.ServeContent(w, r, "", st.LastModified, obj) // minio.Object seeks with ranged GETs
+			return
+		}
+	}
+	log.Printf("samurai media: S3 read %s failed: %v", rel, err)
+	http.Error(w, "storage unavailable", http.StatusServiceUnavailable)
+}
+
 func serveSamuraiMedia(w http.ResponseWriter, r *http.Request) {
 	rel := path.Clean("/" + strings.TrimPrefix(r.URL.Path, "/media/"))
 	log.Printf("samurai media: %s %s (range %q) from %s", r.Method, rel, r.Header.Get("Range"), realIP(r))
+	if m := samuraiUploadRe.FindStringSubmatch(rel); m != nil {
+		serveSamuraiUpload(w, r, rel, m)
+		return
+	}
 	f, err := os.Open(filepath.Join(samuraiDir, "media", filepath.FromSlash(rel)))
 	if err != nil {
 		http.NotFound(w, r)
@@ -377,13 +471,6 @@ func serveSamuraiMedia(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	switch strings.ToLower(path.Ext(rel)) {
-	case ".jpg", ".jpeg":
-		w.Header().Set("Content-Type", "image/jpeg")
-	case ".mp4":
-		w.Header().Set("Content-Type", "video/mp4")
-	default:
-		w.Header().Set("Content-Type", "application/octet-stream")
-	}
+	w.Header().Set("Content-Type", samuraiContentType(rel))
 	http.ServeContent(w, r, "", st.ModTime(), f)
 }

@@ -1,9 +1,10 @@
 package main
 
 // Staff review for Revivetendo TV uploads (client certificate, like the rest
-// of /admin/). Approving publishes a video into a channel straight away:
-// its converted files are copied into eshop-video/media/u/{id}/ and the
-// catalog is rebuilt; unpublishing reverses both.
+// of /admin/). Approving publishes a video into a channel straight away by
+// adding it to the catalog; account-proxy serves a video's files (from S3,
+// see videos_s3.go) only while the catalog lists them, so unpublishing is
+// just removing it again.
 //
 // eshop-video/catalog.json stays the one file account-proxy serves. This code
 // owns only the entries with ids in [videoCatalogIDBase, +1e6): it removes
@@ -16,7 +17,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -31,45 +31,6 @@ func registerVideosAdmin() {
 	http.HandleFunc("/admin/videos/", requireClientCert(adminVideos))
 	http.HandleFunc("/admin/videos/review", requireClientCert(adminVideosReview))
 	http.HandleFunc("/admin/videos/media/", requireClientCert(adminVideosMedia))
-}
-
-func videoPublishedDir(id int64) string {
-	return filepath.Join(videoRoot, "media", "u", strconv.FormatInt(id, 10))
-}
-
-// videoPublishedFiles maps a converted file to its name under media/u/{id}/.
-var videoPublishedFiles = []string{"video.moflex", "video.mp4", "thumb.jpg", "banner.jpg"}
-
-func videoPublishFiles(id int64) error {
-	dst := videoPublishedDir(id)
-	if err := os.MkdirAll(dst, 0o755); err != nil {
-		return err
-	}
-	for _, name := range videoPublishedFiles {
-		src := filepath.Join(videoSubmissionDir(id), name)
-		os.Remove(filepath.Join(dst, name))
-		if err := os.Link(src, filepath.Join(dst, name)); err == nil {
-			continue
-		}
-		in, err := os.Open(src)
-		if err != nil {
-			return err
-		}
-		out, err := os.Create(filepath.Join(dst, name))
-		if err != nil {
-			in.Close()
-			return err
-		}
-		_, err = io.Copy(out, in)
-		in.Close()
-		if cerr := out.Close(); err == nil {
-			err = cerr
-		}
-		if err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 type videoChannel struct {
@@ -324,10 +285,6 @@ func adminVideosReview(w http.ResponseWriter, r *http.Request) {
 	switch action {
 	case "approve":
 		channel, _ := strconv.ParseInt(r.FormValue("channel"), 10, 64)
-		if err := videoPublishFiles(id); err != nil {
-			redirect("Could not copy the video files: " + err.Error())
-			return
-		}
 		res, err = db.Exec(`UPDATE eshop_videos SET status = 'live', channel_id = $2, review_note = $3, reviewed_at = NOW(), updated_at = NOW()
 			WHERE id = $1 AND status IN ('submitted', 'rejected')`, id, channel, note)
 	case "reject":
@@ -366,12 +323,6 @@ func adminVideosReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		if action == "approve" {
-			var status string
-			if db.QueryRow(`SELECT status FROM eshop_videos WHERE id = $1`, id).Scan(&status) != nil || status != "live" {
-				os.RemoveAll(videoPublishedDir(id)) // don't leave an unapproved video reachable
-			}
-		}
 		redirect("Nothing changed (the video was changed meanwhile?).")
 		return
 	}
@@ -379,9 +330,6 @@ func adminVideosReview(w http.ResponseWriter, r *http.Request) {
 		log.Printf("videos: catalog sync after %s #%d: %v", action, id, err)
 		redirect("Saved, but updating the eShop catalog failed: " + err.Error())
 		return
-	}
-	if action == "reject" {
-		os.RemoveAll(videoPublishedDir(id)) // after the catalog no longer points at it
 	}
 	log.Printf("videos: #%d %s by staff", id, action)
 	done := map[string]string{"approve": "is live on Revivetendo TV", "reject": "rejected", "reopen": "back in review"}[action]

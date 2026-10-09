@@ -261,6 +261,7 @@ I18N.register("id", {
  "vid.f_upload": "Unggah",
  "vid.fail_long": "Video ini lebih dari 10 menit.",
  "vid.fail_novideo": "File ini tidak berisi video.",
+ "vid.fail_storage": "Video tidak bisa disimpan. Silakan unggah lagi nanti.",
  "vid.failed_help": "Video ini tidak bisa dikonversi. Coba file lain (MP4 paling cocok).",
  "vid.h1": "Video Saya",
  "vid.intro": "Unggah video untuk Revivetendo TV — saluran video di Nintendo eShop pada Wii U dan 3DS. Tim meninjau setiap video sebelum ditayangkan.",

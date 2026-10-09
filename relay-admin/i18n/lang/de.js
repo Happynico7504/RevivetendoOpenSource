@@ -261,6 +261,7 @@ I18N.register("de", {
  "vid.f_upload": "Hochladen",
  "vid.fail_long": "Dieses Video ist länger als 10 Minuten.",
  "vid.fail_novideo": "Diese Datei enthält kein Video.",
+ "vid.fail_storage": "Das Video konnte nicht gespeichert werden. Bitte lade es später erneut hoch.",
  "vid.failed_help": "Dieses Video konnte nicht umgewandelt werden. Versuche eine andere Datei (MP4 funktioniert am besten).",
  "vid.h1": "Meine Videos",
  "vid.intro": "Lade ein Video für Revivetendo TV hoch — den Videokanal im Nintendo eShop auf Wii U und 3DS. Das Team prüft jedes Video, bevor es online geht.",

@@ -261,6 +261,7 @@ I18N.register("ko", {
  "vid.f_upload": "업로드",
  "vid.fail_long": "이 동영상은 10분보다 깁니다.",
  "vid.fail_novideo": "이 파일에는 동영상이 없습니다.",
+ "vid.fail_storage": "동영상을 저장하지 못했습니다. 나중에 다시 업로드해 주세요.",
  "vid.failed_help": "이 동영상을 변환할 수 없습니다. 다른 파일을 사용해 보세요 (MP4가 가장 좋습니다).",
  "vid.h1": "내 동영상",
  "vid.intro": "Wii U와 3DS의 닌텐도 e숍 동영상 채널인 Revivetendo TV에 동영상을 올려 보세요. 운영진이 모든 동영상을 공개 전에 검토합니다.",

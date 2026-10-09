@@ -261,6 +261,7 @@ I18N.register("es", {
  "vid.f_upload": "Subir",
  "vid.fail_long": "Este vídeo dura más de 10 minutos.",
  "vid.fail_novideo": "Este archivo no contiene vídeo.",
+ "vid.fail_storage": "No se pudo guardar el vídeo. Vuelve a subirlo más tarde.",
  "vid.failed_help": "No se pudo convertir este vídeo. Prueba con otro archivo (MP4 funciona mejor).",
  "vid.h1": "Mis vídeos",
  "vid.intro": "Sube un vídeo a Revivetendo TV, el canal de vídeo de la Nintendo eShop en Wii U y 3DS. El equipo revisa cada vídeo antes de publicarlo.",

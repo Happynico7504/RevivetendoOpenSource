@@ -261,6 +261,7 @@ I18N.register("pl", {
  "vid.f_upload": "Prześlij",
  "vid.fail_long": "Ten film trwa dłużej niż 10 minut.",
  "vid.fail_novideo": "Ten plik nie zawiera obrazu wideo.",
+ "vid.fail_storage": "Nie udało się zapisać filmu. Prześlij go ponownie później.",
  "vid.failed_help": "Nie udało się przekonwertować tego filmu. Spróbuj innego pliku (najlepiej MP4).",
  "vid.h1": "Moje filmy",
  "vid.intro": "Prześlij film do Revivetendo TV — kanału wideo w Nintendo eShop na Wii U i 3DS. Zespół sprawdza każdy film przed publikacją.",

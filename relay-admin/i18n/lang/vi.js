@@ -261,6 +261,7 @@ I18N.register("vi", {
  "vid.f_upload": "Tải lên",
  "vid.fail_long": "Video này dài hơn 10 phút.",
  "vid.fail_novideo": "Tệp này không có video.",
+ "vid.fail_storage": "Không thể lưu video. Vui lòng tải lên lại sau.",
  "vid.failed_help": "Không thể chuyển đổi video này. Hãy thử tệp khác (MP4 là tốt nhất).",
  "vid.h1": "Video của tôi",
  "vid.intro": "Tải lên một video cho Revivetendo TV — kênh video trong Nintendo eShop trên Wii U và 3DS. Đội ngũ duyệt từng video trước khi phát.",

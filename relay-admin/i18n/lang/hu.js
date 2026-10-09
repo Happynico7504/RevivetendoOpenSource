@@ -261,6 +261,7 @@ I18N.register("hu", {
  "vid.f_upload": "Feltöltés",
  "vid.fail_long": "Ez a videó hosszabb 10 percnél.",
  "vid.fail_novideo": "Ebben a fájlban nincs videó.",
+ "vid.fail_storage": "A videót nem sikerült elmenteni. Később töltsd fel újra.",
  "vid.failed_help": "Ezt a videót nem sikerült átalakítani. Próbálj meg egy másik fájlt (az MP4 működik a legjobban).",
  "vid.h1": "Videóim",
  "vid.intro": "Tölts fel egy videót a Revivetendo TV-re — a Nintendo eShop videócsatornájára Wii U-n és 3DS-en. A csapat minden videót ellenőriz, mielőtt megjelenik.",

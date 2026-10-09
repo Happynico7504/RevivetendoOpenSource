@@ -261,6 +261,7 @@ I18N.register("nl", {
  "vid.f_upload": "Uploaden",
  "vid.fail_long": "Deze video is langer dan 10 minuten.",
  "vid.fail_novideo": "Dit bestand bevat geen video.",
+ "vid.fail_storage": "De video kon niet worden opgeslagen. Upload hem later opnieuw.",
  "vid.failed_help": "Deze video kon niet worden omgezet. Probeer een ander bestand (MP4 werkt het best).",
  "vid.h1": "Mijn video's",
  "vid.intro": "Upload een video voor Revivetendo TV — het videokanaal in de Nintendo eShop op Wii U en 3DS. Het team controleert elke video voordat hij online gaat.",

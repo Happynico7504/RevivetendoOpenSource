@@ -261,6 +261,7 @@ I18N.register("cs", {
  "vid.f_upload": "Nahrát",
  "vid.fail_long": "Toto video je delší než 10 minut.",
  "vid.fail_novideo": "Tento soubor neobsahuje video.",
+ "vid.fail_storage": "Video se nepodařilo uložit. Nahraj ho prosím později znovu.",
  "vid.failed_help": "Toto video se nepodařilo převést. Zkus jiný soubor (nejlépe funguje MP4).",
  "vid.h1": "Moje videa",
  "vid.intro": "Nahraj video do Revivetendo TV — videokanálu v Nintendo eShopu na Wii U a 3DS. Tým každé video před zveřejněním zkontroluje.",

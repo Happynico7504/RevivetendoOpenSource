@@ -261,6 +261,7 @@ I18N.register("tr", {
  "vid.f_upload": "Yükle",
  "vid.fail_long": "Bu video 10 dakikadan uzun.",
  "vid.fail_novideo": "Bu dosyada video yok.",
+ "vid.fail_storage": "Video kaydedilemedi. Lütfen daha sonra tekrar yükle.",
  "vid.failed_help": "Bu video dönüştürülemedi. Başka bir dosya dene (en iyi MP4 çalışır).",
  "vid.h1": "Videolarım",
  "vid.intro": "Revivetendo TV için bir video yükle — Wii U ve 3DS'teki Nintendo eShop'un video kanalı. Ekip her videoyu yayına almadan önce inceler.",

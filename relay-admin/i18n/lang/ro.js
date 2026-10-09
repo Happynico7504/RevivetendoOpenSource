@@ -261,6 +261,7 @@ I18N.register("ro", {
  "vid.f_upload": "Încarcă",
  "vid.fail_long": "Acest videoclip durează mai mult de 10 minute.",
  "vid.fail_novideo": "Acest fișier nu conține video.",
+ "vid.fail_storage": "Videoclipul nu a putut fi salvat. Încarcă-l din nou mai târziu.",
  "vid.failed_help": "Acest videoclip nu a putut fi convertit. Încearcă alt fișier (MP4 funcționează cel mai bine).",
  "vid.h1": "Videoclipurile mele",
  "vid.intro": "Încarcă un videoclip pentru Revivetendo TV — canalul video din Nintendo eShop pe Wii U și 3DS. Echipa verifică fiecare videoclip înainte să apară.",

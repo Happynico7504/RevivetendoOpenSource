@@ -261,6 +261,7 @@ I18N.register("sv", {
  "vid.f_upload": "Ladda upp",
  "vid.fail_long": "Den här videon är längre än 10 minuter.",
  "vid.fail_novideo": "Den här filen innehåller ingen video.",
+ "vid.fail_storage": "Videon kunde inte sparas. Ladda upp den igen senare.",
  "vid.failed_help": "Den här videon kunde inte konverteras. Prova en annan fil (MP4 fungerar bäst).",
  "vid.h1": "Mina videor",
  "vid.intro": "Ladda upp en video till Revivetendo TV — videokanalen i Nintendo eShop på Wii U och 3DS. Teamet granskar varje video innan den publiceras.",

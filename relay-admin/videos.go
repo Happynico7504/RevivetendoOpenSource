@@ -350,33 +350,16 @@ func videoRemove(id int64, wasLive bool) error {
 			return err
 		}
 	}
-	os.RemoveAll(videoPublishedDir(id))
-	return os.RemoveAll(videoSubmissionDir(id))
+	return videoDeleteStored(id)
 }
 
-// videoPreviewFiles are the converted files a submission's owner and staff may view.
-var videoPreviewFiles = map[string]string{"video.mp4": "video/mp4", "thumb.jpg": "image/jpeg", "banner.jpg": "image/jpeg"}
-
-func serveVideoFile(w http.ResponseWriter, r *http.Request, id int64, name string) {
-	ct, ok := videoPreviewFiles[name]
-	if !ok {
-		http.NotFound(w, r)
-		return
-	}
-	f, err := os.Open(filepath.Join(videoSubmissionDir(id), name))
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	defer f.Close()
-	st, err := f.Stat()
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	w.Header().Set("Content-Type", ct)
-	w.Header().Set("Cache-Control", "private, max-age=60")
-	http.ServeContent(w, r, "", st.ModTime(), f)
+// videoFileTypes are a conversion's output files: what owners and staff may
+// preview, what goes to S3, and what the catalog points the consoles at.
+var videoFileTypes = map[string]string{
+	"video.moflex": "application/octet-stream",
+	"video.mp4":    "video/mp4",
+	"thumb.jpg":    "image/jpeg",
+	"banner.jpg":   "image/jpeg",
 }
 
 func myVideosMedia(w http.ResponseWriter, r *http.Request) {
@@ -433,6 +416,12 @@ func videoWorker() {
 			db.Exec(`UPDATE eshop_videos SET status = 'failed', error = $2, updated_at = NOW() WHERE id = $1 AND status = 'processing'`, id, msg)
 			continue
 		}
+		if err := videoStoreConverted(id); err != nil {
+			log.Printf("videos: #%d storing in S3 failed: %v", id, err)
+			db.Exec(`UPDATE eshop_videos SET status = 'failed', error = $2, updated_at = NOW() WHERE id = $1 AND status = 'processing'`, id, videoFailStorage)
+			os.RemoveAll(videoSubmissionDir(id))
+			continue
+		}
 		db.Exec(`UPDATE eshop_videos SET status = 'submitted', seconds = $2, error = '', submitted_at = NOW(), updated_at = NOW()
 			WHERE id = $1 AND status = 'processing'`, id, seconds)
 		log.Printf("videos: #%d converted (%d s), waiting for review", id, seconds)
@@ -445,12 +434,14 @@ const (
 	videoFailGeneric = "This video could not be converted. Try another file (MP4 works best)."
 	videoFailTooLong = "This video is longer than 10 minutes."
 	videoFailNoVideo = "This file has no video in it."
+	videoFailStorage = "The video could not be saved to storage. Please upload it again later."
 )
 
 var videoFailKeys = map[string]string{
 	videoFailGeneric: "vid.failed_help",
 	videoFailTooLong: "vid.fail_long",
 	videoFailNoVideo: "vid.fail_novideo",
+	videoFailStorage: "vid.fail_storage",
 }
 
 var (

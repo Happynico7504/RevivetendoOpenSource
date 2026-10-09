@@ -261,6 +261,7 @@ I18N.register("zh", {
  "vid.f_upload": "上传",
  "vid.fail_long": "此视频超过 10 分钟。",
  "vid.fail_novideo": "此文件中没有视频。",
+ "vid.fail_storage": "无法保存视频。请稍后重新上传。",
  "vid.failed_help": "无法转换此视频。请尝试其他文件(推荐使用 MP4)。",
  "vid.h1": "我的视频",
  "vid.intro": "为 Revivetendo TV 上传视频——这是 Wii U 和 3DS 上任天堂 eShop 里的视频频道。每个视频上线前都会经过工作人员审核。",
