@@ -310,6 +310,10 @@ wood(window.wiiuCurtain,'open',[]);
 wood(window.wiiuDialog,'hideLoading',[]);
 wood(window.wiiuBrowser,'showLoadingIcon',[false]);
 function closeApp(){if(window.wiiuBrowser&&wiiuBrowser.closeApplication){wiiuBrowser.closeApplication()}else{history.back()}}
+// GamePad only: the eShop applet keeps its own fixed screen on the TV ("Use the
+// GamePad to input text"), even for fullscreen video in its native player
+// (tested 2026-10-10: webkitEnterFullscreen works and wiiu.videoplayer.viewMode
+// switches, but nothing reaches the TV). Videos play inline on the GamePad.
 function play(u,n){var v=document.getElementById('vid');document.getElementById('vname').textContent=n;document.getElementById('player').style.display='block';v.src=u;v.play()}
 function stop(){var v=document.getElementById('vid');v.pause();v.removeAttribute('src');v.load();document.getElementById('player').style.display='none'}
 </script></body></html>`))
