@@ -553,6 +553,7 @@ func main() {
 	http.HandleFunc("/patreon/webhook", patreonWebhook)
 	http.HandleFunc("/my/", myHandler)
 	registerBadgeEditor()
+	registerVideos()
 	http.HandleFunc("/activity/random-mii", activityRandomMiiHandler)
 	http.HandleFunc("/activity/bgm.mp3", activityBGMHandler)
 	http.HandleFunc("/activity/logo.png", activityLogoHandler)
@@ -1826,6 +1827,10 @@ tr:last-child td{border-bottom:none}
     <h2 data-i18n="land.badges">Badge Editor</h2>
     <p data-i18n="land.badges_desc">Design your own Badge Arcade badges and submit them for the arcade — sign in with your PNID and web password</p>
   </a>
+  <a class="card" href="/inkay/my/videos">
+    <h2 data-i18n="land.videos">Revivetendo TV</h2>
+    <p data-i18n="land.videos_desc">Upload your own videos for the Nintendo eShop on Wii U and 3DS — staff review them before they go live</p>
+  </a>
   <a class="card" href="/wsc-public/">
     <h2 data-i18n="land.wsc">WSC Status and Players/Sessions</h2>
     <p data-i18n="land.wsc_desc">Live Wii Sports Club players and active matchmaking sessions</p>
@@ -2064,6 +2069,7 @@ input[type=text],select{border:1px solid #d1d5db;border-radius:4px;padding:.4rem
   <a href="/inkay/admin/spotpass-3ds/">📮 3DS Swapdoodle</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/spotpass-3ds-sysmsg/">📢 3DS SpotPass</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/badge-arcade/">🏅 Badge Arcade</a> &nbsp;|&nbsp;
+  <a href="/inkay/admin/videos/">📺 Revivetendo TV</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/api-docs/">📖 API docs</a> &nbsp;|&nbsp;
   <a href="/wsc-public/">🎳 WSC</a>
 </p>
@@ -4208,6 +4214,8 @@ button.logout-btn{background:none;border:none;color:#dc2626;font-size:.875rem;cu
   <a href="/" data-i18n="common.back">← Back</a>
   <span style="color:#d1d5db">|</span>
   <a href="/inkay/my/patreon" data-i18n="nav.coins">🪙 Coins &amp; Patreon</a>
+  <span style="color:#d1d5db">|</span>
+  <a href="/inkay/my/videos" data-i18n="nav.videos">📺 Videos</a>
   <span style="color:#d1d5db">|</span>
   <a href="/inkay/my/account" data-i18n="nav.account">Account</a>
   <span style="color:#d1d5db">|</span>

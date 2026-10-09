@@ -56,3 +56,7 @@ relayhub/relayhub-bin
 
 # eShop video platform: catalog + uploaded media (runtime data)
 eshop-video/
+
+# mobipeg binaries (see tools/mobipeg/README.md)
+tools/mobipeg/ffmpeg
+tools/mobipeg/ffprobe
