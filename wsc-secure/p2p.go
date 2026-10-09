@@ -175,8 +175,12 @@ func p2pOpen(gid, host uint32, existingOnly bool) *p2pTunnel {
 	return &t
 }
 
-// p2pAlias rewrites a station URL to the console's alias on the tunnel. The tunnel is open in
-// both directions (no NAT to traverse), which the URL says too.
+// p2pAlias rewrites a station URL to the console's alias on the tunnel. The console's real NAT
+// type (natm/natf) stays in the URL. Advertising the tunnel as fully open (natf=1) made joiners
+// wait for the host to reach them instead of sending first - and the joiner's own router then
+// dropped the host's packets, which came from a tunnel it had never sent to (2026-10-09: every
+// "silent joiner" so far, e.g. gid 235976). With the real type both sides send, as they do
+// without a tunnel; the tunnel forwards whatever arrives.
 func p2pAlias(urlStr string, t *p2pTunnel, pid uint32) (string, bool) {
 	port := t.Ports[pid]
 	if port == 0 {
@@ -185,8 +189,6 @@ func p2pAlias(urlStr string, t *p2pTunnel, pid uint32) (string, bool) {
 	u := nex.NewStationURL(urlStr)
 	u.SetAddress(t.IP)
 	u.SetPort(strconv.Itoa(port))
-	u.SetNatm("1")
-	u.SetNatf("1")
 	return u.EncodeToString(), true
 }
 
