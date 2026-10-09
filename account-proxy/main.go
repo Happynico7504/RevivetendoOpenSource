@@ -6782,7 +6782,11 @@ func startOLVProxy() {
 			handleECS(w, r)
 		case "nus.c.shop.nicoch.net":
 			handleNUSShop(w, r)
-		case "samurai.nicoch.net", "ccif.nicoch.net":
+		case "samurai.nicoch.net":
+			handleSamurai(w, r)
+		case "samurai.wup.shop.nicoch.net":
+			handleWiiUShop(w, r)
+		case "ccif.nicoch.net":
 			handleShopStub(w, r)
 		case "ias.c.shop.nicoch.net":
 			handleIAS(w, r)
@@ -7280,6 +7284,18 @@ func handleNinjaShop(w http.ResponseWriter, r *http.Request) {
 	case path == "/ninja/ws/my/session/!close":
 		w.Write([]byte(`{}`))
 
+	// The eShop home screen (now Revivetendo TV, see samurai.go) asks for these
+	// right after session/!open; the default 500 below made it show 011-2500
+	// (2026-10-09). Empty bodies as in ReShop-3ds/Ninja.
+	case path == "/ninja/ws/my/wishlist/notice":
+		w.Write([]byte(`{"wishlist_notice":{"wished_title_id":[],"total":0}}`))
+	case path == "/ninja/ws/my/wishlist":
+		w.Write([]byte(`{"wishlist":{"total":0}}`))
+	case path == "/ninja/ws/my/owned_coupons":
+		w.Write([]byte(`{"coupons":{}}`))
+	case path == "/ninja/ws/my/shared_title_ids":
+		w.Write([]byte(`{"owned_titles":{"owned_title":[]}}`))
+
 	// 2026-09-22: "/ninja/ws/my/tax_location" was unhandled (falling into the
 	// default 500/XML case below) on every single buy-plays attempt tonight,
 	// starting exactly when this testing began - the only ninja path with that
@@ -7468,10 +7484,10 @@ func handleNinjaShop(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleShopStub logs (and answers 404 JSON to) requests for the Samurai
-// (catalog) and CCIF (credit card) hosts that mint takes from service_hosts.
-// Both hosts sit under *.nicoch.net so the existing wildcard cert and DNS
-// cover them; this only exists to show whether mint ever calls them.
+// handleShopStub logs (and answers 404 JSON to) requests for the CCIF (credit
+// card) host that mint takes from service_hosts, and for samurai endpoints
+// handleSamurai doesn't serve. Both hosts sit under *.nicoch.net so the
+// existing wildcard cert and DNS cover them.
 func handleShopStub(w http.ResponseWriter, r *http.Request) {
 	log.Printf("shop stub %s: %s %s from %s", r.Host, r.Method, r.URL.RequestURI(), realIP(r))
 	w.Header().Set("Content-Type", ninjaContentType(r))
