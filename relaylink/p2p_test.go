@@ -168,10 +168,10 @@ func TestRewritePIAStationList(t *testing.T) {
 	other := [4]byte{198, 51, 100, 7}
 	pkt := piaPacket(piaLoc(pub, 51765, 1001), piaLoc(lan, 51765, 1001), piaLoc(other, 62080, 1002), piaLoc(other, 4000, 9999))
 	aliases := map[uint32]piaAlias{1001: {ip: [4]byte{192, 0, 2, 1}, port: 61113}, 1002: {ip: [4]byte{192, 0, 2, 1}, port: 61314}}
-	if n := rewritePIA(pkt, aliases, 0); n != 2 {
-		t.Fatalf("rewrote %d locations, want 2 (public of 1001 and 1002; never LAN, never a stranger)", n)
+	if n := rewritePIA(pkt, aliases, 0); n != 3 {
+		t.Fatalf("rewrote %d locations, want 3 (public and LAN of 1001, public of 1002; never a stranger)", n)
 	}
-	want := piaPacket(piaLoc([4]byte{192, 0, 2, 1}, 61113, 1001), piaLoc(lan, 51765, 1001), piaLoc([4]byte{192, 0, 2, 1}, 61314, 1002), piaLoc(other, 4000, 9999))
+	want := piaPacket(piaLoc([4]byte{192, 0, 2, 1}, 61113, 1001), piaLoc([4]byte{192, 0, 2, 1}, 61113, 1001), piaLoc([4]byte{192, 0, 2, 1}, 61314, 1002), piaLoc(other, 4000, 9999))
 	if !bytes.Equal(pkt, want) {
 		t.Fatalf("got  %x\nwant %x", pkt, want)
 	}

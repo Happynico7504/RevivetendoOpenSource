@@ -349,7 +349,11 @@ func (t *P2PTunnels) serve(sess *p2pSession, dst *p2pStation) {
 		from.sent++
 		dst.got++
 		rewrote := 0
+		var before []byte
 		if sess.ip != nil {
+			if sess.rewrites < 20 {
+				before = append([]byte(nil), buf[:n]...) // logged next to the result while we learn the format
+			}
 			rewrote = rewritePIA(buf[:n], sess.aliasesLocked(), from.pid, dst.pid)
 			sess.rewrites += uint64(rewrote)
 		}
@@ -359,6 +363,10 @@ func (t *P2PTunnels) serve(sess *p2pSession, dst *p2pStation) {
 		t.mu.Unlock()
 		if rewrote > 0 && rewrites <= 20 {
 			t.logf("p2p: session %s: rewrote %d station address(es) in a PIA packet %d -> %d", sess.key, rewrote, from.pid, dst.pid)
+			if before != nil {
+				t.logf("p2p: rewrite %s before %x", sess.key, before)
+				t.logf("p2p: rewrite %s after  %x", sess.key, buf[:n])
+			}
 		}
 		if trace {
 			t.logf("p2p: trace %s #%d %d(%v) -> %d(%v) via :%d->:%d %dB %x", sess.key, seq, from.pid, src, dst.pid, to, dst.alias, from.alias, n, buf[:n])
@@ -429,8 +437,8 @@ func (st *p2pStation) target(fromAlias int) *net.UDPAddr {
 //
 // followed by the same for the private (LAN) address, and every packet ends in a 16-byte
 // HMAC-MD5 over the rest, keyed with the matchmake session key - which this network hands out
-// empty. So the tunnel can replace a member's public location with its alias here and sign the
-// packet again. Packets that do not verify with the empty key are left alone.
+// empty. So the tunnel can replace a member's locations (public and LAN) with its alias here and
+// sign the packet again. Packets that do not verify with the empty key are left alone.
 
 var piaMagic = []byte{0x32, 0xab, 0x98, 0x64}
 
@@ -459,8 +467,13 @@ func piaSigned(pkt []byte) bool {
 	return hmac.Equal(mac.Sum(nil), pkt[len(pkt)-16:])
 }
 
-func lanAddress(ip []byte) bool {
-	return ip[0] == 10 || ip[0] == 127 || ip[0] == 0 || (ip[0] == 172 && ip[1]&0xf0 == 16) || (ip[0] == 192 && ip[1] == 168)
+// unusable reports addresses that are never a station location (0.x, loopback). LAN addresses are
+// rewritten too: after the public locations all point at the tunnel, every member shares one public
+// IP, PIA then takes the members for one household and connects via the LAN address instead
+// (2026-10-09 gid 472549: the two joiners were told each other's aliases and never sent a single
+// packet to them). Consoles that really share an address never get a tunnel (see P2PRouter).
+func unusable(ip []byte) bool {
+	return ip[0] == 0 || ip[0] == 127
 }
 
 // rewritePIA replaces, in place, the public locations of other members (third parties) with
@@ -483,7 +496,7 @@ func rewritePIA(pkt []byte, aliases map[uint32]piaAlias, keep ...uint32) int {
 		}
 		pid := binary.BigEndian.Uint32(pkt[i+8 : i+12])
 		a, ok := aliases[pid]
-		if !ok || slices.Contains(keep, pid) || lanAddress(pkt[i:i+4]) {
+		if !ok || slices.Contains(keep, pid) || unusable(pkt[i:i+4]) {
 			continue
 		}
 		if bytes.Equal(pkt[i:i+4], a.ip[:]) && binary.BigEndian.Uint16(pkt[i+4:i+6]) == a.port {
