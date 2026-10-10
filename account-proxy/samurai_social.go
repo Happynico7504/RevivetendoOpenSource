@@ -66,11 +66,20 @@ func tvViewer(r *http.Request) int64 {
 	if err != nil || pid <= 0 {
 		return 0
 	}
+	ip := realIP(r)
+	// account-proxy's own IP->account map from logins (what fetchRealPID and
+	// the shop use). nex_sessions alone missed players: some login paths store
+	// no IP there (HeyTay82, 2026-10-11). ip_pid_cache keeps only the latest
+	// account per IP and isn't refreshed on every login, hence the longer age.
+	if v, ok := pidCache.Load(ip); ok && int64(v.(uint32)) == pid {
+		return pid
+	}
 	var ok bool
-	db.QueryRow(`SELECT EXISTS(SELECT 1 FROM nex_sessions WHERE pid = $1 AND ip = $2 AND expires_at > NOW() - $3::interval)`,
-		pid, realIP(r), tvViewerLoginFreshness).Scan(&ok)
+	db.QueryRow(`SELECT EXISTS(SELECT 1 FROM nex_sessions WHERE pid = $1 AND ip = $2 AND expires_at > NOW() - $3::interval)
+		OR EXISTS(SELECT 1 FROM ip_pid_cache WHERE pid = $1 AND ip = $2 AND cached_at > NOW() - INTERVAL '60 days')`,
+		pid, ip, tvViewerLoginFreshness).Scan(&ok)
 	if !ok {
-		log.Printf("tv: X-TV-PID %d not recently logged in from %s, ignoring", pid, realIP(r))
+		log.Printf("tv: X-TV-PID %d not recently logged in from %s, ignoring", pid, ip)
 		return 0
 	}
 	return pid
