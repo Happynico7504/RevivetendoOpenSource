@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Revivetendo network config for Cemu (2.0+).
+  Put this file next to the Cemu executable (or in Cemu's user data folder),
+  restart Cemu, then pick "Revivetendo" under Account > Network Service.
+  Requires dumped online files (otp.bin, seeprom.bin, a Pretendo-linked account).
+-->
+<content>
+    <networkname>Revivetendo</networkname>
+    <!-- Our servers use the NicoChristmann NN CA, which Cemu doesn't trust. -->
+    <disablesslverification>1</disablesslverification>
+    <urls>
+        <act>https://act.nicochristmann.net:6666</act>
+        <ecs>https://ecs.wup.shop.nicochristmann.net/ecs/services/ECommerceSOAP</ecs>
+        <nus>https://nus.wup.shop.nicochristmann.net/nus/services/NetUpdateSOAP</nus>
+        <ias>https://ias.wup.shop.nicochristmann.net/ias/services/IdentityAuthenticationSOAP</ias>
+        <ccsu>https://ccs.wup.shop.nicochristmann.net/ccs/download</ccsu>
+        <ccs>http://ccs.cdn.wup.shop.nicochristmann.net/ccs/download</ccs>
+        <idbe>https://idbe-wup.cdn.nicochristmann.net/icondata</idbe>
+        <boss>https://boss.nicochristmann.net/p01/tasksheet</boss>
+        <tagaya>https://tagaya.wup.shop.nicochristmann.net/tagaya/versionlist</tagaya>
+        <olv>https://olv.nicochristmann.net/v1/endpoint</olv>
+    </urls>
+</content>
