@@ -275,6 +275,8 @@ I18N.register("sv", {
  "vid.intro": "Ladda upp en video till Revivetendo TV — videokanalen i Nintendo eShop på Wii U och 3DS. Teamet granskar varje video innan den publiceras.",
  "vid.loading": "Laddar…",
  "vid.none": "Du har inte laddat upp några videor än.",
+ "vid.queue_ahead": "Väntar på konvertering — {n} före dig",
+ "vid.queue_next": "Väntar på konvertering — du är näst på tur",
  "vid.remove_live": "Ta bort från Revivetendo TV",
  "vid.rule_content": "Inget stötande, inget olagligt, inga personuppgifter.",
  "vid.rule_rights": "Ladda bara upp videor som du har gjort själv eller har rätt att dela.",

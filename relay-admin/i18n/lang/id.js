@@ -275,6 +275,8 @@ I18N.register("id", {
  "vid.intro": "Unggah video untuk Revivetendo TV — saluran video di Nintendo eShop pada Wii U dan 3DS. Tim meninjau setiap video sebelum ditayangkan.",
  "vid.loading": "Memuat…",
  "vid.none": "Kamu belum mengunggah video apa pun.",
+ "vid.queue_ahead": "Menunggu konversi — {n} di depanmu",
+ "vid.queue_next": "Menunggu konversi — kamu berikutnya",
  "vid.remove_live": "Hapus dari Revivetendo TV",
  "vid.rule_content": "Tidak ada yang menyinggung, melanggar hukum, atau berisi informasi pribadi.",
  "vid.rule_rights": "Unggah hanya video buatanmu sendiri atau yang boleh kamu bagikan.",

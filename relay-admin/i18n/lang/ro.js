@@ -275,6 +275,8 @@ I18N.register("ro", {
  "vid.intro": "Încarcă un videoclip pentru Revivetendo TV — canalul video din Nintendo eShop pe Wii U și 3DS. Echipa verifică fiecare videoclip înainte să apară.",
  "vid.loading": "Se încarcă…",
  "vid.none": "Nu ai încărcat încă niciun videoclip.",
+ "vid.queue_ahead": "Așteaptă conversia — {n} înaintea ta",
+ "vid.queue_next": "Așteaptă conversia — urmezi tu",
  "vid.remove_live": "Scoate de pe Revivetendo TV",
  "vid.rule_content": "Nimic ofensator, nimic ilegal, nicio informație personală.",
  "vid.rule_rights": "Încarcă doar videoclipuri făcute de tine sau pe care ai dreptul să le distribui.",

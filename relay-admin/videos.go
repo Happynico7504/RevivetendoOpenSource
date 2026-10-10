@@ -23,6 +23,7 @@ package main
 // sites cannot submit with a player's my_session cookie.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -33,9 +34,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 	"unicode/utf8"
 )
@@ -65,6 +69,8 @@ CREATE INDEX IF NOT EXISTS eshop_videos_status ON eshop_videos (status, submitte
 ALTER TABLE eshop_videos ADD COLUMN IF NOT EXISTS views BIGINT NOT NULL DEFAULT 0;
 -- 3D uploads: how the source packs the two eyes ('' = 2D), see videoStereoModes.
 ALTER TABLE eshop_videos ADD COLUMN IF NOT EXISTS stereo TEXT NOT NULL DEFAULT '';
+-- When an upload finished and joined the conversion queue (first come, first served).
+ALTER TABLE eshop_videos ADD COLUMN IF NOT EXISTS queued_at TIMESTAMPTZ;
 CREATE TABLE IF NOT EXISTS eshop_video_likes (
 	video_id   BIGINT      NOT NULL REFERENCES eshop_videos (id) ON DELETE CASCADE,
 	pid        BIGINT      NOT NULL,
@@ -106,6 +112,17 @@ func mobipegFFmpeg() string {
 		return p
 	}
 	return "/nico-pretendo-bridge/tools/mobipeg/ffmpeg"
+}
+
+// mobipegPaired is mobipeg with tools/mobipeg/patches/moflex-3d-pair-audio.patch:
+// it packs a 3D file's audio per stereo pair instead of per eye frame, without
+// which the 3DS stutters on 3D audio. It is a minimal build that only reads NUT,
+// so 3D conversions pipe decoded frames into it (see tools/mobipeg/README.md).
+func mobipegPaired() string {
+	if p := os.Getenv("MOBIPEG_FFMPEG_PAIRED"); p != "" {
+		return p
+	}
+	return "/nico-pretendo-bridge/tools/mobipeg/ffmpeg-paired"
 }
 
 func registerVideos() {
@@ -172,6 +189,8 @@ type videoSummary struct {
 	Likes       int64  `json:"likes"`
 	Comments    int64  `json:"comments"`
 	Stereo      string `json:"stereo"`
+	// While processing: -1 = converting now, else videos ahead in the queue.
+	QueueAhead int `json:"queueAhead"`
 }
 
 func videoListFor(pid int64) []videoSummary {
@@ -193,6 +212,9 @@ func videoListFor(pid int64) []videoSummary {
 		v.Created = created.UTC().Format("2006-01-02")
 		v.HasPreview = v.Status == "submitted" || v.Status == "live" || v.Status == "rejected"
 		v.ErrorKey = videoFailKeys[v.Error]
+		if v.Status == "processing" {
+			v.QueueAhead = videoQueueAhead(v.ID)
+		}
 		out = append(out, v)
 	}
 	return out
@@ -328,7 +350,7 @@ func myVideosChunk(w http.ResponseWriter, r *http.Request) {
 	received += n
 	done := received == size
 	if done {
-		db.Exec(`UPDATE eshop_videos SET received = $2, status = 'processing', updated_at = NOW() WHERE id = $1`, id, received)
+		db.Exec(`UPDATE eshop_videos SET received = $2, status = 'processing', queued_at = NOW(), updated_at = NOW() WHERE id = $1`, id, received)
 		log.Printf("videos: #%d upload complete (%d bytes), converting", id, received)
 		videoEnqueue(id)
 	} else {
@@ -412,48 +434,84 @@ func myVideosMedia(w http.ResponseWriter, r *http.Request) {
 
 // --- conversion ---
 
-var videoQueue = make(chan int64, 256)
+// The conversion queue lives in the database: every 'processing' row, oldest
+// queued_at first. One worker converts one video at a time (videoActive is
+// the one in progress), so uploads queue up instead of competing for the CPU,
+// and the order survives restarts.
+var (
+	videoWake   = make(chan struct{}, 1)
+	videoActive atomic.Int64
+)
+
+// videoQueueOrder sorts the queue; rows from before queued_at existed fall
+// back to their upload time.
+const videoQueueOrder = `(COALESCE(queued_at, created_at), id)`
 
 func videoEnqueue(id int64) {
-	go func() { videoQueue <- id }()
+	select {
+	case videoWake <- struct{}{}:
+	default:
+	}
 }
 
-// videoWorker converts one upload at a time, so uploads can't crowd out the
-// game servers on this machine. Uploads interrupted by a restart are picked
-// up again here.
+// videoQueueAhead returns how many videos will be converted before id, or
+// -1 while id itself is being converted.
+func videoQueueAhead(id int64) int {
+	if videoActive.Load() == id {
+		return -1
+	}
+	var n int
+	db.QueryRow(`SELECT COUNT(*) FROM eshop_videos q, eshop_videos me WHERE me.id = $1 AND q.status = 'processing'
+		AND (COALESCE(q.queued_at, q.created_at), q.id) < (COALESCE(me.queued_at, me.created_at), me.id)`, id).Scan(&n)
+	return n
+}
+
 func videoWorker() {
-	if rows, err := db.Query(`SELECT id FROM eshop_videos WHERE status = 'processing' ORDER BY id`); err == nil {
-		for rows.Next() {
-			var id int64
-			if rows.Scan(&id) == nil {
-				videoEnqueue(id)
-			}
-		}
-		rows.Close()
-	}
-	for id := range videoQueue {
-		seconds, err := videoConvert(id)
+	runtime.LockOSThread() // see videoCmd: Pdeathsig follows the starting thread
+	for {
+		var id int64
+		err := db.QueryRow(`SELECT id FROM eshop_videos WHERE status = 'processing' ORDER BY ` + videoQueueOrder + ` LIMIT 1`).Scan(&id)
 		if err != nil {
-			log.Printf("videos: #%d conversion failed: %v", id, err)
-			msg := videoFailGeneric
-			if errors.Is(err, errVideoTooLong) {
-				msg = videoFailTooLong
-			} else if errors.Is(err, errVideoNoVideo) {
-				msg = videoFailNoVideo
+			select { // queue empty: sleep until an upload finishes (or recheck now and then)
+			case <-videoWake:
+			case <-time.After(time.Minute):
 			}
-			db.Exec(`UPDATE eshop_videos SET status = 'failed', error = $2, updated_at = NOW() WHERE id = $1 AND status = 'processing'`, id, msg)
 			continue
 		}
-		if err := videoStoreConverted(id); err != nil {
-			log.Printf("videos: #%d storing in S3 failed: %v", id, err)
-			db.Exec(`UPDATE eshop_videos SET status = 'failed', error = $2, updated_at = NOW() WHERE id = $1 AND status = 'processing'`, id, videoFailStorage)
-			os.RemoveAll(videoSubmissionDir(id))
-			continue
+		videoActive.Store(id)
+		videoProcess(id)
+		videoActive.Store(0)
+		// Never pick the same video forever if its status somehow didn't move on.
+		if res, err := db.Exec(`UPDATE eshop_videos SET status = 'failed', error = $2, updated_at = NOW() WHERE id = $1 AND status = 'processing'`, id, videoFailGeneric); err != nil {
+			time.Sleep(time.Minute) // the database is unreachable: don't spin
+		} else if n, _ := res.RowsAffected(); n > 0 {
+			log.Printf("videos: #%d was still 'processing' after conversion, marked failed", id)
 		}
-		db.Exec(`UPDATE eshop_videos SET status = 'submitted', seconds = $2, error = '', submitted_at = NOW(), updated_at = NOW()
-			WHERE id = $1 AND status = 'processing'`, id, seconds)
-		log.Printf("videos: #%d converted (%d s), waiting for review", id, seconds)
 	}
+}
+
+func videoProcess(id int64) {
+	seconds, err := videoConvert(id)
+	if err != nil {
+		log.Printf("videos: #%d conversion failed: %v", id, err)
+		msg := videoFailGeneric
+		if errors.Is(err, errVideoTooLong) {
+			msg = videoFailTooLong
+		} else if errors.Is(err, errVideoNoVideo) {
+			msg = videoFailNoVideo
+		}
+		db.Exec(`UPDATE eshop_videos SET status = 'failed', error = $2, updated_at = NOW() WHERE id = $1 AND status = 'processing'`, id, msg)
+		return
+	}
+	if err := videoStoreConverted(id); err != nil {
+		log.Printf("videos: #%d storing in S3 failed: %v", id, err)
+		db.Exec(`UPDATE eshop_videos SET status = 'failed', error = $2, updated_at = NOW() WHERE id = $1 AND status = 'processing'`, id, videoFailStorage)
+		os.RemoveAll(videoSubmissionDir(id))
+		return
+	}
+	db.Exec(`UPDATE eshop_videos SET status = 'submitted', seconds = $2, error = '', submitted_at = NOW(), updated_at = NOW()
+		WHERE id = $1 AND status = 'processing'`, id, seconds)
+	log.Printf("videos: #%d converted (%d s), waiting for review", id, seconds)
 }
 
 // Conversion failures as stored in eshop_videos.error (shown to staff) and
@@ -477,17 +535,75 @@ var (
 	errVideoNoVideo = errors.New("no video stream")
 )
 
-// videoRun runs a converter at low priority with a time limit and returns
+// videoCmd runs a converter at the lowest priority Linux has: the SCHED_IDLE
+// CPU class (it only gets CPU time nothing else wants), nice 19 and idle-class
+// disk I/O, so conversions never slow the game servers. No root needed.
+//
+// Pdeathsig kills the converter if relay-admin dies: without it a restart left
+// the old encoder running next to the restarted one (2026-10-10). The signal
+// is tied to the OS thread that started the process, so videoWorker keeps
+// its goroutine on one thread.
+func videoCmd(ctx context.Context, name string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "chrt", append([]string{"--idle", "0", "nice", "-n", "19", "ionice", "-c", "3", name}, args...)...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+	return cmd
+}
+
+// videoRun runs a converter (see videoCmd) with a time limit and returns
 // the end of its output for the log when it fails.
 func videoRun(ctx context.Context, name string, args ...string) error {
-	cmd := exec.CommandContext(ctx, "nice", append([]string{"-n", "15", name}, args...)...)
-	out, err := cmd.CombinedOutput()
+	out, err := videoCmd(ctx, name, args...).CombinedOutput()
 	if err != nil {
 		tail := string(out)
 		if len(tail) > 600 {
 			tail = tail[len(tail)-600:]
 		}
 		return fmt.Errorf("%s: %v: %s", filepath.Base(name), err, strings.TrimSpace(tail))
+	}
+	return nil
+}
+
+// videoPipe runs producer | consumer (both through videoCmd) and returns the
+// first failure with the end of that program's output.
+func videoPipe(ctx context.Context, prodName string, prodArgs []string, consName string, consArgs []string) error {
+	prod := videoCmd(ctx, prodName, prodArgs...)
+	cons := videoCmd(ctx, consName, consArgs...)
+	r, w, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	var prodErr, consErr bytes.Buffer
+	prod.Stdout, prod.Stderr = w, &prodErr
+	cons.Stdin, cons.Stderr = r, &consErr
+	if err := cons.Start(); err != nil {
+		r.Close()
+		w.Close()
+		return err
+	}
+	if err := prod.Start(); err != nil {
+		r.Close()
+		w.Close()
+		cons.Wait()
+		return err
+	}
+	// Our copies of the pipe ends must be closed, or neither side sees EOF.
+	r.Close()
+	w.Close()
+	pErr, cErr := prod.Wait(), cons.Wait()
+	tail := func(b bytes.Buffer) string {
+		t := strings.TrimSpace(b.String())
+		if len(t) > 600 {
+			t = t[len(t)-600:]
+		}
+		return t
+	}
+	// When the consumer dies the producer fails too (broken pipe), so the
+	// consumer's error is the one that explains what happened.
+	if cErr != nil {
+		return fmt.Errorf("%s: %v: %s", filepath.Base(consName), cErr, tail(consErr))
+	}
+	if pErr != nil {
+		return fmt.Errorf("%s: %v: %s", filepath.Base(prodName), pErr, tail(prodErr))
 	}
 	return nil
 }
@@ -543,7 +659,7 @@ func videoEye(stereo string, right bool, w, h int) string {
 // eye. Views are picked by their signalled position when the file has one
 // (view position 1 = left, 2 = right), else the first view is the left eye.
 func videoViews(ctx context.Context, src string) (left, right string, ok bool) {
-	out, err := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-view_ids", "-1", "-select_streams", "v:0",
+	out, err := videoCmd(ctx, "ffprobe", "-v", "error", "-view_ids", "-1", "-select_streams", "v:0",
 		"-show_entries", "stream=view_ids_available,view_pos_available", "-of", "json", src).Output()
 	if err != nil {
 		return "", "", false
@@ -573,7 +689,7 @@ func videoConvert(id int64) (int, error) {
 	defer cancel()
 
 	// Probe with the system ffprobe; it reads everything a browser upload could be.
-	out, err := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-show_entries", "format=duration:stream=codec_type,width,height", "-of", "json", src).Output()
+	out, err := videoCmd(ctx, "ffprobe", "-v", "error", "-show_entries", "format=duration:stream=codec_type,width,height", "-of", "json", src).Output()
 	if err != nil {
 		return 0, fmt.Errorf("ffprobe: %v", err)
 	}
@@ -627,28 +743,45 @@ func videoConvert(id int64) (int, error) {
 	// keyframe at least every 90 frames, ADPCM, 4096-byte blocks); 30 fps like
 	// Nintendo's trailers. Letterboxed, since the top screen is 5:3.
 	fit3DS := "scale=400:240:force_original_aspect_ratio=decrease,pad=400:240:(ow-iw)/2:(oh-ih)/2,setsar=1"
-	moflex := []string{"-hide_banner", "-loglevel", "error", "-y", "-threads", "2", "-i", src, "-t", strconv.Itoa(videoMaxSeconds)}
 	if stereo == "" {
-		moflex = append(moflex, "-vf", fit3DS+",fps=30", "-map", "0:v:0", "-b:v", "1000k")
+		moflex := []string{"-hide_banner", "-loglevel", "error", "-y", "-threads", "2", "-i", src, "-t", strconv.Itoa(videoMaxSeconds),
+			"-vf", fit3DS + ",fps=30", "-map", "0:v:0", "-b:v", "1000k",
+			"-c:v", "mobiclip", "-mobiclip", "1", "-g", "90", "-mo_block", "4096"}
+		if hasAudio {
+			moflex = append(moflex, "-map", "0:a:0", "-mo_audio", "adpcm", "-ar", "48000", "-ac", "2")
+		} else {
+			moflex = append(moflex, "-an")
+		}
+		if err := videoRun(ctx, mobipegFFmpeg(), append(moflex, filepath.Join(dir, "video.moflex"))...); err != nil {
+			return 0, err
+		}
 	} else {
 		// 3D: Nintendo's layout, the two eyes as alternating 400x240 frames
-		// (mo_layout 0, left first) - confirmed on a real 3DS 2026-10-10; the
-		// side-by-side layout 4 did not show in 3D in the eShop.
+		// (mo_layout 0, left first), 30 per eye - confirmed on a real 3DS
+		// 2026-10-10; the side-by-side layout 4 did not show in 3D. The system
+		// ffmpeg cuts out the eyes and hands raw frames + PCM to the patched
+		// mobipeg, which packs the audio per stereo pair (stock mobipeg's per-
+		// frame packing made the 3DS stutter on the sound, never the picture).
 		eyes := "[0:v:0]fps=30,split[a][b];[a]" + videoEye(stereo, false, vw, vh) + "," + fit3DS + "[l];[b]" + videoEye(stereo, true, vw, vh) + "," + fit3DS + "[r];"
 		if multiView {
 			eyes = "[" + viewL + "]fps=30," + videoEye(stereo, false, vw, vh) + "," + fit3DS + "[l];[" + viewR + "]fps=30," + videoEye(stereo, true, vw, vh) + "," + fit3DS + "[r];"
 		}
-		moflex = append(moflex, "-filter_complex", eyes+"[l][r]hstack=inputs=2,stereo3d=in=sbsl:out=al[v]",
-			"-map", "[v]", "-mo_layout", "0", "-b:v", "1500k")
-	}
-	moflex = append(moflex, "-c:v", "mobiclip", "-mobiclip", "1", "-g", "90", "-mo_block", "4096")
-	if hasAudio {
-		moflex = append(moflex, "-map", "0:a:0", "-mo_audio", "adpcm", "-ar", "48000", "-ac", "2")
-	} else {
-		moflex = append(moflex, "-an")
-	}
-	if err := videoRun(ctx, mobipegFFmpeg(), append(moflex, filepath.Join(dir, "video.moflex"))...); err != nil {
-		return 0, err
+		raw := []string{"-hide_banner", "-loglevel", "error", "-threads", "2", "-i", src, "-t", strconv.Itoa(videoMaxSeconds),
+			"-filter_complex", eyes + "[l][r]hstack=inputs=2,stereo3d=in=sbsl:out=al,format=yuv420p[v]",
+			"-map", "[v]", "-c:v", "rawvideo"}
+		enc := []string{"-hide_banner", "-loglevel", "error", "-y", "-threads", "2", "-f", "nut", "-i", "pipe:0",
+			"-map", "0:v:0", "-c:v", "mobiclip", "-mobiclip", "1", "-mo_layout", "0", "-g", "90", "-b:v", "1500k", "-mo_block", "4096"}
+		if hasAudio {
+			raw = append(raw, "-map", "0:a:0", "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2")
+			enc = append(enc, "-map", "0:a:0", "-mo_audio", "adpcm", "-ar", "48000", "-ac", "2")
+		} else {
+			raw = append(raw, "-an")
+			enc = append(enc, "-an")
+		}
+		raw = append(raw, "-f", "nut", "pipe:1")
+		if err := videoPipe(ctx, "ffmpeg", raw, mobipegPaired(), append(enc, filepath.Join(dir, "video.moflex"))); err != nil {
+			return 0, err
+		}
 	}
 
 	// Wii U eShop browser: baseline H.264 + AAC with the index up front, so it

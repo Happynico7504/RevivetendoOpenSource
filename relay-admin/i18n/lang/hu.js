@@ -275,6 +275,8 @@ I18N.register("hu", {
  "vid.intro": "Tölts fel egy videót a Revivetendo TV-re — a Nintendo eShop videócsatornájára Wii U-n és 3DS-en. A csapat minden videót ellenőriz, mielőtt megjelenik.",
  "vid.loading": "Betöltés…",
  "vid.none": "Még nem töltöttél fel videót.",
+ "vid.queue_ahead": "Átalakításra vár — előtted: {n}",
+ "vid.queue_next": "Átalakításra vár — te következel",
  "vid.remove_live": "Eltávolítás a Revivetendo TV-ről",
  "vid.rule_content": "Semmi sértő, semmi törvénybe ütköző, semmilyen személyes adat.",
  "vid.rule_rights": "Csak olyan videót tölts fel, amit te készítettél, vagy amit jogod van megosztani.",

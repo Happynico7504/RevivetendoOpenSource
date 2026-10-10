@@ -275,6 +275,8 @@ I18N.register("vi", {
  "vid.intro": "Tải lên một video cho Revivetendo TV — kênh video trong Nintendo eShop trên Wii U và 3DS. Đội ngũ duyệt từng video trước khi phát.",
  "vid.loading": "Đang tải…",
  "vid.none": "Bạn chưa tải lên video nào.",
+ "vid.queue_ahead": "Đang chờ chuyển đổi — còn {n} video trước bạn",
+ "vid.queue_next": "Đang chờ chuyển đổi — bạn là người tiếp theo",
  "vid.remove_live": "Gỡ khỏi Revivetendo TV",
  "vid.rule_content": "Không có nội dung xúc phạm, vi phạm pháp luật hay thông tin cá nhân.",
  "vid.rule_rights": "Chỉ tải lên video do bạn tự làm hoặc bạn có quyền chia sẻ.",

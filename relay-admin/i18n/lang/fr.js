@@ -275,6 +275,8 @@ I18N.register("fr", {
  "vid.intro": "Envoie une vidéo pour Revivetendo TV — la chaîne vidéo du Nintendo eShop sur Wii U et 3DS. L'équipe vérifie chaque vidéo avant sa mise en ligne.",
  "vid.loading": "Chargement…",
  "vid.none": "Tu n'as encore envoyé aucune vidéo.",
+ "vid.queue_ahead": "En attente de conversion — {n} avant toi",
+ "vid.queue_next": "En attente de conversion — tu es le prochain",
  "vid.remove_live": "Retirer de Revivetendo TV",
  "vid.rule_content": "Rien d'offensant, rien d'illégal, aucune information personnelle.",
  "vid.rule_rights": "N'envoie que des vidéos que tu as faites toi-même ou que tu as le droit de partager.",

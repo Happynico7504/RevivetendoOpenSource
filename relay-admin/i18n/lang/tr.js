@@ -275,6 +275,8 @@ I18N.register("tr", {
  "vid.intro": "Revivetendo TV için bir video yükle — Wii U ve 3DS'teki Nintendo eShop'un video kanalı. Ekip her videoyu yayına almadan önce inceler.",
  "vid.loading": "Yükleniyor…",
  "vid.none": "Henüz video yüklemedin.",
+ "vid.queue_ahead": "Dönüştürme bekleniyor — önünde {n} video var",
+ "vid.queue_next": "Dönüştürme bekleniyor — sıradaki sensin",
  "vid.remove_live": "Revivetendo TV'den kaldır",
  "vid.rule_content": "Saldırgan, yasa dışı içerik ve kişisel bilgi yok.",
  "vid.rule_rights": "Yalnızca kendin çektiğin veya paylaşma hakkına sahip olduğun videoları yükle.",

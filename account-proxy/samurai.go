@@ -471,6 +471,17 @@ func samuraiContentType(name string) string {
 	return "application/octet-stream"
 }
 
+type countingWriter struct {
+	http.ResponseWriter
+	n int64
+}
+
+func (c *countingWriter) Write(b []byte) (int, error) {
+	n, err := c.ResponseWriter.Write(b)
+	c.n += int64(n)
+	return n, err
+}
+
 func serveSamuraiUpload(w http.ResponseWriter, r *http.Request, rel string, m []string) {
 	if !samuraiListed(strings.TrimPrefix(rel, "/")) {
 		http.NotFound(w, r)
@@ -478,6 +489,17 @@ func serveSamuraiUpload(w http.ResponseWriter, r *http.Request, rel string, m []
 	}
 	if m[2] == "video.moflex" || m[2] == "video.mp4" {
 		tvCountView(r, m[1])
+		// How fast the console really receives the video: a stream it can't
+		// download faster than its bitrate stutters whatever the encoding.
+		cw := &countingWriter{ResponseWriter: w}
+		w = cw
+		start := time.Now()
+		defer func() {
+			d := time.Since(start).Seconds()
+			if d > 0 && cw.n > 0 {
+				log.Printf("samurai media: sent %s %.1f MB in %.1fs = %.0f kbps to %s", rel, float64(cw.n)/1048576, d, float64(cw.n)*8/1000/d, realIP(r))
+			}
+		}()
 	}
 	w.Header().Set("Content-Type", samuraiContentType(m[2]))
 	// A conversion that never reached S3 (no S3 configured) is still local.

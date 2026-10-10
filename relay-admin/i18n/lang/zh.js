@@ -275,6 +275,8 @@ I18N.register("zh", {
  "vid.intro": "为 Revivetendo TV 上传视频——这是 Wii U 和 3DS 上任天堂 eShop 里的视频频道。每个视频上线前都会经过工作人员审核。",
  "vid.loading": "加载中…",
  "vid.none": "你还没有上传任何视频。",
+ "vid.queue_ahead": "等待转换 — 前面还有 {n} 个",
+ "vid.queue_next": "等待转换 — 下一个就是你",
  "vid.remove_live": "从 Revivetendo TV 下架",
  "vid.rule_content": "不得包含冒犯性、违法内容或个人信息。",
  "vid.rule_rights": "只上传你自己制作或有权分享的视频。",

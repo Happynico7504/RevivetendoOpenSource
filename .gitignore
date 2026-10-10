@@ -60,3 +60,8 @@ eshop-video/
 # mobipeg binaries (see tools/mobipeg/README.md)
 tools/mobipeg/ffmpeg
 tools/mobipeg/ffprobe
+tools/mobipeg/ffmpeg-paired
+
+# Sentry crash-reporter state (per-machine installation id), written at runtime
+.sentry-native/
+**/.sentry-native/

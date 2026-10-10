@@ -275,6 +275,8 @@ I18N.register("it", {
  "vid.intro": "Carica un video su Revivetendo TV, il canale video del Nintendo eShop su Wii U e 3DS. Lo staff controlla ogni video prima della pubblicazione.",
  "vid.loading": "Caricamento…",
  "vid.none": "Non hai ancora caricato nessun video.",
+ "vid.queue_ahead": "In attesa di conversione — {n} prima di te",
+ "vid.queue_next": "In attesa di conversione — sei il prossimo",
  "vid.remove_live": "Rimuovi da Revivetendo TV",
  "vid.rule_content": "Niente di offensivo, niente di illegale, nessun dato personale.",
  "vid.rule_rights": "Carica solo video che hai fatto tu o che hai il diritto di condividere.",

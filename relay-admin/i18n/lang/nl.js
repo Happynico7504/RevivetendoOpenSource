@@ -275,6 +275,8 @@ I18N.register("nl", {
  "vid.intro": "Upload een video voor Revivetendo TV — het videokanaal in de Nintendo eShop op Wii U en 3DS. Het team controleert elke video voordat hij online gaat.",
  "vid.loading": "Laden…",
  "vid.none": "Je hebt nog geen video's geüpload.",
+ "vid.queue_ahead": "Wacht op omzetten — {n} voor jou",
+ "vid.queue_next": "Wacht op omzetten — jij bent de volgende",
  "vid.remove_live": "Van Revivetendo TV halen",
  "vid.rule_content": "Niets aanstootgevends, niets illegaals, geen persoonlijke gegevens.",
  "vid.rule_rights": "Upload alleen video's die je zelf hebt gemaakt of mag delen.",

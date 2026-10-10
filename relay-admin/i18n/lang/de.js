@@ -275,6 +275,8 @@ I18N.register("de", {
  "vid.intro": "Lade ein Video für Revivetendo TV hoch — den Videokanal im Nintendo eShop auf Wii U und 3DS. Das Team prüft jedes Video, bevor es online geht.",
  "vid.loading": "Wird geladen…",
  "vid.none": "Du hast noch keine Videos hochgeladen.",
+ "vid.queue_ahead": "Wartet auf Umwandlung — {n} vor dir",
+ "vid.queue_next": "Wartet auf Umwandlung — du bist als Nächstes dran",
  "vid.remove_live": "Von Revivetendo TV entfernen",
  "vid.rule_content": "Nichts Anstößiges, nichts Illegales, keine persönlichen Daten.",
  "vid.rule_rights": "Lade nur Videos hoch, die du selbst gemacht hast oder teilen darfst.",

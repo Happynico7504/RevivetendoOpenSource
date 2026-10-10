@@ -275,6 +275,8 @@ I18N.register("es", {
  "vid.intro": "Sube un vídeo a Revivetendo TV, el canal de vídeo de la Nintendo eShop en Wii U y 3DS. El equipo revisa cada vídeo antes de publicarlo.",
  "vid.loading": "Cargando…",
  "vid.none": "Aún no has subido ningún vídeo.",
+ "vid.queue_ahead": "Esperando conversión — {n} por delante",
+ "vid.queue_next": "Esperando conversión — eres el siguiente",
  "vid.remove_live": "Quitar de Revivetendo TV",
  "vid.rule_content": "Nada ofensivo, nada ilegal, nada de información personal.",
  "vid.rule_rights": "Sube solo vídeos que hayas hecho tú o que tengas derecho a compartir.",

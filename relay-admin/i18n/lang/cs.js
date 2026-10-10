@@ -275,6 +275,8 @@ I18N.register("cs", {
  "vid.intro": "Nahraj video do Revivetendo TV — videokanálu v Nintendo eShopu na Wii U a 3DS. Tým každé video před zveřejněním zkontroluje.",
  "vid.loading": "Načítání…",
  "vid.none": "Zatím jsi nenahrál(a) žádné video.",
+ "vid.queue_ahead": "Čeká na převod — před tebou: {n}",
+ "vid.queue_next": "Čeká na převod — jsi na řadě jako další",
  "vid.remove_live": "Odebrat z Revivetendo TV",
  "vid.rule_content": "Nic urážlivého, nic nezákonného, žádné osobní údaje.",
  "vid.rule_rights": "Nahrávej jen videa, která jsi natočil(a) sám/sama nebo máš právo je sdílet.",

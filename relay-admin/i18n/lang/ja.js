@@ -275,6 +275,8 @@ I18N.register("ja", {
  "vid.intro": "Revivetendo TV に動画をアップロードしましょう。Wii U と 3DS の ニンテンドーeショップ内の動画チャンネルです。公開前にスタッフがすべての動画を確認します。",
  "vid.loading": "読み込み中…",
  "vid.none": "まだ動画をアップロードしていません。",
+ "vid.queue_ahead": "変換待ち — あと {n} 本",
+ "vid.queue_next": "変換待ち — 次はあなたの番です",
  "vid.remove_live": "Revivetendo TV から取り下げる",
  "vid.rule_content": "不快な内容、違法な内容、個人情報は禁止です。",
  "vid.rule_rights": "自分で作った動画、または共有する権利のある動画だけをアップロードしてください。",

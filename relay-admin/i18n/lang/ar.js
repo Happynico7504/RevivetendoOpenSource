@@ -275,6 +275,8 @@ I18N.register("ar", {
  "vid.intro": "ارفع فيديو إلى Revivetendo TV — قناة الفيديو في Nintendo eShop على Wii U و3DS. يراجع الفريق كل فيديو قبل نشره.",
  "vid.loading": "جارٍ التحميل…",
  "vid.none": "لم ترفع أي فيديو بعد.",
+ "vid.queue_ahead": "بانتظار التحويل — أمامك {n}",
+ "vid.queue_next": "بانتظار التحويل — أنت التالي",
  "vid.remove_live": "إزالة من Revivetendo TV",
  "vid.rule_content": "لا محتوى مسيئًا، ولا شيء مخالفًا للقانون، ولا معلومات شخصية.",
  "vid.rule_rights": "ارفع فقط الفيديوهات التي صنعتها بنفسك أو التي يحق لك مشاركتها.",

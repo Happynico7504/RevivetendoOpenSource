@@ -275,6 +275,8 @@ I18N.register("ko", {
  "vid.intro": "Wii U와 3DS의 닌텐도 e숍 동영상 채널인 Revivetendo TV에 동영상을 올려 보세요. 운영진이 모든 동영상을 공개 전에 검토합니다.",
  "vid.loading": "불러오는 중…",
  "vid.none": "아직 올린 동영상이 없습니다.",
+ "vid.queue_ahead": "변환 대기 중 — 앞에 {n}개",
+ "vid.queue_next": "변환 대기 중 — 다음 차례입니다",
  "vid.remove_live": "Revivetendo TV에서 내리기",
  "vid.rule_content": "불쾌하거나 불법적인 내용, 개인정보는 안 됩니다.",
  "vid.rule_rights": "직접 만들었거나 공유할 권리가 있는 동영상만 올려 주세요.",

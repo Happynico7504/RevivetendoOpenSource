@@ -149,7 +149,10 @@ button.submit:disabled{opacity:.6;cursor:default}
         var info = el('div');
         info.appendChild(el('h3', '', v.title));
         var st = STATUS[v.status] || [v.status, v.status];
-        info.appendChild(el('span', 'st st-' + v.status, t(st[0], st[1])));
+        var label = t(st[0], st[1]);
+        if (v.status === 'processing' && v.queueAhead === 0) label = t('vid.queue_next', 'Waiting to convert — you\'re next');
+        else if (v.status === 'processing' && v.queueAhead > 0) label = fmt(t('vid.queue_ahead', 'Waiting to convert — {n} ahead of you'), { n: v.queueAhead });
+        info.appendChild(el('span', 'st st-' + v.status, label));
         var meta = v.created + (v.seconds ? ' · ' + mmss(v.seconds) : '') + (v.stereo ? ' · 3D' : '');
         if (v.status === 'uploading') meta += ' · ' + Math.floor(100 * v.received / v.size) + '%';
         info.appendChild(el('div', 'meta', meta));
