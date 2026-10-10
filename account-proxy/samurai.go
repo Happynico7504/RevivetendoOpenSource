@@ -321,19 +321,18 @@ body{margin:0;background:#141414;color:#fff;font-family:sans-serif}
 <div class="cform"><input id="ctext" type="text" maxlength="200" placeholder="Write a comment..."><button onclick="comment()">Post</button></div>
 <p id="smsg"></p><div id="clist"></div></div></div>
 <script>
-// The applet (wood) keeps its loading curtain up until the page ends startup.
+// The applet (wood) keeps its loading screen up until the page ends startup.
 // Unlike Miiverse, wood's endStartUp takes one argument (no-arg call throws
 // "Arguments count is not match"); found by probing a real Wii U, 2026-10-09.
+// wiiuCurtain is the TV cover ("Use the GamePad to input text"), not the
+// loading screen: open() puts it up, close() takes it down, after which the TV
+// mirrors the page and plays videos too (found on a real Wii U, 2026-10-10).
 function wood(obj,fn,args){try{if(obj&&obj[fn])obj[fn].apply(obj,args)}catch(e){}}
 wood(window.wiiuBrowser,'endStartUp',[true]);
-wood(window.wiiuCurtain,'open',[]);
+wood(window.wiiuCurtain,'close',[]);
 wood(window.wiiuDialog,'hideLoading',[]);
 wood(window.wiiuBrowser,'showLoadingIcon',[false]);
 function closeApp(){if(window.wiiuBrowser&&wiiuBrowser.closeApplication){wiiuBrowser.closeApplication()}else{history.back()}}
-// GamePad only: the eShop applet keeps its own fixed screen on the TV ("Use the
-// GamePad to input text"), even for fullscreen video in its native player
-// (tested 2026-10-10: webkitEnterFullscreen works and wiiu.videoplayer.viewMode
-// switches, but nothing reaches the TV). Videos play inline on the GamePad.
 function vidErr(){document.getElementById('verr').style.display='block'}
 function $(i){return document.getElementById(i)}
 function play(u,n,id,social){$('verr').style.display='none';var v=$('vid');$('vname').textContent=n;$('player').style.display='block';$('player').scrollTop=0;v.src=u;v.play();
