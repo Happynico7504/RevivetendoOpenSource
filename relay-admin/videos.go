@@ -63,6 +63,8 @@ CREATE INDEX IF NOT EXISTS eshop_videos_pid ON eshop_videos (pid);
 CREATE INDEX IF NOT EXISTS eshop_videos_status ON eshop_videos (status, submitted_at);
 -- Views, likes and comments come from the consoles (account-proxy/samurai_social.go).
 ALTER TABLE eshop_videos ADD COLUMN IF NOT EXISTS views BIGINT NOT NULL DEFAULT 0;
+-- 3D uploads: how the source packs the two eyes ('' = 2D), see videoStereoModes.
+ALTER TABLE eshop_videos ADD COLUMN IF NOT EXISTS stereo TEXT NOT NULL DEFAULT '';
 CREATE TABLE IF NOT EXISTS eshop_video_likes (
 	video_id   BIGINT      NOT NULL REFERENCES eshop_videos (id) ON DELETE CASCADE,
 	pid        BIGINT      NOT NULL,
@@ -169,10 +171,11 @@ type videoSummary struct {
 	Views       int64  `json:"views"`
 	Likes       int64  `json:"likes"`
 	Comments    int64  `json:"comments"`
+	Stereo      string `json:"stereo"`
 }
 
 func videoListFor(pid int64) []videoSummary {
-	rows, err := db.Query(`SELECT id, title, description, status, received, upload_size, seconds, review_note, error, created_at, views,
+	rows, err := db.Query(`SELECT id, title, description, status, received, upload_size, seconds, review_note, error, created_at, views, stereo,
 			(SELECT COUNT(*) FROM eshop_video_likes l WHERE l.video_id = v.id),
 			(SELECT COUNT(*) FROM eshop_video_comments c WHERE c.video_id = v.id)
 		FROM eshop_videos v WHERE pid = $1 ORDER BY created_at DESC LIMIT 100`, pid)
@@ -184,7 +187,7 @@ func videoListFor(pid int64) []videoSummary {
 	for rows.Next() {
 		var v videoSummary
 		var created time.Time
-		if rows.Scan(&v.ID, &v.Title, &v.Description, &v.Status, &v.Received, &v.Size, &v.Seconds, &v.ReviewNote, &v.Error, &created, &v.Views, &v.Likes, &v.Comments) != nil {
+		if rows.Scan(&v.ID, &v.Title, &v.Description, &v.Status, &v.Received, &v.Size, &v.Seconds, &v.ReviewNote, &v.Error, &created, &v.Views, &v.Stereo, &v.Likes, &v.Comments) != nil {
 			continue
 		}
 		v.Created = created.UTC().Format("2006-01-02")
@@ -213,6 +216,7 @@ func myVideosStart(w http.ResponseWriter, r *http.Request) {
 		Description string `json:"description"`
 		Size        int64  `json:"size"`
 		Rights      bool   `json:"rights"`
+		Stereo      string `json:"stereo"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&req); err != nil {
 		videoError(w, http.StatusBadRequest, "vid.err_generic", "invalid request")
@@ -229,6 +233,8 @@ func myVideosStart(w http.ResponseWriter, r *http.Request) {
 		videoError(w, http.StatusBadRequest, "vid.err_desc", "The description can be at most 500 characters.")
 	case !req.Rights:
 		videoError(w, http.StatusBadRequest, "vid.err_rights", "Please confirm you have the right to share this video.")
+	case !videoStereoModes[req.Stereo]:
+		videoError(w, http.StatusBadRequest, "vid.err_generic", "unknown 3D layout")
 	case req.Size <= 0 || req.Size > videoMaxUpload:
 		videoError(w, http.StatusBadRequest, "vid.err_size", "Videos can be at most 300 MB.")
 	default:
@@ -243,8 +249,8 @@ func myVideosStart(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var id int64
-		if err := db.QueryRow(`INSERT INTO eshop_videos (pid, title, description, upload_size) VALUES ($1, $2, $3, $4) RETURNING id`,
-			pid, req.Title, req.Description, req.Size).Scan(&id); err != nil {
+		if err := db.QueryRow(`INSERT INTO eshop_videos (pid, title, description, upload_size, stereo) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+			pid, req.Title, req.Description, req.Size, req.Stereo).Scan(&id); err != nil {
 			log.Printf("videos: start: %v", err)
 			videoError(w, http.StatusInternalServerError, "vid.err_generic", "Something went wrong, please try again.")
 			return
@@ -486,20 +492,96 @@ func videoRun(ctx context.Context, name string, args ...string) error {
 	return nil
 }
 
+// videoStereoModes are the 3D source layouts the upload page offers ("" = 2D):
+// side by side or top/bottom, left eye first unless "-r".
+var videoStereoModes = map[string]bool{"": true, "sbs": true, "sbs-r": true, "tb": true, "tb-r": true}
+
+// videoEye returns a filter chain that cuts one eye out of a 3D frame and
+// rescales it to its real proportions (eyeHeight tall, square pixels).
+// Half-width side-by-side (and half-height top/bottom) sources squeeze each
+// eye into half the frame and are told apart from full-size ones by the
+// frame's shape: a full side-by-side frame is at least ~2.6:1, a full
+// top/bottom one at most 1:1.
+func videoEye(stereo string, right bool, w, h int) string {
+	const eyeHeight = 480
+	if stereo == "mv" { // MV-HEVC: each view is a whole frame, picked by videoViews
+		ew := int(eyeHeight*float64(w)/float64(h)/2+0.5) * 2
+		return fmt.Sprintf("scale=%d:%d,setsar=1", ew, eyeHeight)
+	}
+	if strings.HasSuffix(stereo, "-r") {
+		right = !right
+	}
+	fw, fh := float64(w), float64(h)
+	var crop string
+	aspect := fw / fh // half-size layouts keep the frame's aspect per eye
+	if strings.HasPrefix(stereo, "sbs") {
+		crop = "crop=iw/2:ih:0:0"
+		if right {
+			crop = "crop=iw/2:ih:iw/2:0"
+		}
+		if fw/fh >= 2.6 {
+			aspect = fw / 2 / fh
+		}
+	} else {
+		crop = "crop=iw:ih/2:0:0"
+		if right {
+			crop = "crop=iw:ih/2:0:ih/2"
+		}
+		if fw/fh <= 1.0 {
+			aspect = fw / (fh / 2)
+		}
+	}
+	ew := int(eyeHeight*aspect/2+0.5) * 2
+	if ew < 2 {
+		ew = 2
+	}
+	return fmt.Sprintf("%s,scale=%d:%d,setsar=1", crop, ew, eyeHeight)
+}
+
+// videoViews detects multi-view video (MV-HEVC: iPhone / Vision Pro spatial
+// video and similar) and returns the input selectors for the left and right
+// eye. Views are picked by their signalled position when the file has one
+// (view position 1 = left, 2 = right), else the first view is the left eye.
+func videoViews(ctx context.Context, src string) (left, right string, ok bool) {
+	out, err := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-view_ids", "-1", "-select_streams", "v:0",
+		"-show_entries", "stream=view_ids_available,view_pos_available", "-of", "json", src).Output()
+	if err != nil {
+		return "", "", false
+	}
+	var probe struct {
+		Streams []struct {
+			IDs string `json:"view_ids_available"`
+			Pos string `json:"view_pos_available"`
+		} `json:"streams"`
+	}
+	if json.Unmarshal(out, &probe) != nil || len(probe.Streams) == 0 || len(strings.Split(probe.Streams[0].IDs, ",")) < 2 {
+		return "", "", false
+	}
+	pos := "," + probe.Streams[0].Pos + ","
+	if strings.Contains(pos, ",1,") && strings.Contains(pos, ",2,") {
+		return "0:v:vpos:left", "0:v:vpos:right", true
+	}
+	return "0:v:vidx:0", "0:v:vidx:1", true
+}
+
 func videoConvert(id int64) (int, error) {
 	dir := videoSubmissionDir(id)
+	var stereo string
+	db.QueryRow(`SELECT stereo FROM eshop_videos WHERE id = $1`, id).Scan(&stereo)
 	src := filepath.Join(dir, "source")
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 	defer cancel()
 
 	// Probe with the system ffprobe; it reads everything a browser upload could be.
-	out, err := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-show_entries", "format=duration:stream=codec_type", "-of", "json", src).Output()
+	out, err := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-show_entries", "format=duration:stream=codec_type,width,height", "-of", "json", src).Output()
 	if err != nil {
 		return 0, fmt.Errorf("ffprobe: %v", err)
 	}
 	var probe struct {
 		Streams []struct {
 			CodecType string `json:"codec_type"`
+			Width     int    `json:"width"`
+			Height    int    `json:"height"`
 		} `json:"streams"`
 		Format struct {
 			Duration string `json:"duration"`
@@ -507,7 +589,11 @@ func videoConvert(id int64) (int, error) {
 	}
 	json.Unmarshal(out, &probe)
 	hasVideo, hasAudio := false, false
+	var vw, vh int
 	for _, s := range probe.Streams {
+		if s.CodecType == "video" && !hasVideo {
+			vw, vh = s.Width, s.Height
+		}
 		hasVideo = hasVideo || s.CodecType == "video"
 		hasAudio = hasAudio || s.CodecType == "audio"
 	}
@@ -521,13 +607,41 @@ func videoConvert(id int64) (int, error) {
 	if dur > videoMaxSeconds+1 {
 		return 0, errVideoTooLong
 	}
+	// Multi-view files are 3D no matter what was picked in the form: their
+	// frames hold one view each, so a side-by-side choice can't apply.
+	viewL, viewR, multiView := videoViews(ctx, src)
+	if multiView && stereo != "mv" {
+		stereo = "mv"
+		db.Exec(`UPDATE eshop_videos SET stereo = 'mv' WHERE id = $1`, id)
+	}
+	if stereo != "" && (vw <= 0 || vh <= 0) {
+		return 0, fmt.Errorf("3D upload without a frame size")
+	}
+	// The 2D picture: the whole frame, or the left eye of a 3D upload.
+	flat := ""
+	if stereo != "" && stereo != "mv" { // MV-HEVC's 2D picture is its main view, as decoded by default
+		flat = videoEye(stereo, false, vw, vh) + ","
+	}
 
 	// 3DS: settings mobipeg's own encode.py uses for fmt=moflex (400x240,
 	// keyframe at least every 90 frames, ADPCM, 4096-byte blocks); 30 fps like
 	// Nintendo's trailers. Letterboxed, since the top screen is 5:3.
-	moflex := []string{"-hide_banner", "-loglevel", "error", "-y", "-threads", "2", "-i", src, "-t", strconv.Itoa(videoMaxSeconds),
-		"-vf", "scale=400:240:force_original_aspect_ratio=decrease,pad=400:240:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30",
-		"-map", "0:v:0", "-c:v", "mobiclip", "-mobiclip", "1", "-g", "90", "-b:v", "1000k", "-mo_block", "4096"}
+	fit3DS := "scale=400:240:force_original_aspect_ratio=decrease,pad=400:240:(ow-iw)/2:(oh-ih)/2,setsar=1"
+	moflex := []string{"-hide_banner", "-loglevel", "error", "-y", "-threads", "2", "-i", src, "-t", strconv.Itoa(videoMaxSeconds)}
+	if stereo == "" {
+		moflex = append(moflex, "-vf", fit3DS+",fps=30", "-map", "0:v:0", "-b:v", "1000k")
+	} else {
+		// 3D: Nintendo's layout, the two eyes as alternating 400x240 frames
+		// (mo_layout 0, left first) - confirmed on a real 3DS 2026-10-10; the
+		// side-by-side layout 4 did not show in 3D in the eShop.
+		eyes := "[0:v:0]fps=30,split[a][b];[a]" + videoEye(stereo, false, vw, vh) + "," + fit3DS + "[l];[b]" + videoEye(stereo, true, vw, vh) + "," + fit3DS + "[r];"
+		if multiView {
+			eyes = "[" + viewL + "]fps=30," + videoEye(stereo, false, vw, vh) + "," + fit3DS + "[l];[" + viewR + "]fps=30," + videoEye(stereo, true, vw, vh) + "," + fit3DS + "[r];"
+		}
+		moflex = append(moflex, "-filter_complex", eyes+"[l][r]hstack=inputs=2,stereo3d=in=sbsl:out=al[v]",
+			"-map", "[v]", "-mo_layout", "0", "-b:v", "1500k")
+	}
+	moflex = append(moflex, "-c:v", "mobiclip", "-mobiclip", "1", "-g", "90", "-mo_block", "4096")
 	if hasAudio {
 		moflex = append(moflex, "-map", "0:a:0", "-mo_audio", "adpcm", "-ar", "48000", "-ac", "2")
 	} else {
@@ -540,7 +654,7 @@ func videoConvert(id int64) (int, error) {
 	// Wii U eShop browser: baseline H.264 + AAC with the index up front, so it
 	// starts playing before the download finishes.
 	mp4 := []string{"-hide_banner", "-loglevel", "error", "-y", "-threads", "2", "-i", src, "-t", strconv.Itoa(videoMaxSeconds),
-		"-vf", "scale=854:480:force_original_aspect_ratio=decrease,pad=854:480:(ow-iw)/2:(oh-ih)/2,setsar=1",
+		"-vf", flat + "scale=854:480:force_original_aspect_ratio=decrease,pad=854:480:(ow-iw)/2:(oh-ih)/2,setsar=1",
 		"-map", "0:v:0", "-c:v", "libx264", "-profile:v", "baseline", "-level", "3.1", "-pix_fmt", "yuv420p", "-crf", "23", "-r", "30"}
 	if hasAudio {
 		mp4 = append(mp4, "-map", "0:a:0", "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2")
@@ -555,7 +669,7 @@ func videoConvert(id int64) (int, error) {
 	at := fmt.Sprintf("%.2f", dur/3)
 	for _, img := range []struct{ name, size string }{{"thumb.jpg", "120:88"}, {"banner.jpg", "400:168"}} {
 		w, h, _ := strings.Cut(img.size, ":")
-		vf := "scale=" + img.size + ":force_original_aspect_ratio=increase,crop=" + w + ":" + h + ",setsar=1"
+		vf := flat + "scale=" + img.size + ":force_original_aspect_ratio=increase,crop=" + w + ":" + h + ",setsar=1"
 		if err := videoRun(ctx, "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-ss", at, "-i", src, "-frames:v", "1", "-vf", vf, "-q:v", "3", filepath.Join(dir, img.name)); err != nil {
 			return 0, err
 		}

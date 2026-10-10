@@ -99,11 +99,11 @@ func videoSyncCatalog() error {
 	}
 
 	type live struct {
-		id, channel           int64
-		title, desc, uploader string
-		seconds               int
+		id, channel                   int64
+		title, desc, uploader, stereo string
+		seconds                       int
 	}
-	rows, err := db.Query(`SELECT id, pid, title, description, seconds, COALESCE(channel_id, 0) FROM eshop_videos
+	rows, err := db.Query(`SELECT id, pid, title, description, seconds, COALESCE(channel_id, 0), stereo FROM eshop_videos
 		WHERE status = 'live' ORDER BY reviewed_at DESC, id DESC`)
 	if err != nil {
 		return err
@@ -112,7 +112,7 @@ func videoSyncCatalog() error {
 	for rows.Next() {
 		var l live
 		var pid int64
-		if rows.Scan(&l.id, &pid, &l.title, &l.desc, &l.seconds, &l.channel) == nil {
+		if rows.Scan(&l.id, &pid, &l.title, &l.desc, &l.seconds, &l.channel, &l.stereo) == nil {
 			l.uploader, _ = pnidForPID(pid)
 			lives = append(lives, l)
 		}
@@ -154,7 +154,7 @@ func videoSyncCatalog() error {
 			"id": catID, "name": l.title, "description": desc,
 			"banner": u + "banner.jpg", "thumbnail": u + "thumb.jpg",
 			"file": u + "video.moflex", "mp4": u + "video.mp4",
-			"width": 400, "height": 240, "dimension": "2d", "seconds": l.seconds, "new": true,
+			"width": 400, "height": 240, "dimension": map[bool]string{false: "2d", true: "3d"}[l.stereo != ""], "seconds": l.seconds, "new": true,
 		})
 		ch := l.channel
 		if _, ok := byChannel[ch]; !ok {
@@ -201,6 +201,7 @@ type adminVideoItem struct {
 	ReviewNote  string
 	Error       string
 	MoflexMB    string
+	Stereo      string
 	Views       int64
 	Likes       int64
 	Comments    []adminVideoComment
@@ -266,7 +267,7 @@ func adminVideos(w http.ResponseWriter, r *http.Request) {
 		order = "updated_at DESC"
 	}
 	rows, err := db.Query(`SELECT id, pid, title, description, status, seconds, COALESCE(channel_id, 0), review_note, error, created_at, submitted_at, reviewed_at,
-			views, (SELECT COUNT(*) FROM eshop_video_likes l WHERE l.video_id = v.id)
+			views, (SELECT COUNT(*) FROM eshop_video_likes l WHERE l.video_id = v.id), stereo
 		FROM eshop_videos v WHERE status = $1 ORDER BY `+order+` LIMIT 200`, status)
 	if err != nil {
 		http.Error(w, "database error", http.StatusInternalServerError)
@@ -276,7 +277,7 @@ func adminVideos(w http.ResponseWriter, r *http.Request) {
 	var items []adminVideoItem
 	for rows.Next() {
 		var it adminVideoItem
-		if rows.Scan(&it.ID, &it.PID, &it.Title, &it.Description, &it.Status, &it.Seconds, &it.Channel, &it.ReviewNote, &it.Error, &it.CreatedAt, &it.SubmittedAt, &it.ReviewedAt, &it.Views, &it.Likes) != nil {
+		if rows.Scan(&it.ID, &it.PID, &it.Title, &it.Description, &it.Status, &it.Seconds, &it.Channel, &it.ReviewNote, &it.Error, &it.CreatedAt, &it.SubmittedAt, &it.ReviewedAt, &it.Views, &it.Likes, &it.Stereo) != nil {
 			continue
 		}
 		it.PNID, _ = pnidForPID(it.PID)
@@ -448,7 +449,7 @@ button{font:inherit;cursor:pointer;border:none;border-radius:4px;padding:.35rem 
   </div>
   <div>
     <h2>#{{.ID}} {{.Title}}</h2>
-    <div class="meta">by <strong>{{if .PNID}}{{.PNID}}{{else}}?{{end}}</strong> (PID {{.PID}}){{if .Seconds}} · {{mmss .Seconds}}{{end}}{{if .MoflexMB}} · 3DS file {{.MoflexMB}}{{end}}{{if or (eq .Status "live") (eq .Status "rejected")}} · {{.Views}} views · {{.Likes}} likes · {{len .Comments}} comments{{end}}<br>
+    <div class="meta">by <strong>{{if .PNID}}{{.PNID}}{{else}}?{{end}}</strong> (PID {{.PID}}){{if .Seconds}} · {{mmss .Seconds}}{{end}}{{if .MoflexMB}} · 3DS file {{.MoflexMB}}{{end}}{{if .Stereo}} · <strong>3D</strong> ({{.Stereo}}; preview shows the left eye){{end}}{{if or (eq .Status "live") (eq .Status "rejected")}} · {{.Views}} views · {{.Likes}} likes · {{len .Comments}} comments{{end}}<br>
       uploaded {{.CreatedAt.Format "2006-01-02 15:04"}}{{if .ReviewedAt.Valid}} · reviewed {{.ReviewedAt.Time.Format "2006-01-02 15:04"}}{{end}}</div>
     {{if .Description}}<div class="desc">{{.Description}}</div>{{end}}
     {{if .Error}}<div class="note">Conversion: {{.Error}}</div>{{end}}

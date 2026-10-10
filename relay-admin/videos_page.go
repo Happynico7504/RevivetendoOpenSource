@@ -42,6 +42,8 @@ label{display:block;font-size:.8rem;font-weight:600;color:#555;margin:1rem 0 .3r
 input[type=text],textarea{width:100%;box-sizing:border-box;border:1px solid #d1d5db;border-radius:6px;padding:.5rem .75rem;font:inherit}
 textarea{min-height:4.5rem;resize:vertical}
 input[type=file]{font:inherit;font-size:.9rem}
+select{width:100%;box-sizing:border-box;border:1px solid #d1d5db;border-radius:6px;padding:.45rem .6rem;font:inherit;background:#fff}
+.hint{font-size:.8rem;color:#666;margin:.3rem 0 0}
 label.check{display:flex;gap:.5rem;align-items:flex-start;font-weight:400;color:#333;font-size:.875rem}
 button.submit{margin-top:1.25rem;width:100%;background:#e2231a;color:#fff;border:none;border-radius:6px;padding:.65rem;font:inherit;cursor:pointer}
 button.submit:disabled{opacity:.6;cursor:default}
@@ -88,6 +90,16 @@ button.submit:disabled{opacity:.6;cursor:default}
   <textarea id="desc" maxlength="500"></textarea>
   <label for="file" data-i18n="vid.f_file">Video file</label>
   <input id="file" type="file" accept="video/*" required>
+  <label for="stereo" data-i18n="vid.f_3d">3D video</label>
+  <select id="stereo">
+    <option value="" data-i18n="vid.3d_no">No, it's a normal 2D video</option>
+    <option value="sbs" data-i18n="vid.3d_sbs">Yes: side by side, left eye on the left</option>
+    <option value="sbs-r" data-i18n="vid.3d_sbsr">Yes: side by side, right eye on the left</option>
+    <option value="tb" data-i18n="vid.3d_tb">Yes: top/bottom, left eye on top</option>
+    <option value="tb-r" data-i18n="vid.3d_tbr">Yes: top/bottom, right eye on top</option>
+  </select>
+  <p class="hint" data-i18n="vid.3d_hint">3D videos play in 3D on the 3DS. The Wii U shows the left eye.</p>
+  <p class="hint" data-i18n="vid.3d_mv">Spatial videos from an iPhone or VR headset (MV-HEVC) are detected automatically — just upload them.</p>
   <label class="check"><input id="rights" type="checkbox" required> <span data-i18n="vid.f_rights">I made this video or have the right to share it, and it follows the rules above.</span></label>
   <button class="submit" id="go" type="submit" data-i18n="vid.f_upload">Upload</button>
   <div class="bar" id="bar"><div></div></div>
@@ -138,7 +150,7 @@ button.submit:disabled{opacity:.6;cursor:default}
         info.appendChild(el('h3', '', v.title));
         var st = STATUS[v.status] || [v.status, v.status];
         info.appendChild(el('span', 'st st-' + v.status, t(st[0], st[1])));
-        var meta = v.created + (v.seconds ? ' · ' + mmss(v.seconds) : '');
+        var meta = v.created + (v.seconds ? ' · ' + mmss(v.seconds) : '') + (v.stereo ? ' · 3D' : '');
         if (v.status === 'uploading') meta += ' · ' + Math.floor(100 * v.received / v.size) + '%';
         info.appendChild(el('div', 'meta', meta));
         if (v.status === 'live') info.appendChild(el('div', 'meta', fmt(t('vid.stats', '{views} views · {likes} likes · {comments} comments'), { views: v.views, likes: v.likes, comments: v.comments })));
@@ -192,7 +204,7 @@ button.submit:disabled{opacity:.6;cursor:default}
     if (file.size > MAX) { msg(t('vid.err_size', 'Videos can be at most 300 MB.'), 'err'); return; }
     $('go').disabled = true;
     msg(t('vid.uploading', 'Uploading… keep this page open.'));
-    api('POST', 'start', { title: $('title').value, description: $('desc').value, size: file.size, rights: $('rights').checked }).then(function (j) {
+    api('POST', 'start', { title: $('title').value, description: $('desc').value, size: file.size, rights: $('rights').checked, stereo: $('stereo').value }).then(function (j) {
       if (!j.id) throw j;
       load();
       return sendFrom(j.id, file, 0, 0);
