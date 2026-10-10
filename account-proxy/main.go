@@ -476,6 +476,7 @@ func main() {
 		mii_data   BYTEA NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	)`)
+	ensureRvtaTables()
 
 	mongoClient, err := mongo.NewClient(options.Client().ApplyURI("mongodb://localhost:27017/"))
 	if err != nil {
@@ -6782,6 +6783,8 @@ func startOLVProxy() {
 			handleECS(w, r)
 		case "nus.c.shop.nicoch.net":
 			handleNUSShop(w, r)
+		case "rvta.nicoch.net":
+			handleRvta(w, r)
 		case "samurai.nicoch.net":
 			handleSamurai(w, r)
 		case "samurai.wup.shop.nicoch.net":
