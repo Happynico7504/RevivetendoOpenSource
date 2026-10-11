@@ -139,6 +139,7 @@ func ensureRvtaTables() {
 	)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS rvta_samples_time ON rvta_samples (console_id, console_time)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS rvta_samples_fc ON rvta_samples (friend_code, console_time)`)
+	ensureRvtaDumpTable()
 }
 
 // parseRvtaCSV turns the uploaded file into samples. Malformed lines are
@@ -218,6 +219,10 @@ func parseRvtaLine(line string) (rvtaSample, bool) {
 }
 
 func handleRvta(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/v1/dump" {
+		handleRvtaDump(w, r)
+		return
+	}
 	if r.URL.Path != "/v1/upload" {
 		http.NotFound(w, r)
 		return
