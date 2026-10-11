@@ -7299,6 +7299,30 @@ func handleNinjaShop(w http.ResponseWriter, r *http.Request) {
 	case path == "/ninja/ws/my/shared_title_ids":
 		w.Write([]byte(`{"owned_titles":{"owned_title":[]}}`))
 
+	// First-run eShop setup (after the terms + POST my/language) links the console's
+	// device account (form: device_account=...). The 500 below aborted setup, so every
+	// launch started it over (2026-10-11). ReShop-3ds/Ninja answers {} (proven on hw).
+	case path == "/ninja/ws/my/account/ctr/!migrate_without_nna":
+		log.Printf("ninja shop: migrate_without_nna device_account=%s from %s", postForm.Get("device_account"), ip)
+		w.Write([]byte(`{}`))
+
+	// Settings > delete eShop account. mint (0xe781c) only sends device fields and
+	// reads nothing back, so any valid JSON is a success.
+	case path == "/ninja/ws/device/ctr/!unlink":
+		w.Write([]byte(`{}`))
+
+	// title_id -> ns_uid lookup (mint 0x10f0e8; keys title_id_pairs.title_id_pair[].
+	// title_id/ns_uid at 0x605fc). We sell no titles, so nothing ever maps.
+	case path == "/ninja/ws/titles/id_pair":
+		w.Write([]byte(`{"title_id_pairs":{"title_id_pair":[]}}`))
+
+	// Settings > account activity / rated titles. Not in mint's code.bin (the menu
+	// UI asks for them) and no capture exists: empty lists in the wishlist shape.
+	case path == "/ninja/ws/my/transactions":
+		w.Write([]byte(`{"transactions":{"transaction":[],"length":0,"offset":0,"total":0}}`))
+	case path == "/ninja/ws/my/votes":
+		w.Write([]byte(`{"votes":{"vote":[],"length":0,"offset":0,"total":0}}`))
+
 	// 2026-09-22: "/ninja/ws/my/tax_location" was unhandled (falling into the
 	// default 500/XML case below) on every single buy-plays attempt tonight,
 	// starting exactly when this testing began - the only ninja path with that

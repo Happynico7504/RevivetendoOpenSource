@@ -262,6 +262,26 @@ func handleSamurai(w http.ResponseWriter, r *http.Request) {
 			out = map[string]any{"movie": samuraiMovieJSON(v)}
 		}
 
+	// Search screen. Shapes from archived samurai.ctr.shop.nintendo.net XML (genres
+	// 2022, searchcategory 2023, publishers 2024), attributes as JSON fields like the
+	// rest of this file. One entry each: everything here is a video.
+	case "genres":
+		out = map[string]any{"genres": map[string]any{"genre": []any{map[string]any{"id": 94, "name": "Video"}}, "length": 1}}
+
+	case "publishers":
+		out = map[string]any{"publishers": map[string]any{"publisher": []any{map[string]any{"id": 1, "name": "Revivetendo"}}, "length": 1}}
+
+	case "searchcategory":
+		out = map[string]any{"search_categories": map[string]any{"search_category_group": []any{map[string]any{
+			"id":   3,
+			"name": "Revivetendo TV",
+			"search_category": []any{map[string]any{
+				"id":     6,
+				"name":   "All Videos",
+				"params": map[string]any{"param": []any{map[string]any{"key": "genre[]", "value": "94"}}},
+			}},
+		}}}}
+
 	case "movies", "contents":
 		contents := []any{}
 		for i := range cat.Videos {
