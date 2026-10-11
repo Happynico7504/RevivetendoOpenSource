@@ -567,6 +567,9 @@ func main() {
 	http.HandleFunc("/admin/relays/add", requireClientCert(adminRelaysAdd))
 	http.HandleFunc("/admin/relays/toggle", requireClientCert(adminRelaysToggle))
 	http.HandleFunc("/admin/relays/delete", requireClientCert(adminRelaysDelete))
+	http.HandleFunc("/admin/rvta/", requireClientCert(adminRvta))
+	http.HandleFunc("/admin/rvta/export.csv", requireClientCert(adminRvtaExport))
+	http.HandleFunc("/admin/rvta/dump", requireClientCert(adminRvtaDump))
 	http.HandleFunc("/admin/coins/", requireClientCert(adminCoins))
 	http.HandleFunc("/admin/coins/adjust", requireClientCert(adminCoinsAdjust))
 	http.HandleFunc("/admin/bans/", requireClientCert(adminBans))
@@ -2070,6 +2073,7 @@ input[type=text],select{border:1px solid #d1d5db;border-radius:4px;padding:.4rem
   <a href="/inkay/admin/spotpass-3ds-sysmsg/">📢 3DS SpotPass</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/badge-arcade/">🏅 Badge Arcade</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/videos/">📺 Revivetendo TV</a> &nbsp;|&nbsp;
+  <a href="/inkay/admin/rvta/">🔋 RvtA diagnostics</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/api-docs/">📖 API docs</a> &nbsp;|&nbsp;
   <a href="/wsc-public/">🎳 WSC</a>
 </p>
