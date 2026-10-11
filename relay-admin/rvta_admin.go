@@ -7,7 +7,6 @@ package main
 // only reads them. Staff search by friend code.
 
 import (
-	"encoding/binary"
 	"encoding/csv"
 	"fmt"
 	"html/template"
@@ -19,7 +18,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf16"
 )
 
 const rvtaAdminDumpDir = "/nico-pretendo-bridge/rvta-dumps"
@@ -43,23 +41,6 @@ func rvtaParseFriendCode(s string) (int64, bool) {
 	return fc, err == nil && fc >= 0 // 0 = rows written without a friend account
 }
 
-// rvtaMiiName reads the nickname of 3DS Mii data (UTF-16LE at 0x1A, up to 10 characters). On the 3DS the
-// principal id in a friend code is the Friends (NEX) account, not the PNID, so this is often the only name.
-func rvtaMiiName(mii []byte) string {
-	if len(mii) < 0x2E {
-		return ""
-	}
-	var u []uint16
-	for i := 0x1A; i < 0x2E; i += 2 {
-		c := binary.LittleEndian.Uint16(mii[i:])
-		if c == 0 {
-			break
-		}
-		u = append(u, c)
-	}
-	return string(utf16.Decode(u))
-}
-
 func rvtaFormatFriendCode(fc int64) string {
 	s := fmt.Sprintf("%012d", fc)
 	return s[0:4] + "-" + s[4:8] + "-" + s[8:12]
@@ -68,8 +49,6 @@ func rvtaFormatFriendCode(fc int64) string {
 type rvtaConsoleRow struct {
 	ConsoleID   string
 	FriendCode  int64
-	PNID        string
-	Mii         string
 	Version     string
 	FirstSeen   time.Time
 	LastSeen    time.Time
@@ -80,8 +59,6 @@ type rvtaConsoleRow struct {
 
 type rvtaFCRow struct {
 	FriendCode int64
-	PNID       string
-	Mii        string
 	Consoles   int
 	Rows       int
 	Dumps      int
@@ -130,16 +107,16 @@ func adminRvta(w http.ResponseWriter, r *http.Request) {
 		limit = 300
 	}
 	data := struct {
-		Q, Event, Error, PNID, Mii, FCFormatted string
-		FC                                      int64
-		Searched                                bool
-		Limit                                   int
-		Events                                  []string
-		FriendCodes                             []rvtaFCRow
-		Consoles                                []rvtaConsoleRow
-		Samples                                 []rvtaSampleRow
-		Dumps                                   []rvtaDumpRow
-		TotalConsoles, TotalSamples             int
+		Q, Event, Error, FCFormatted string
+		FC                           int64
+		Searched                     bool
+		Limit                        int
+		Events                       []string
+		FriendCodes                  []rvtaFCRow
+		Consoles                     []rvtaConsoleRow
+		Samples                      []rvtaSampleRow
+		Dumps                        []rvtaDumpRow
+		TotalConsoles, TotalSamples  int
 	}{Q: q, Event: event, Limit: limit, Events: rvtaAdminEvents}
 
 	db.QueryRow(`SELECT (SELECT COUNT(*) FROM rvta_consoles), (SELECT COUNT(*) FROM rvta_samples)`).
@@ -153,28 +130,20 @@ func adminRvta(w http.ResponseWriter, r *http.Request) {
 			data.FC = fc
 			data.Searched = true
 			data.FCFormatted = rvtaFormatFriendCode(fc)
-			// the low 32 bits of a friend code are the principal id
-			db.QueryRow(`SELECT COALESCE(pnid,'') FROM pnid_cache WHERE pid = $1`, fc&0xFFFFFFFF).Scan(&data.PNID)
-			var mii []byte
-			db.QueryRow(`SELECT mii_data FROM ds_devices WHERE pid = $1`, fc&0xFFFFFFFF).Scan(&mii)
-			data.Mii = rvtaMiiName(mii)
 		}
 	}
 
 	// Without a search: every friend code that has data, most recent first.
 	if !data.Searched {
-		if rows, err := db.Query(`SELECT s.friend_code, COALESCE(p.pnid,''), dd.mii_data, COUNT(DISTINCT s.console_id), COUNT(*),
+		if rows, err := db.Query(`SELECT s.friend_code, COUNT(DISTINCT s.console_id), COUNT(*),
 				(SELECT COUNT(*) FROM rvta_dumps d WHERE d.friend_code = s.friend_code), MIN(s.received_at), MAX(s.received_at)
-			FROM rvta_samples s LEFT JOIN pnid_cache p ON p.pid = (s.friend_code & 4294967295)
-			LEFT JOIN ds_devices dd ON dd.pid = (s.friend_code & 4294967295)
-			GROUP BY s.friend_code, p.pnid, dd.mii_data ORDER BY MAX(s.received_at) DESC LIMIT 1000`); err != nil {
+			FROM rvta_samples s
+			GROUP BY s.friend_code ORDER BY MAX(s.received_at) DESC LIMIT 1000`); err != nil {
 			log.Printf("rvta admin: friend codes: %v", err)
 		} else {
 			for rows.Next() {
 				var f rvtaFCRow
-				var mii []byte
-				if rows.Scan(&f.FriendCode, &f.PNID, &mii, &f.Consoles, &f.Rows, &f.Dumps, &f.FirstSeen, &f.LastSeen) == nil {
-					f.Mii = rvtaMiiName(mii)
+				if rows.Scan(&f.FriendCode, &f.Consoles, &f.Rows, &f.Dumps, &f.FirstSeen, &f.LastSeen) == nil {
 					data.FriendCodes = append(data.FriendCodes, f)
 				}
 			}
@@ -183,7 +152,7 @@ func adminRvta(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Consoles that uploaded under the searched friend code.
-	consoleQuery := `SELECT c.console_id, s.friend_code, COALESCE(p.pnid,''), dd.mii_data, c.version, c.first_seen, c.last_seen,
+	consoleQuery := `SELECT c.console_id, s.friend_code, c.version, c.first_seen, c.last_seen,
 			s.n, s.battery, s.temp
 		FROM rvta_consoles c
 		JOIN LATERAL (
@@ -191,8 +160,6 @@ func adminRvta(w http.ResponseWriter, r *http.Request) {
 			FROM rvta_samples x WHERE x.console_id = c.console_id AND x.friend_code = $1
 			ORDER BY x.seq DESC LIMIT 1
 		) s ON true
-		LEFT JOIN pnid_cache p ON p.pid = (s.friend_code & 4294967295)
-		LEFT JOIN ds_devices dd ON dd.pid = (s.friend_code & 4294967295)
 		ORDER BY c.last_seen DESC LIMIT 100`
 	if !data.Searched {
 		// no search: the friend code list above is the overview
@@ -201,10 +168,8 @@ func adminRvta(w http.ResponseWriter, r *http.Request) {
 	} else {
 		for rows.Next() {
 			var c rvtaConsoleRow
-			var mii []byte
-			if rows.Scan(&c.ConsoleID, &c.FriendCode, &c.PNID, &mii, &c.Version, &c.FirstSeen, &c.LastSeen, &c.Samples,
+			if rows.Scan(&c.ConsoleID, &c.FriendCode, &c.Version, &c.FirstSeen, &c.LastSeen, &c.Samples,
 				&c.LastBattery, &c.LastTemp) == nil {
-				c.Mii = rvtaMiiName(mii)
 				data.Consoles = append(data.Consoles, c)
 			}
 		}
@@ -374,34 +339,32 @@ consoles, <strong>{{.TotalSamples}}</strong> rows. "Console clock" is the consol
 </form>
 {{if .Error}}<div class="err">{{.Error}}</div>{{end}}
 
-{{if .Searched}}<h2>{{if .FC}}{{.FCFormatted}}{{else}}No friend account{{end}}{{if .PNID}} · {{.PNID}}{{end}}{{if .Mii}} · Mii “{{.Mii}}”{{end}}</h2>{{end}}
+{{if .Searched}}<h2>{{if .FC}}{{.FCFormatted}}{{else}}No friend account{{end}}</h2>{{end}}
 
 {{if not .Searched}}
 <h2>Friend codes with data ({{len .FriendCodes}})</h2>
 <table>
-<tr><th>Friend code</th><th>Player</th><th>Consoles</th><th>Rows</th><th>Dumps</th><th>First upload</th><th>Last upload</th></tr>
+<tr><th>Friend code</th><th>Consoles</th><th>Rows</th><th>Dumps</th><th>First upload</th><th>Last upload</th></tr>
 {{range .FriendCodes}}
 <tr>
   <td class="mono"><a href="/inkay/admin/rvta/?fc={{.FriendCode}}">{{if .FriendCode}}{{fc .FriendCode}}{{else}}no friend account{{end}}</a></td>
-  <td>{{if .PNID}}{{.PNID}}{{else if .Mii}}<span title="Mii name (3DS Friends account)">Mii “{{.Mii}}”</span>{{else}}<span class="dim">—</span>{{end}}</td>
   <td>{{.Consoles}}</td>
   <td>{{.Rows}}</td>
   <td>{{if .Dumps}}{{.Dumps}}{{else}}<span class="dim">0</span>{{end}}</td>
   <td>{{localTime .FirstSeen "datetime-sec"}}</td>
   <td>{{localTime .LastSeen "datetime-sec"}}</td>
 </tr>
-{{else}}<tr><td colspan="7" class="dim">No data yet</td></tr>
+{{else}}<tr><td colspan="6" class="dim">No data yet</td></tr>
 {{end}}
 </table>
 {{else}}
 <h2>Consoles with this friend code</h2>
 <table>
-<tr><th>Console</th><th>Friend code</th><th>Player</th><th>RvtA</th><th>First seen</th><th>Last upload</th><th>Rows</th><th>Last battery</th><th>Last temp</th></tr>
+<tr><th>Console</th><th>Friend code</th><th>RvtA</th><th>First seen</th><th>Last upload</th><th>Rows</th><th>Last battery</th><th>Last temp</th></tr>
 {{range .Consoles}}
 <tr>
   <td class="mono">{{short .ConsoleID}}</td>
   <td class="mono"><a href="/inkay/admin/rvta/?fc={{.FriendCode}}">{{fc .FriendCode}}</a></td>
-  <td>{{if .PNID}}{{.PNID}}{{else if .Mii}}<span title="Mii name (3DS Friends account)">Mii “{{.Mii}}”</span>{{else}}<span class="dim">—</span>{{end}}</td>
   <td>{{.Version}}</td>
   <td>{{localTime .FirstSeen "datetime-sec"}}</td>
   <td>{{localTime .LastSeen "datetime-sec"}}</td>
@@ -409,7 +372,7 @@ consoles, <strong>{{.TotalSamples}}</strong> rows. "Console clock" is the consol
   <td{{if lt .LastBattery 15}} class="warn"{{end}}>{{.LastBattery}} %</td>
   <td{{if ge .LastTemp 45}} class="bad"{{end}}>{{if eq .LastTemp -128}}<span class="dim">?</span>{{else}}{{.LastTemp}} °C{{end}}</td>
 </tr>
-{{else}}<tr><td colspan="9" class="dim">No consoles with this friend code</td></tr>
+{{else}}<tr><td colspan="8" class="dim">No consoles with this friend code</td></tr>
 {{end}}
 </table>
 
