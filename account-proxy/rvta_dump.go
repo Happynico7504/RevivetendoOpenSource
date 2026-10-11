@@ -158,10 +158,11 @@ func handleRvtaDump(w http.ResponseWriter, r *http.Request) {
 	have += int64(len(body))
 
 	if db != nil {
-		db.Exec(`INSERT INTO rvta_dumps (console_id, name, kind, friend_code, total, received) VALUES ($1,$2,$3,$4,$5,$6)
-		ON CONFLICT (console_id, name) DO UPDATE SET received = EXCLUDED.received,
-		completed_at = CASE WHEN EXCLUDED.received >= rvta_dumps.total THEN NOW() ELSE NULL END`,
-			id, kind+"-"+name, kind, fc, total, have)
+		// completed_at is set on the first insert too: a small dump arrives in a single chunk
+		db.Exec(`INSERT INTO rvta_dumps (console_id, name, kind, friend_code, total, received, completed_at)
+		VALUES ($1,$2,$3,$4,$5,$6, CASE WHEN $7 THEN NOW() END)
+		ON CONFLICT (console_id, name) DO UPDATE SET received = EXCLUDED.received, completed_at = EXCLUDED.completed_at`,
+			id, kind+"-"+name, kind, fc, total, have, have == total)
 	}
 	if have == total {
 		log.Printf("[rvta] %s fc=%d %s dump complete: %s (%d bytes)", id[:8], fc, kind, name, total)
