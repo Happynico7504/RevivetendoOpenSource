@@ -235,9 +235,19 @@ func handleNinjaApps(w http.ResponseWriter, r *http.Request, path string, postFo
 		if ci, err := loadAppCIA(a); err == nil {
 			size = ci.contentSize()
 		}
+		// Fields as the eShop (tiger, FUN_00331ec0) reads them: purchasing_content
+		// must hold exactly one entry whose payment_amount has total_amount.raw_value
+		// and price.regular_price with a NUMERIC id and a raw_value - without them
+		// the Download button failed with the generic 007-2001 (72001).
+		// tax_amount and current_balance are optional.
+		bal := ninjaCoinDaily
+		if pid := fetchRealPID(r); pid != 0 {
+			bal = walletBalance(pid)
+		}
+		price := ninjaPriceJSON(a.Price)
 		log.Printf("eshop apps: prepurchase_info %d (%s) from %s", id, a.Name, ip)
-		fmt.Fprintf(w, `{"prepurchase_info":{"tax_excluded":false,"total_amount":%s,"purchasing_content":[{"eshop_sales_status":"onsale","content_size":%d,"payment_amount":{"total_amount":%s,"price":{"regular_price":{"id":"%d"}}}}]}}`,
-			ninjaPriceJSON(a.Price), size, ninjaPriceJSON(a.Price), a.NSUID)
+		fmt.Fprintf(w, `{"prepurchase_info":{"tax_excluded":false,"current_balance":%s,"total_amount":%s,"purchasing_content":[{"eshop_sales_status":"onsale","content_size":%d,"payment_amount":{"total_amount":%s,"tax_amount":%s,"price":{"regular_price":{"id":%d,"amount":"%d,00 %s","currency":"ECOIN","raw_value":"%d"}}}}]}}`,
+			ninjaBalanceJSON(bal), price, size, price, ninjaPriceJSON(0), a.NSUID, a.Price, ninjaCoinName, a.Price)
 		return true
 
 	case r.Method == http.MethodPost && ninjaAppPurchaseRe.MatchString(path):
@@ -265,7 +275,7 @@ func handleNinjaApps(w http.ResponseWriter, r *http.Request, path string, postFo
 		ticket := time.Now().UnixNano() / 1000
 		ninjaTicketTitle.Store(ticket, a.TitleID)
 		log.Printf("eshop apps: !purchase %d (%s) from %s form=%v -> ticket %d", id, a.Name, ip, postForm, ticket)
-		fmt.Fprintf(w, `{"transaction_result":{"ticket_id":%d,"post_balance":%s}}`, ticket, ninjaBalanceJSON(bal))
+		fmt.Fprintf(w, `{"transaction_result":{"transaction_id":"%d","ticket_id":%d,"post_balance":%s}}`, ticket, ticket, ninjaBalanceJSON(bal))
 		return true
 	}
 	return false
