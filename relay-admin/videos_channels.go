@@ -12,7 +12,9 @@ package main
 // channel is live they can pick it for their uploads; staff still approve
 // every video.
 //
-// Uploaded images are scaled and cropped to the console sizes with ffmpeg.
+// Uploaded images are scaled and cropped to the console sizes with ffmpeg and
+// always written as 4:2:0: ffmpeg otherwise keeps the source's chroma layout,
+// and the 3DS shows nothing for e.g. a 4:4:0 jpg (sampling 1x2, 2026-10-12).
 // Images in media/i get a new file name on every change, so consoles never
 // show a cached old one.
 //
@@ -122,7 +124,7 @@ func videoChannelImage(r *http.Request, kind, dst string) (ok bool, err error) {
 	defer cancel()
 	vf := fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,setsar=1", size[0], size[1], size[0], size[1])
 	out, err := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", tmp.Name(),
-		"-frames:v", "1", "-vf", vf, "-q:v", "3", "-f", "image2", dst).CombinedOutput()
+		"-frames:v", "1", "-vf", vf, "-pix_fmt", "yuvj420p", "-q:v", "3", "-f", "image2", dst).CombinedOutput()
 	if err != nil {
 		log.Printf("videos: channel %s: ffmpeg: %v: %s", kind, err, strings.TrimSpace(string(out)))
 		os.Remove(dst)
