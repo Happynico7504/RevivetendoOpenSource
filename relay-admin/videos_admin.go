@@ -31,11 +31,20 @@ func registerVideosAdmin() {
 	http.HandleFunc("/admin/videos/", requireClientCert(adminVideos))
 	http.HandleFunc("/admin/videos/review", requireClientCert(adminVideosReview))
 	http.HandleFunc("/admin/videos/media/", requireClientCert(adminVideosMedia))
+	http.HandleFunc("/admin/videos/channel", requireClientCert(adminVideosChannel))
+	http.HandleFunc("/admin/videos/chimg/", requireClientCert(adminVideosChannelImage))
 }
 
 type videoChannel struct {
-	ID   int64
-	Name string
+	ID          int64
+	Name        string
+	Description string
+	Icon        string
+	Banner      string
+	New         bool
+	Videos      int
+	OwnerPID    int64
+	Owner       string
 }
 
 var videoCatalogMu sync.Mutex
@@ -82,8 +91,15 @@ func videoChannels() []videoChannel {
 	chans, _ := cat["channels"].([]any)
 	for _, c := range chans {
 		m, _ := c.(map[string]any)
-		name, _ := m["name"].(string)
-		out = append(out, videoChannel{ID: jsonInt(m["id"]), Name: name})
+		ch := videoChannel{ID: jsonInt(m["id"])}
+		ch.Name, _ = m["name"].(string)
+		ch.Description, _ = m["description"].(string)
+		ch.Icon, _ = m["icon"].(string)
+		ch.Banner, _ = m["banner"].(string)
+		ch.New, _ = m["new"].(bool)
+		list, _ := m["videos"].([]any)
+		ch.Videos = len(list)
+		out = append(out, ch)
 	}
 	return out
 }
@@ -178,6 +194,12 @@ func videoSyncCatalog() error {
 		m["videos"] = ids
 	}
 
+	return videoWriteCatalog(cat)
+}
+
+// videoWriteCatalog replaces catalog.json atomically. Callers hold
+// videoCatalogMu.
+func videoWriteCatalog(cat map[string]any) error {
 	out, err := json.MarshalIndent(cat, "", "  ")
 	if err != nil {
 		return err
@@ -244,6 +266,10 @@ func adminVideos(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	status := r.URL.Query().Get("status")
+	if status == "channels" {
+		adminVideosChannels(w, r)
+		return
+	}
 	valid := false
 	for _, s := range adminVideoStatuses {
 		valid = valid || s == status
@@ -262,6 +288,9 @@ func adminVideos(w http.ResponseWriter, r *http.Request) {
 		}
 		rows.Close()
 	}
+	var chSubs int
+	db.QueryRow(`SELECT COUNT(*) FROM eshop_channels WHERE status = 'submitted'`).Scan(&chSubs)
+	counts["channels"] = chSubs
 	order := "submitted_at ASC NULLS LAST" // oldest submission first
 	if status != "submitted" {
 		order = "updated_at DESC"
@@ -295,7 +324,56 @@ func adminVideos(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html")
 	if err := adminVideosTmpl.Execute(w, map[string]any{
 		"Status": status, "Statuses": adminVideoStatuses, "Counts": counts, "Items": items,
-		"Channels": videoChannels(), "Msg": r.URL.Query().Get("msg"),
+		"Channels": adminVideoChannels(), "Msg": r.URL.Query().Get("msg"),
+	}); err != nil {
+		log.Printf("admin videos: %v", err)
+	}
+}
+
+// adminVideoChannels is videoChannels with the owners of player channels.
+func adminVideoChannels() []videoChannel {
+	chans := videoChannels()
+	owners := videoChannelOwners()
+	for i := range chans {
+		if pid, ok := owners[chans[i].ID]; ok {
+			chans[i].OwnerPID = pid
+			chans[i].Owner, _ = pnidForPID(pid)
+		}
+	}
+	return chans
+}
+
+// adminVideosChannels is the channels tab: every catalog channel to edit,
+// players' channel submissions to review, and a form for a new channel.
+func adminVideosChannels(w http.ResponseWriter, r *http.Request) {
+	counts := map[string]int{}
+	if rows, err := db.Query(`SELECT status, COUNT(*) FROM eshop_videos GROUP BY status`); err == nil {
+		for rows.Next() {
+			var s string
+			var n int
+			if rows.Scan(&s, &n) == nil {
+				counts[s] = n
+			}
+		}
+		rows.Close()
+	}
+	subs := adminChannelSubmissions()
+	counts["channels"] = len(subs)
+	chans := adminVideoChannels()
+	var ownerSubs = map[int64]int64{} // catalog id -> submission id, for take-down
+	if rows, err := db.Query(`SELECT catalog_id, id FROM eshop_channels WHERE status = 'live' AND catalog_id IS NOT NULL`); err == nil {
+		for rows.Next() {
+			var cid, id int64
+			if rows.Scan(&cid, &id) == nil {
+				ownerSubs[cid] = id
+			}
+		}
+		rows.Close()
+	}
+	w.Header().Set("Content-Type", "text/html")
+	if err := adminVideosTmpl.Execute(w, map[string]any{
+		"Status": "channels", "Statuses": adminVideoStatuses, "Counts": counts,
+		"Channels": chans, "Submissions": subs, "OwnerSubs": ownerSubs, "Msg": r.URL.Query().Get("msg"),
 	}); err != nil {
 		log.Printf("admin videos: %v", err)
 	}
@@ -426,6 +504,15 @@ button{font:inherit;cursor:pointer;border:none;border-radius:4px;padding:.35rem 
 .note{font-size:.85rem;background:#fff7ed;border:1px solid #fed7aa;border-radius:6px;padding:.4rem .7rem;margin-bottom:.5rem;white-space:pre-wrap}
 .empty{color:#666}
 .comments{margin:.6rem 0;font-size:.85rem}.comments summary{cursor:pointer;color:#2563eb}
+h2.sec{font-size:1.15rem;margin:2rem 0 .5rem}
+.chan{display:block;border:1px solid #e4e4e7;border-radius:10px;padding:1rem;margin-bottom:1rem}
+.chan .imgs{margin:0 0 .5rem}
+.chan .fields{display:grid;gap:.5rem;margin:.5rem 0}
+.chan .fields label{display:flex;flex-direction:column;gap:.2rem;font-size:.8rem;color:#555}
+.chan .fields label.check{flex-direction:row;align-items:center;gap:.4rem}
+.chan input[type=text]{font:inherit;font-size:.9rem;border:1px solid #d1d5db;border-radius:4px;padding:.3rem .5rem}
+.chan .fields textarea{width:auto}
+.takedown{margin:-.5rem 0 1rem}
 .cmt{border-top:1px solid #f1f1f4;padding:.4rem 0;white-space:pre-wrap;word-break:break-word}.cmt .who{color:#666;font-size:.75rem}.cmt form{margin:.2rem 0 0}
 </style>
 </head>
@@ -434,8 +521,60 @@ button{font:inherit;cursor:pointer;border:none;border-radius:4px;padding:.35rem 
 <h1>Revivetendo TV videos</h1>
 <p class="meta">Players upload these on <a href="/inkay/my/videos" target="_blank">My Videos</a>. Approving puts a video live in the chosen channel right away, in the 3DS and Wii U eShops; rejecting a live video takes it down. The preview is the Wii U version; the 3DS gets the same picture at 400×240.</p>
 {{if .Msg}}<div class="msg">{{.Msg}}</div>{{end}}
-<div class="tabs">{{$st := .Status}}{{$c := .Counts}}{{range .Statuses}}<a href="?status={{.}}" class="{{if eq . $st}}on{{end}}">{{.}} ({{count $c .}})</a>{{end}}</div>
+<div class="tabs">{{$st := .Status}}{{$c := .Counts}}{{range .Statuses}}<a href="?status={{.}}" class="{{if eq . $st}}on{{end}}">{{.}} ({{count $c .}})</a>{{end}}<a href="?status=channels" class="{{if eq $st "channels"}}on{{end}}">channels ({{count $c "channels"}} to review)</a></div>
 {{$chans := .Channels}}
+{{if eq .Status "channels"}}
+<h2 class="sec">Channel submissions</h2>
+<p class="meta">Players submit these on My Videos. Approving adds the channel to the 3DS and Wii U eShops right away, and its owner can then pick it for their uploads (staff still review every video).</p>
+{{range .Submissions}}
+<div class="chan">
+  <div class="imgs">
+    <figure><img src="/inkay/admin/videos/chsub/{{.ID}}/icon.jpg" width="102" height="76" alt=""><figcaption>icon</figcaption></figure>
+    <figure><img src="/inkay/admin/videos/chsub/{{.ID}}/banner.jpg" width="400" height="168" alt=""><figcaption>banner</figcaption></figure>
+  </div>
+  <h2>{{.Name}}</h2>
+  <div class="meta">by <strong>{{if .PNID}}{{.PNID}}{{else}}?{{end}}</strong> (PID {{.PID}}) · submitted {{.CreatedAt.Format "2006-01-02 15:04"}}</div>
+  {{if .Description}}<div class="desc">{{.Description}}</div>{{end}}
+  <form method="post" action="/inkay/admin/videos/channel-review"><input type="hidden" name="id" value="{{.ID}}"><input type="hidden" name="action" value="approve"><button class="ok">Approve &amp; publish</button></form>
+  <form method="post" action="/inkay/admin/videos/channel-review"><input type="hidden" name="id" value="{{.ID}}"><input type="hidden" name="action" value="reject"><textarea name="note" placeholder="Reason, shown to the player" required></textarea><button class="no">Reject</button></form>
+</div>
+{{else}}<p class="empty">No channel submissions waiting.</p>{{end}}
+
+<h2 class="sec">Channels</h2>
+<p class="meta">In the order the eShops list them. Uploaded images are scaled and cropped to 102×76 (icon) and 400×168 (banner); leave a file field empty to keep the current image.</p>
+{{$os := .OwnerSubs}}
+{{range .Channels}}
+<form class="chan" method="post" action="/inkay/admin/videos/channel" enctype="multipart/form-data">
+  <input type="hidden" name="id" value="{{.ID}}">
+  <div class="imgs">
+    <figure>{{if .Icon}}<img src="/inkay/admin/videos/chimg/{{.Icon}}" width="102" height="76" alt="">{{end}}<figcaption>icon</figcaption></figure>
+    <figure>{{if .Banner}}<img src="/inkay/admin/videos/chimg/{{.Banner}}" width="400" height="168" alt="">{{end}}<figcaption>banner</figcaption></figure>
+  </div>
+  <div class="meta">Channel {{.ID}} · {{.Videos}} videos{{if .OwnerPID}} · player channel of <strong>{{if .Owner}}{{.Owner}}{{else}}?{{end}}</strong> (PID {{.OwnerPID}}){{end}}</div>
+  <div class="fields">
+    <label>Name <input type="text" name="name" value="{{.Name}}" maxlength="60" required></label>
+    <label>Description <textarea name="description" maxlength="500">{{.Description}}</textarea></label>
+    <label>New icon <input type="file" name="icon" accept="image/*"></label>
+    <label>New banner <input type="file" name="banner" accept="image/*"></label>
+    <label class="check"><input type="checkbox" name="new" value="1"{{if .New}} checked{{end}}> Show the "new" badge</label>
+  </div>
+  <button class="ok">Save</button>
+</form>
+{{with index $os .ID}}<form class="takedown" method="post" action="/inkay/admin/videos/channel-review"><input type="hidden" name="id" value="{{.}}"><input type="hidden" name="action" value="reject"><textarea name="note" placeholder="Reason, shown to the player" required></textarea><button class="no">Take down this player channel</button></form>{{end}}
+{{end}}
+
+<h2 class="sec">Add a channel</h2>
+<form class="chan" method="post" action="/inkay/admin/videos/channel" enctype="multipart/form-data">
+  <div class="fields">
+    <label>Name <input type="text" name="name" maxlength="60" required></label>
+    <label>Description <textarea name="description" maxlength="500"></textarea></label>
+    <label>Icon (102×76) <input type="file" name="icon" accept="image/*" required></label>
+    <label>Banner (400×168) <input type="file" name="banner" accept="image/*" required></label>
+    <label class="check"><input type="checkbox" name="new" value="1" checked> Show the "new" badge</label>
+  </div>
+  <button class="ok">Add channel</button>
+</form>
+{{else}}
 {{range .Items}}
 <div class="item">
   <div>
@@ -456,7 +595,7 @@ button{font:inherit;cursor:pointer;border:none;border-radius:4px;padding:.35rem 
     {{if .ReviewNote}}<div class="note">Note: {{.ReviewNote}}</div>{{end}}
     {{if or (eq .Status "submitted") (eq .Status "rejected")}}
     <form method="post" action="/inkay/admin/videos/review"><input type="hidden" name="id" value="{{.ID}}"><input type="hidden" name="from" value="{{.Status}}"><input type="hidden" name="action" value="approve">
-      <select name="channel">{{range $chans}}<option value="{{.ID}}">{{.Name}}</option>{{end}}</select>
+      {{$want := .Channel}}<select name="channel">{{range $chans}}<option value="{{.ID}}"{{if eq .ID $want}} selected{{end}}>{{.Name}}{{if .Owner}} (by {{.Owner}}){{end}}</option>{{end}}</select>
       <button class="ok">Approve &amp; publish</button></form>
     {{end}}
     {{if or (eq .Status "submitted") (eq .Status "live")}}
@@ -475,5 +614,6 @@ button{font:inherit;cursor:pointer;border:none;border-radius:4px;padding:.35rem 
   </div>
 </div>
 {{else}}<p class="empty">Nothing here.</p>{{end}}
+{{end}}
 </body>
 </html>`))

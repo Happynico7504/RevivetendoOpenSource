@@ -137,6 +137,7 @@ func registerVideos() {
 	http.HandleFunc("/my/videos/api/list", myVideosList)
 	http.HandleFunc("/my/videos/media/", myVideosMedia)
 	registerVideosAdmin()
+	registerVideoChannels()
 	go videoWorker()
 	go videoJanitor()
 }
@@ -225,7 +226,7 @@ func myVideosList(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	videoJSON(w, http.StatusOK, map[string]any{"videos": videoListFor(pid)})
+	videoJSON(w, http.StatusOK, map[string]any{"videos": videoListFor(pid), "channels": videoChannelListFor(pid)})
 }
 
 func myVideosStart(w http.ResponseWriter, r *http.Request) {
@@ -239,6 +240,7 @@ func myVideosStart(w http.ResponseWriter, r *http.Request) {
 		Size        int64  `json:"size"`
 		Rights      bool   `json:"rights"`
 		Stereo      string `json:"stereo"`
+		Channel     int64  `json:"channel"` // catalog id of one of the player's own live channels, 0 = staff choose
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&req); err != nil {
 		videoError(w, http.StatusBadRequest, "vid.err_generic", "invalid request")
@@ -259,6 +261,8 @@ func myVideosStart(w http.ResponseWriter, r *http.Request) {
 		videoError(w, http.StatusBadRequest, "vid.err_generic", "unknown 3D layout")
 	case req.Size <= 0 || req.Size > videoMaxUpload:
 		videoError(w, http.StatusBadRequest, "vid.err_size", "Videos can be at most 300 MB.")
+	case req.Channel != 0 && !videoOwnsLiveChannel(pid, req.Channel):
+		videoError(w, http.StatusBadRequest, "vid.err_generic", "unknown channel")
 	default:
 		var pending int
 		db.QueryRow(`SELECT COUNT(*) FROM eshop_videos WHERE pid = $1 AND status IN ('uploading', 'processing', 'submitted')`, pid).Scan(&pending)
@@ -271,8 +275,8 @@ func myVideosStart(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var id int64
-		if err := db.QueryRow(`INSERT INTO eshop_videos (pid, title, description, upload_size, stereo) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-			pid, req.Title, req.Description, req.Size, req.Stereo).Scan(&id); err != nil {
+		if err := db.QueryRow(`INSERT INTO eshop_videos (pid, title, description, upload_size, stereo, channel_id) VALUES ($1, $2, $3, $4, $5, NULLIF($6::bigint, 0)) RETURNING id`,
+			pid, req.Title, req.Description, req.Size, req.Stereo, req.Channel).Scan(&id); err != nil {
 			log.Printf("videos: start: %v", err)
 			videoError(w, http.StatusInternalServerError, "vid.err_generic", "Something went wrong, please try again.")
 			return

@@ -53,6 +53,10 @@ button.submit:disabled{opacity:.6;cursor:default}
 .msg.err{color:#991b1b}.msg.ok{color:#166534}
 .vid{display:grid;grid-template-columns:120px 1fr;gap:1rem;border:1px solid #e4e4e7;border-radius:10px;padding:.75rem;margin-bottom:.75rem}
 .vid img{width:120px;height:88px;border-radius:6px;background:#f1f5f9;object-fit:cover}
+.chan{border:1px solid #e4e4e7;border-radius:10px;padding:.75rem;margin-bottom:.75rem}
+.chan .pics{display:flex;gap:.75rem;align-items:flex-end;flex-wrap:wrap;margin-bottom:.5rem}
+.chan .pics img{border-radius:4px;background:#f1f5f9;max-width:100%;height:auto}
+.chan h3{font-size:1rem;margin:0 0 .25rem;word-break:break-word}
 .vid .ph{width:120px;height:88px;border-radius:6px;background:#f1f5f9}
 .vid h3{font-size:1rem;margin:0 0 .25rem;word-break:break-word}
 .st{display:inline-block;font-size:.75rem;border-radius:999px;padding:.1rem .6rem;margin-bottom:.35rem}
@@ -100,6 +104,10 @@ button.submit:disabled{opacity:.6;cursor:default}
   </select>
   <p class="hint" data-i18n="vid.3d_hint">3D videos play in 3D on the 3DS. The Wii U shows the left eye.</p>
   <p class="hint" data-i18n="vid.3d_mv">Spatial videos from an iPhone or VR headset (MV-HEVC) are detected automatically — just upload them.</p>
+  <div id="chanpick" style="display:none">
+  <label for="channel" data-i18n="vid.f_channel">Channel</label>
+  <select id="channel"><option value="0" data-i18n="vid.channel_staff">Revivetendo TV (staff choose the channel)</option></select>
+  </div>
   <label class="check"><input id="rights" type="checkbox" required> <span data-i18n="vid.f_rights">I made this video or have the right to share it, and it follows the rules above.</span></label>
   <button class="submit" id="go" type="submit" data-i18n="vid.f_upload">Upload</button>
   <div class="bar" id="bar"><div></div></div>
@@ -108,6 +116,25 @@ button.submit:disabled{opacity:.6;cursor:default}
 
 <h2 data-i18n="vid.yours">Your videos</h2>
 <div id="list"><p class="empty" data-i18n="vid.loading">Loading…</p></div>
+
+<h2 data-i18n="vid.ch_h2">Your channels</h2>
+<p class="intro" data-i18n="vid.ch_intro">Want your own channel in the eShop? Submit a name, an icon and a banner. Once staff approve it, you can pick it for your uploads.</p>
+<div id="chlist"></div>
+<form id="chform">
+  <label for="chname" data-i18n="vid.ch_f_name">Channel name</label>
+  <input id="chname" type="text" maxlength="60" required>
+  <label for="chdesc" data-i18n="vid.f_desc">Description (optional)</label>
+  <textarea id="chdesc" maxlength="500"></textarea>
+  <label for="chicon" data-i18n="vid.ch_f_icon">Icon</label>
+  <input id="chicon" type="file" accept="image/jpeg,image/png,image/webp" required>
+  <p class="hint" data-i18n="vid.ch_icon_hint">Shown at 102×76 — it's cropped to fit.</p>
+  <label for="chbanner" data-i18n="vid.ch_f_banner">Banner</label>
+  <input id="chbanner" type="file" accept="image/jpeg,image/png,image/webp" required>
+  <p class="hint" data-i18n="vid.ch_banner_hint">Shown at 400×168 — it's cropped to fit.</p>
+  <label class="check"><input id="chrights" type="checkbox" required> <span data-i18n="vid.ch_f_rights">I made these images or have the right to use them, and they follow the rules above.</span></label>
+  <button class="submit" id="chgo" type="submit" data-i18n="vid.ch_f_submit">Submit channel for review</button>
+  <div class="msg" id="chmsg"></div>
+</form>
 
 <script>
 (function () {
@@ -118,6 +145,11 @@ button.submit:disabled{opacity:.6;cursor:default}
     failed: ['vid.st_failed', 'Conversion failed'],
     submitted: ['vid.st_submitted', 'Waiting for review'],
     live: ['vid.st_live', 'Live on Revivetendo TV'],
+    rejected: ['vid.st_rejected', 'Rejected']
+  };
+  var CHSTATUS = {
+    submitted: ['vid.st_submitted', 'Waiting for review'],
+    live: ['vid.ch_st_live', 'Live in the eShop'],
     rejected: ['vid.st_rejected', 'Rejected']
   };
   function t(k, f) { return window.I18N ? I18N.t(k, f) : f; }
@@ -173,10 +205,66 @@ button.submit:disabled{opacity:.6;cursor:default}
         box.appendChild(info);
         list.appendChild(box);
       });
+      showChannels(j.channels || []);
       clearTimeout(pollTimer);
       if (busy) pollTimer = setTimeout(load, 5000);
     });
   }
+
+  function showChannels(chans) {
+    var list = $('chlist'), pick = $('channel'), keep = pick.value;
+    list.innerHTML = '';
+    while (pick.options.length > 1) pick.remove(1);
+    chans.forEach(function (c) {
+      if (c.status === 'live') { var o = el('option', '', c.name); o.value = c.catalogId; pick.appendChild(o); }
+      var box = el('div', 'chan'), pics = el('div', 'pics');
+      ['icon', 'banner'].forEach(function (k) {
+        var img = el('img'); img.src = '/inkay/my/videos/channel-media/' + c.id + '/' + k + '.jpg'; img.alt = '';
+        img.width = k === 'icon' ? 102 : 400; img.height = k === 'icon' ? 76 : 168; pics.appendChild(img);
+      });
+      box.appendChild(pics);
+      box.appendChild(el('h3', '', c.name));
+      var st = CHSTATUS[c.status] || [c.status, c.status];
+      box.appendChild(el('span', 'st st-' + c.status, t(st[0], st[1])));
+      box.appendChild(el('div', 'meta', c.created));
+      if (c.description) box.appendChild(el('div', 'meta', c.description));
+      if (c.reviewNote) box.appendChild(el('div', 'note', c.reviewNote));
+      var acts = el('div', 'acts');
+      var del = el('button', 'del', t('vid.delete', 'Delete'));
+      del.onclick = function () {
+        if (!confirm(t('vid.ch_confirm_delete', 'Delete this channel? Your videos in it move to the main channel.'))) return;
+        api('POST', 'channel-delete', { id: c.id }).then(function (r) { if (r.ok) load(); else alert(apiErr(r)); });
+      };
+      acts.appendChild(del);
+      box.appendChild(acts);
+      list.appendChild(box);
+    });
+    pick.value = keep;
+    if (pick.selectedIndex < 0) pick.value = '0';
+    $('chanpick').style.display = pick.options.length > 1 ? '' : 'none';
+  }
+
+  $('chform').onsubmit = function (ev) {
+    ev.preventDefault();
+    var m = $('chmsg'), fd = new FormData();
+    fd.append('name', $('chname').value);
+    fd.append('description', $('chdesc').value);
+    fd.append('icon', $('chicon').files[0]);
+    fd.append('banner', $('chbanner').files[0]);
+    if ($('chrights').checked) fd.append('rights', '1');
+    $('chgo').disabled = true;
+    m.className = 'msg'; m.textContent = t('vid.ch_sending', 'Sending…');
+    fetch('/inkay/my/videos/api/channel', { method: 'POST', credentials: 'same-origin', headers: { 'X-Requested-With': 'revivetendo' }, body: fd })
+      .then(function (r) { return r.json().catch(function () { return { error: r.status === 413 ? t('vid.ch_err_image_size', 'Images can be at most 4 MB each.') : '' }; }); })
+      .then(function (j) {
+        if (!j.id) throw j;
+        m.className = 'msg ok'; m.textContent = t('vid.ch_sent', 'Submitted! Staff will review your channel.');
+        $('chform').reset();
+        load();
+      }, function () { throw { error: t('vid.err_network', 'Connection lost.') }; })
+      .catch(function (j) { m.className = 'msg err'; m.textContent = apiErr(j || {}); })
+      .then(function () { $('chgo').disabled = false; });
+  };
 
   function setProgress(done, total) {
     $('bar').style.display = 'block';
@@ -207,7 +295,7 @@ button.submit:disabled{opacity:.6;cursor:default}
     if (file.size > MAX) { msg(t('vid.err_size', 'Videos can be at most 300 MB.'), 'err'); return; }
     $('go').disabled = true;
     msg(t('vid.uploading', 'Uploading… keep this page open.'));
-    api('POST', 'start', { title: $('title').value, description: $('desc').value, size: file.size, rights: $('rights').checked, stereo: $('stereo').value }).then(function (j) {
+    api('POST', 'start', { title: $('title').value, description: $('desc').value, size: file.size, rights: $('rights').checked, stereo: $('stereo').value, channel: +$('channel').value }).then(function (j) {
       if (!j.id) throw j;
       load();
       return sendFrom(j.id, file, 0, 0);
