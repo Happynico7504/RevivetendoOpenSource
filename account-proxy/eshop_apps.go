@@ -49,6 +49,9 @@ type samuraiApp struct {
 	CIA         string `json:"cia"`    // file in eshop-video/apps/
 	New         bool   `json:"new"`
 	OwnerPID    uint32 `json:"owner_pid"` // seller: paid purchases are credited to this wallet; 0 = Revivetendo
+	// Earlier versions' CIAs (files in eshop-video/apps/), kept so the eShop
+	// can still fetch an installed older version's TMD after an update.
+	OldCIAs []string `json:"old_cias"`
 }
 
 // --- owned tickets ---
@@ -391,12 +394,13 @@ func (c *appCIA) contentSize() int64 {
 
 var appCIACache sync.Map // file path -> *appCIA
 
-func appCIAPath(a *samuraiApp) string {
-	return filepath.Join(samuraiDir, "apps", filepath.Base(a.CIA))
+func loadAppCIA(a *samuraiApp) (*appCIA, error) {
+	return loadAppCIAFile(a.CIA)
 }
 
-func loadAppCIA(a *samuraiApp) (*appCIA, error) {
-	p := appCIAPath(a)
+// loadAppCIAFile loads a CIA from eshop-video/apps/, cached until it changes.
+func loadAppCIAFile(name string) (*appCIA, error) {
+	p := filepath.Join(samuraiDir, "apps", filepath.Base(name))
 	st, err := os.Stat(p)
 	if err != nil {
 		return nil, err
@@ -482,7 +486,26 @@ func serveCCS(w http.ResponseWriter, r *http.Request) {
 	}
 	var data []byte
 	if strings.HasPrefix(m[2], "tmd") {
+		// Updates: "cia" is the newest version, "old_cias" the earlier ones.
+		// "tmd" is the newest TMD; "tmd.<v>" answers with exactly that
+		// version, like Nintendo's CDN (the eShop fetches the installed
+		// version's TMD whenever a title page is opened).
 		data = ci.tmd
+		if v, ok := strings.CutPrefix(m[2], "tmd."); ok && v != strconv.Itoa(int(ci.version)) {
+			data = nil
+			for _, old := range a.OldCIAs {
+				oc, err := loadAppCIAFile(old)
+				if err == nil && strconv.Itoa(int(oc.version)) == v {
+					data, ci = oc.tmd, oc
+					break
+				}
+			}
+			if data == nil {
+				log.Printf("eshop apps: CCS %s from %s -> 404 (no v%s; newest is v%d)", r.URL.Path, ip, v, ci.version)
+				http.NotFound(w, r)
+				return
+			}
+		}
 	} else {
 		id, _ := strconv.ParseUint(m[2], 16, 32)
 		data = ci.contents[uint32(id)]
