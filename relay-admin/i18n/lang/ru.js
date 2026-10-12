@@ -301,6 +301,7 @@ I18N.register("ru", {
  "wsc.connected": "подключено: {n}",
  "wsc.connected_for": "В сети",
  "wsc.connection": "Соединение",
+ "wsc.tunnel_quota": "Лимит туннеля",
  "wsc.down": "Сервер недоступен",
  "wsc.full": "заполнена",
  "wsc.gathering1": ", 1 сессия",

@@ -301,6 +301,7 @@ I18N.register("ko", {
  "wsc.connected": "{n}명 접속 중",
  "wsc.connected_for": "접속 시간",
  "wsc.connection": "연결",
+ "wsc.tunnel_quota": "터널 한도",
  "wsc.down": "서버에 연결할 수 없음",
  "wsc.full": "가득 참",
  "wsc.gathering1": ", 세션 1개",

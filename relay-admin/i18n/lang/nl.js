@@ -301,6 +301,7 @@ I18N.register("nl", {
  "wsc.connected": "{n} verbonden",
  "wsc.connected_for": "Verbonden",
  "wsc.connection": "Verbinding",
+ "wsc.tunnel_quota": "Tunnelquotum",
  "wsc.down": "Server onbereikbaar",
  "wsc.full": "vol",
  "wsc.gathering1": ", 1 sessie",

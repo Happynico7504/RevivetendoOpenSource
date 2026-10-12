@@ -301,6 +301,7 @@ I18N.register("ja", {
  "wsc.connected": "{n}人接続中",
  "wsc.connected_for": "接続時間",
  "wsc.connection": "接続",
+ "wsc.tunnel_quota": "トンネル残り",
  "wsc.down": "サーバーに接続できません",
  "wsc.full": "満員",
  "wsc.gathering1": "、1セッション",

@@ -301,6 +301,7 @@ I18N.register("ar", {
  "wsc.connected": "{n} متصل",
  "wsc.connected_for": "مدة الاتصال",
  "wsc.connection": "الاتصال",
+ "wsc.tunnel_quota": "حصة النفق",
  "wsc.down": "تعذّر الوصول إلى الخادم",
  "wsc.full": "ممتلئة",
  "wsc.gathering1": "، جلسة واحدة",

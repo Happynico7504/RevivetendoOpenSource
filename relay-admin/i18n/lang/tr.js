@@ -301,6 +301,7 @@ I18N.register("tr", {
  "wsc.connected": "{n} bağlı",
  "wsc.connected_for": "Bağlı",
  "wsc.connection": "Bağlantı",
+ "wsc.tunnel_quota": "Tünel kotası",
  "wsc.down": "Sunucuya ulaşılamıyor",
  "wsc.full": "dolu",
  "wsc.gathering1": ", 1 oturum",

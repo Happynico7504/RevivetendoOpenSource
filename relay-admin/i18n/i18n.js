@@ -21,6 +21,9 @@
   var RTL = { ar: true, fa: true };
   var STORAGE_KEY = 'revivetendo-lang';
   var BASE = '/inkay/i18n/';
+  // Filled in by relay-admin with a hash of the language files, so a changed
+  // translation is fetched right away instead of after the hour-long cache.
+  var VERSION = '__I18N_VERSION__';
 
   var readyFns = [];
   var I18N = window.I18N = {
@@ -80,7 +83,7 @@
     root.classList.add('i18n-loading');
     setTimeout(function () { root.classList.remove('i18n-loading'); }, 3000);
     var script = document.createElement('script');
-    script.src = BASE + 'lang/' + I18N.lang + '.js';
+    script.src = BASE + 'lang/' + I18N.lang + '.js?v=' + VERSION;
     script.onerror = function () { root.classList.remove('i18n-loading'); };
     document.head.appendChild(script);
   }

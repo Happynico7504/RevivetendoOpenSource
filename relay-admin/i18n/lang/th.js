@@ -301,6 +301,7 @@ I18N.register("th", {
  "wsc.connected": "เชื่อมต่อ {n} คน",
  "wsc.connected_for": "เชื่อมต่อมา",
  "wsc.connection": "การเชื่อมต่อ",
+ "wsc.tunnel_quota": "โควตาอุโมงค์",
  "wsc.down": "ติดต่อเซิร์ฟเวอร์ไม่ได้",
  "wsc.full": "เต็ม",
  "wsc.gathering1": ", 1 เซสชัน",

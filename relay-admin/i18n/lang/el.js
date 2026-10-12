@@ -301,6 +301,7 @@ I18N.register("el", {
  "wsc.connected": "{n} συνδεδεμένοι",
  "wsc.connected_for": "Συνδεδεμένος",
  "wsc.connection": "Σύνδεση",
+ "wsc.tunnel_quota": "Όριο σήραγγας",
  "wsc.down": "Ο διακομιστής δεν είναι προσβάσιμος",
  "wsc.full": "γεμάτη",
  "wsc.gathering1": ", 1 συνεδρία",

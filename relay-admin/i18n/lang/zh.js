@@ -301,6 +301,7 @@ I18N.register("zh", {
  "wsc.connected": "{n} 人已连接",
  "wsc.connected_for": "连接时长",
  "wsc.connection": "连接",
+ "wsc.tunnel_quota": "隧道配额",
  "wsc.down": "无法连接服务器",
  "wsc.full": "已满",
  "wsc.gathering1": "，1 个会话",

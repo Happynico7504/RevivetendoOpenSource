@@ -301,6 +301,7 @@ I18N.register("hi", {
  "wsc.connected": "{n} जुड़े हैं",
  "wsc.connected_for": "जुड़े हुए",
  "wsc.connection": "कनेक्शन",
+ "wsc.tunnel_quota": "टनल कोटा",
  "wsc.down": "सर्वर तक नहीं पहुँच सके",
  "wsc.full": "भरा",
  "wsc.gathering1": ", 1 सत्र",

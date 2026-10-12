@@ -301,6 +301,7 @@ I18N.register("id", {
  "wsc.connected": "{n} terhubung",
  "wsc.connected_for": "Terhubung",
  "wsc.connection": "Koneksi",
+ "wsc.tunnel_quota": "Kuota tunnel",
  "wsc.down": "Server tidak dapat dihubungi",
  "wsc.full": "penuh",
  "wsc.gathering1": ", 1 sesi",

@@ -301,6 +301,7 @@ I18N.register("cs", {
  "wsc.connected": "připojeno: {n}",
  "wsc.connected_for": "Připojen",
  "wsc.connection": "Připojení",
+ "wsc.tunnel_quota": "Kvóta tunelů",
  "wsc.down": "Server nedostupný",
  "wsc.full": "plná",
  "wsc.gathering1": ", 1 relace",

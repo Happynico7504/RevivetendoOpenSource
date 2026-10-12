@@ -1059,6 +1059,9 @@ type wscSessionInfo struct {
 	NATm        int64  `json:"natm"`
 	Region      string `json:"region"`       // "US", "EU", "JP" or "" if the player's profile isn't known yet
 	ConnectedAt int64  `json:"connected_at"` // unix seconds when this PRUDP connection was established
+	TunnelsLeft int64  `json:"tunnels_left"` // tunneled matches left in the rate limit's window
+	TunnelLimit int64  `json:"tunnel_limit"`
+	TunnelFree  int64  `json:"tunnel_free_at,omitempty"` // unix seconds the next used one frees up
 }
 
 // pidConnectedAt records when each currently-connected PID's connection was
@@ -1178,6 +1181,11 @@ func startStatusServer() {
 			}
 			if v, ok := pidNATm.Load(k.(uint32)); ok {
 				s.NATm = int64(v.(uint32))
+			}
+			left, free := p2pTunnelQuota(k.(uint32))
+			s.TunnelsLeft, s.TunnelLimit = int64(left), p2pTunnelLimit
+			if !free.IsZero() {
+				s.TunnelFree = free.Unix()
 			}
 			sessions = append(sessions, s)
 			return true

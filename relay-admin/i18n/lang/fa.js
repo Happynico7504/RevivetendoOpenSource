@@ -301,6 +301,7 @@ I18N.register("fa", {
  "wsc.connected": "{n} متصل",
  "wsc.connected_for": "مدت اتصال",
  "wsc.connection": "اتصال",
+ "wsc.tunnel_quota": "سهمیهٔ تونل",
  "wsc.down": "سرور در دسترس نیست",
  "wsc.full": "پر",
  "wsc.gathering1": "، ۱ جلسه",

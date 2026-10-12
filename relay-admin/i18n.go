@@ -6,7 +6,10 @@ package main
 // pages are not translated.
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"io/fs"
 	"net/http"
 )
@@ -22,8 +25,36 @@ func init() {
 	if err != nil {
 		panic(err)
 	}
+	// i18n.js asks for lang/<code>.js?v=<hash of all files>, so the language files can
+	// stay cached for an hour without hiding a deploy; i18n.js itself is revalidated.
+	h := sha256.New()
+	fs.WalkDir(sub, ".", func(path string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			b, _ := fs.ReadFile(sub, path)
+			h.Write([]byte(path))
+			h.Write(b)
+		}
+		return nil
+	})
+	version := hex.EncodeToString(h.Sum(nil))[:12]
+	loader, err := fs.ReadFile(sub, "i18n.js")
+	if err != nil {
+		panic(err)
+	}
+	loader = bytes.Replace(loader, []byte("__I18N_VERSION__"), []byte(version), 1)
 	files := http.StripPrefix("/i18n/", http.FileServer(http.FS(sub)))
 	http.HandleFunc("/i18n/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/i18n/i18n.js" {
+			w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("ETag", `"`+version+`"`)
+			if r.Header.Get("If-None-Match") == `"`+version+`"` {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+			w.Write(loader)
+			return
+		}
 		w.Header().Set("Cache-Control", "public, max-age=3600")
 		files.ServeHTTP(w, r)
 	})

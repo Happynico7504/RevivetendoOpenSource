@@ -301,6 +301,7 @@ I18N.register("uk", {
  "wsc.connected": "під'єднано: {n}",
  "wsc.connected_for": "У мережі",
  "wsc.connection": "З'єднання",
+ "wsc.tunnel_quota": "Ліміт тунелю",
  "wsc.down": "Сервер недоступний",
  "wsc.full": "заповнена",
  "wsc.gathering1": ", 1 сесія",

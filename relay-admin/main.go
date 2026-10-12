@@ -824,6 +824,9 @@ type WSCPlayerRow struct {
 	ConnectedAt int64  // unix seconds the connection was established, 0 if unknown
 	Connection  string // the player's current gathering: "tunnel", "direct" or "" (in none / host alone)
 	TunnelVia   string
+	TunnelsLeft int64 // tunneled matches left in wsc-secure's rate-limit window
+	TunnelLimit int64 // 0 = wsc-secure did not report a quota
+	TunnelFree  time.Time
 }
 
 type WSCGatheringRow struct {
@@ -936,6 +939,9 @@ func fetchWSCStatus() WSCDashData {
 			Port        string `json:"port"`
 			Region      string `json:"region"`
 			ConnectedAt int64  `json:"connected_at"`
+			TunnelsLeft int64  `json:"tunnels_left"`
+			TunnelLimit int64  `json:"tunnel_limit"`
+			TunnelFree  int64  `json:"tunnel_free_at"`
 		} `json:"sessions"`
 		Gatherings []struct {
 			GID         int64   `json:"gid"`
@@ -1005,7 +1011,14 @@ func fetchWSCStatus() WSCDashData {
 		}
 	}
 	for _, s := range raw.Sessions {
+		var free time.Time
+		if s.TunnelFree > 0 {
+			free = time.Unix(s.TunnelFree, 0)
+		}
 		data.Players = append(data.Players, WSCPlayerRow{
+			TunnelsLeft: s.TunnelsLeft,
+			TunnelLimit: s.TunnelLimit,
+			TunnelFree:  free,
 			PID:         s.PID,
 			PNID:        pnids[s.PID],
 			NATm:        s.NATm,
@@ -1121,7 +1134,7 @@ tr:last-child td{border-bottom:none}
 <h2><span data-i18n="wsc.players">Connected Players</span>{{if .Players}} <span style="background:#dcfce7;color:#166534;border-radius:999px;padding:.1rem .5rem;font-size:.75rem;font-weight:700;vertical-align:middle">{{len .Players}}</span>{{end}}</h2>
 {{if .Players}}
 <table>
-<tr><th>PNID</th><th>PID</th><th data-i18n="wsc.region">Region</th><th data-i18n="wsc.connected_for">Connected</th><th>NAT</th><th data-i18n="wsc.connection">Connection</th></tr>
+<tr><th>PNID</th><th>PID</th><th data-i18n="wsc.region">Region</th><th data-i18n="wsc.connected_for">Connected</th><th>NAT</th><th data-i18n="wsc.connection">Connection</th><th data-i18n="wsc.tunnel_quota">Tunnel quota</th></tr>
 {{range .Players}}
 <tr>
   <td>{{if .PNID}}<strong>@{{.PNID}}</strong>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
@@ -1130,6 +1143,7 @@ tr:last-child td{border-bottom:none}
   <td class="mono"><span class="conn-time"{{if .ConnectedAt}} data-since="{{.ConnectedAt}}"{{end}}>{{connectedFor .ConnectedAt}}</span></td>
   <td>{{if eq .NATm 1}}<span class="badge on" data-i18n="nat.open">Open</span>{{else if eq .NATm 2}}<span class="badge" style="background:#fef9c3;color:#854d0e" data-i18n="nat.moderate">Moderate</span>{{else if eq .NATm 3}}<span class="badge off" data-i18n="nat.strict">Strict</span>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
   <td>{{if eq .Connection "tunnel"}}<span class="conn tunnel"><span data-i18n="conn.tunnel">Tunnel</span> · {{wscTunnelRegion .TunnelVia}}</span>{{else if eq .Connection "direct"}}<span class="conn" data-i18n="conn.direct">Direct</span>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
+  <td class="mono" style="white-space:nowrap">{{if .TunnelLimit}}<span{{if eq .TunnelsLeft 0}} style="color:#991b1b;font-weight:700"{{end}}>{{.TunnelsLeft}}/{{.TunnelLimit}}</span>{{if not .TunnelFree.IsZero}} <span style="color:#888">· +1 {{localTime .TunnelFree "match"}}</span>{{end}}{{else}}<span style="color:#aaa">—</span>{{end}}</td>
 </tr>
 {{end}}
 </table>

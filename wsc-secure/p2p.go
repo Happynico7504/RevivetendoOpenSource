@@ -248,6 +248,22 @@ func p2pOverTunnelLimit(ports map[uint32]int) (uint32, int) {
 	return 0, 0
 }
 
+// p2pTunnelQuota returns how many tunneled matches pid has left and, when it used any, when
+// the next one frees up.
+func p2pTunnelQuota(pid uint32) (int, time.Time) {
+	p2pTunnelUseMu.Lock()
+	defer p2pTunnelUseMu.Unlock()
+	uses := p2pTunnelUseLocked(pid, time.Now())
+	if len(uses) == 0 {
+		return p2pTunnelLimit, time.Time{}
+	}
+	left := p2pTunnelLimit - len(uses)
+	if left < 0 {
+		left = 0
+	}
+	return left, uses[0].Add(p2pTunnelWindow)
+}
+
 // p2pNoteTunnelUse counts a match for every console on the tunnel that was not on it before.
 func p2pNoteTunnelUse(ports, oldPorts map[uint32]int) {
 	p2pTunnelUseMu.Lock()

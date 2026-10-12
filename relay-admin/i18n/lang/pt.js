@@ -301,6 +301,7 @@ I18N.register("pt", {
  "wsc.connected": "{n} conectados",
  "wsc.connected_for": "Conectado",
  "wsc.connection": "Conexão",
+ "wsc.tunnel_quota": "Cota de túnel",
  "wsc.down": "Servidor inacessível",
  "wsc.full": "cheia",
  "wsc.gathering1": ", 1 sessão",

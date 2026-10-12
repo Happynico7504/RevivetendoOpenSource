@@ -301,6 +301,7 @@ I18N.register("ro", {
  "wsc.connected": "{n} conectați",
  "wsc.connected_for": "Conectat",
  "wsc.connection": "Conexiune",
+ "wsc.tunnel_quota": "Cotă tunel",
  "wsc.down": "Serverul nu răspunde",
  "wsc.full": "plină",
  "wsc.gathering1": ", 1 sesiune",

@@ -301,6 +301,7 @@ I18N.register("sv", {
  "wsc.connected": "{n} anslutna",
  "wsc.connected_for": "Ansluten",
  "wsc.connection": "Anslutning",
+ "wsc.tunnel_quota": "Tunnelkvot",
  "wsc.down": "Servern går inte att nå",
  "wsc.full": "full",
  "wsc.gathering1": ", 1 session",

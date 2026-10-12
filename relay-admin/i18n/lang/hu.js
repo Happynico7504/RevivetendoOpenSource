@@ -301,6 +301,7 @@ I18N.register("hu", {
  "wsc.connected": "{n} csatlakozva",
  "wsc.connected_for": "Csatlakozva",
  "wsc.connection": "Kapcsolat",
+ "wsc.tunnel_quota": "Alagútkeret",
  "wsc.down": "A szerver nem érhető el",
  "wsc.full": "tele",
  "wsc.gathering1": ", 1 munkamenet",

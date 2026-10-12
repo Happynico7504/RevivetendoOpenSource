@@ -301,6 +301,7 @@ I18N.register("vi", {
  "wsc.connected": "{n} đang kết nối",
  "wsc.connected_for": "Đã kết nối",
  "wsc.connection": "Kết nối",
+ "wsc.tunnel_quota": "Hạn mức đường hầm",
  "wsc.down": "Không kết nối được máy chủ",
  "wsc.full": "đầy",
  "wsc.gathering1": ", 1 phiên",
