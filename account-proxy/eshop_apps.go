@@ -520,6 +520,44 @@ func serveCCS(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, "", ci.mtime, bytes.NewReader(data))
 }
 
+// serveTagayaVersionlist answers the title version list
+// (https://tagaya-ctr.cdn.nintendo.net/tagaya/versionlist, which the Nimbus
+// HTTP patch turns into *.pretendo.cc and so reaches us). It lists the newest
+// version of every app, so installed older versions get the "update
+// available" treatment. Layout from the eShop's parser (tiger FUN_00208b98):
+// a 16-byte header whose first u16 must be 1, then 16-byte entries - u64
+// title id, u32 version, u32 reserved, little-endian.
+func serveTagayaVersionlist(w http.ResponseWriter, r *http.Request) bool {
+	h := strings.ToLower(r.Host)
+	if !strings.HasPrefix(h, "tagaya-ctr.cdn.") || r.URL.Path != "/tagaya/versionlist" {
+		return false
+	}
+	var buf bytes.Buffer
+	hdr := make([]byte, 16)
+	binary.LittleEndian.PutUint16(hdr, 1)
+	buf.Write(hdr)
+	n := 0
+	if cat, err := loadSamuraiCatalog(); err == nil {
+		for i := range cat.Apps {
+			a := &cat.Apps[i]
+			tid, err := strconv.ParseUint(a.TitleID, 16, 64)
+			ci, cerr := loadAppCIA(a)
+			if err != nil || cerr != nil {
+				continue
+			}
+			e := make([]byte, 16)
+			binary.LittleEndian.PutUint64(e, tid)
+			binary.LittleEndian.PutUint32(e[8:], uint32(ci.version))
+			buf.Write(e)
+			n++
+		}
+	}
+	log.Printf("tagaya: versionlist (%d titles) for %s from %s", n, r.Host, realIP(r))
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Write(buf.Bytes())
+	return true
+}
+
 // serveNPNSNotifications answers nim's push-notification poll
 // (https://<x>-npns.app.nintendo.net/api/v1/notifications.json, which the
 // Nimbus patches turn into *.pretendo.cc) with an empty list. Pretendo does not
