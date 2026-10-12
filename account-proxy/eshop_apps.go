@@ -410,7 +410,9 @@ var casTitleIDRe = regexp.MustCompile(`<cas:TitleId>([0-9A-Fa-f]{16})</cas:Title
 // in nim's parse order: TitleId, Attributes, Prices (see the ListItems notes in
 // main.go - Prices before Attributes is never found). mint (FUN_001ec010)
 // rejects a title whose first price <Amount> is not "0", and reads the
-// Version and MaxUserFileSize attributes ("0" = no save data).
+// Version and MaxUserFileSize attributes. MaxUserFileSize "0" marks the title
+// as not downloadable (FUN_0015eef0; it was 007-2001), so it carries the
+// content size.
 func casListTitlesEx(body []byte, deviceID, messageID string) (string, bool) {
 	cat, err := loadSamuraiCatalog()
 	if err != nil {
@@ -423,13 +425,13 @@ func casListTitlesEx(body []byte, deviceID, messageID string) (string, bool) {
 		if a == nil {
 			continue
 		}
-		version := 0
+		version, size := 0, int64(0)
 		if ci, err := loadAppCIA(a); err == nil {
-			version = int(ci.version)
+			version, size = int(ci.version), ci.contentSize()
 		}
 		n++
-		fmt.Fprintf(&titles, `<Titles><TitleId>%s</TitleId><Attributes><Name>Version</Name><Value>%d</Value></Attributes><Attributes><Name>MaxUserFileSize</Name><Value>0</Value></Attributes><Prices><ItemId>%d</ItemId><Price><Amount>0</Amount><Currency>EUR</Currency></Price><LicenseKind>PERMANENT</LicenseKind></Prices></Titles>`,
-			strings.ToUpper(a.TitleID), version, a.NSUID)
+		fmt.Fprintf(&titles, `<Titles><TitleId>%s</TitleId><Attributes><Name>Version</Name><Value>%d</Value></Attributes><Attributes><Name>MaxUserFileSize</Name><Value>%d</Value></Attributes><Prices><ItemId>%d</ItemId><Price><Amount>0</Amount><Currency>EUR</Currency></Price><LicenseKind>PERMANENT</LicenseKind></Prices></Titles>`,
+			strings.ToUpper(a.TitleID), version, size, a.NSUID)
 	}
 	if n == 0 {
 		return "", false
