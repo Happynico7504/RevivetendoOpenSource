@@ -63,6 +63,40 @@ type samuraiVideo struct {
 	Dimension   string `json:"dimension"` // "2d" or "3d"
 	Seconds     int    `json:"seconds"`
 	New         bool   `json:"new"`
+	// Uploader's download option (relay-admin videos_download.go): nil = not
+	// downloadable, else mode "free" or "paid" with a price in coins.
+	Download *struct {
+		Mode  string `json:"mode"`
+		Price int    `json:"price"`
+	} `json:"download"`
+}
+
+// samuraiDownloadsDirID is the channel listing every downloadable video.
+const samuraiDownloadsDirID = 9001
+
+func (c *samuraiCatalog) downloadableVideos() []*samuraiVideo {
+	var out []*samuraiVideo
+	for i := range c.Videos {
+		if c.Videos[i].Download != nil {
+			out = append(out, &c.Videos[i])
+		}
+	}
+	return out
+}
+
+// samuraiDownloadsDirectory is the "Downloadable videos" channel. Its icon and
+// banner are the first channel's.
+func samuraiDownloadsDirectory(c *samuraiCatalog) map[string]any {
+	icon, banner := "", ""
+	if len(c.Channels) > 0 {
+		icon, banner = c.Channels[0].Icon, c.Channels[0].Banner
+	}
+	return map[string]any{
+		"id": samuraiDownloadsDirID, "type": "normal", "standard": false, "new": true,
+		"name": "Downloadable videos", "description": "Videos you can download to your Nintendo 3DS",
+		"icon_url": samuraiMediaURL(icon), "icon_width": 102, "icon_height": 76,
+		"banner_url": samuraiMediaURL(banner),
+	}
 }
 
 type samuraiChannel struct {
@@ -223,6 +257,11 @@ func handleSamurai(w http.ResponseWriter, r *http.Request) {
 				"description": ch.Description,
 			})
 		}
+		if len(cat.downloadableVideos()) > 0 {
+			d := samuraiDownloadsDirectory(cat)
+			d["index"] = len(dirs) + 1
+			dirs = append(dirs, d)
+		}
 		if len(cat.Apps) > 0 {
 			d := samuraiAppsDirectory(cat)
 			d["index"] = len(dirs) + 1
@@ -235,6 +274,17 @@ func handleSamurai(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		id, _ := strconv.ParseInt(endpoint[1], 10, 64)
+		if vids := cat.downloadableVideos(); id == samuraiDownloadsDirID && len(vids) > 0 {
+			d := samuraiDownloadsDirectory(cat)
+			contents := []any{}
+			for _, v := range vids {
+				contents = append(contents, map[string]any{"index": len(contents) + 1, "movie": samuraiMovieJSON(v)})
+			}
+			d["component"] = "movie"
+			d["contents"] = map[string]any{"content": contents, "length": len(contents), "offset": 0, "total": len(contents)}
+			out = map[string]any{"directory": d}
+			break
+		}
 		if id == samuraiAppsDirID && len(cat.Apps) > 0 {
 			out = samuraiAppsDirectoryContents(cat)
 			break

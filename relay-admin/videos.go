@@ -71,6 +71,10 @@ ALTER TABLE eshop_videos ADD COLUMN IF NOT EXISTS views BIGINT NOT NULL DEFAULT 
 ALTER TABLE eshop_videos ADD COLUMN IF NOT EXISTS stereo TEXT NOT NULL DEFAULT '';
 -- When an upload finished and joined the conversion queue (first come, first served).
 ALTER TABLE eshop_videos ADD COLUMN IF NOT EXISTS queued_at TIMESTAMPTZ;
+-- Download option the uploader picks (see videos_download.go): off, free, or
+-- paid for download_price RevivetendoCoins.
+ALTER TABLE eshop_videos ADD COLUMN IF NOT EXISTS download_mode TEXT NOT NULL DEFAULT 'off';
+ALTER TABLE eshop_videos ADD COLUMN IF NOT EXISTS download_price INT NOT NULL DEFAULT 0;
 CREATE TABLE IF NOT EXISTS eshop_video_likes (
 	video_id   BIGINT      NOT NULL REFERENCES eshop_videos (id) ON DELETE CASCADE,
 	pid        BIGINT      NOT NULL,
@@ -135,6 +139,7 @@ func registerVideos() {
 	http.HandleFunc("/my/videos/api/chunk", myVideosChunk)
 	http.HandleFunc("/my/videos/api/delete", myVideosDelete)
 	http.HandleFunc("/my/videos/api/list", myVideosList)
+	http.HandleFunc("/my/videos/api/download", myVideosDownload)
 	http.HandleFunc("/my/videos/media/", myVideosMedia)
 	registerVideosAdmin()
 	registerVideoChannels()
@@ -190,12 +195,14 @@ type videoSummary struct {
 	Likes       int64  `json:"likes"`
 	Comments    int64  `json:"comments"`
 	Stereo      string `json:"stereo"`
+	Download    string `json:"download"`
+	Price       int    `json:"price"`
 	// While processing: -1 = converting now, else videos ahead in the queue.
 	QueueAhead int `json:"queueAhead"`
 }
 
 func videoListFor(pid int64) []videoSummary {
-	rows, err := db.Query(`SELECT id, title, description, status, received, upload_size, seconds, review_note, error, created_at, views, stereo,
+	rows, err := db.Query(`SELECT id, title, description, status, received, upload_size, seconds, review_note, error, created_at, views, stereo, download_mode, download_price,
 			(SELECT COUNT(*) FROM eshop_video_likes l WHERE l.video_id = v.id),
 			(SELECT COUNT(*) FROM eshop_video_comments c WHERE c.video_id = v.id)
 		FROM eshop_videos v WHERE pid = $1 ORDER BY created_at DESC LIMIT 100`, pid)
@@ -207,7 +214,7 @@ func videoListFor(pid int64) []videoSummary {
 	for rows.Next() {
 		var v videoSummary
 		var created time.Time
-		if rows.Scan(&v.ID, &v.Title, &v.Description, &v.Status, &v.Received, &v.Size, &v.Seconds, &v.ReviewNote, &v.Error, &created, &v.Views, &v.Stereo, &v.Likes, &v.Comments) != nil {
+		if rows.Scan(&v.ID, &v.Title, &v.Description, &v.Status, &v.Received, &v.Size, &v.Seconds, &v.ReviewNote, &v.Error, &created, &v.Views, &v.Stereo, &v.Download, &v.Price, &v.Likes, &v.Comments) != nil {
 			continue
 		}
 		v.Created = created.UTC().Format("2006-01-02")
@@ -226,7 +233,7 @@ func myVideosList(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	videoJSON(w, http.StatusOK, map[string]any{"videos": videoListFor(pid), "channels": videoChannelListFor(pid)})
+	videoJSON(w, http.StatusOK, map[string]any{"videos": videoListFor(pid), "channels": videoChannelListFor(pid), "hasWallet": videoHasWallet(pid)})
 }
 
 func myVideosStart(w http.ResponseWriter, r *http.Request) {

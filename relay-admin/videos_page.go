@@ -53,6 +53,11 @@ button.submit:disabled{opacity:.6;cursor:default}
 .msg.err{color:#991b1b}.msg.ok{color:#166534}
 .vid{display:grid;grid-template-columns:120px 1fr;gap:1rem;border:1px solid #e4e4e7;border-radius:10px;padding:.75rem;margin-bottom:.75rem}
 .vid img{width:120px;height:88px;border-radius:6px;background:#f1f5f9;object-fit:cover}
+.dl{display:flex;gap:.4rem;align-items:center;flex-wrap:wrap;margin-top:.45rem;font-size:.85rem}
+.dl select{width:auto;padding:.25rem .4rem;font-size:.85rem}
+.dl input{width:5rem;border:1px solid #d1d5db;border-radius:6px;padding:.25rem .4rem;font:inherit;font-size:.85rem}
+.dl button{background:#2563eb;color:#fff;border:none;border-radius:6px;padding:.3rem .7rem;font:inherit;font-size:.85rem;cursor:pointer}
+.dl .ok{color:#166534}.dl .err{color:#991b1b}
 .chan{border:1px solid #e4e4e7;border-radius:10px;padding:.75rem;margin-bottom:.75rem}
 .chan .pics{display:flex;gap:.75rem;align-items:flex-end;flex-wrap:wrap;margin-bottom:.5rem}
 .chan .pics img{border-radius:4px;background:#f1f5f9;max-width:100%;height:auto}
@@ -85,6 +90,7 @@ button.submit:disabled{opacity:.6;cursor:default}
   <li data-i18n="vid.rule_rights">Only upload videos you made yourself or have the right to share.</li>
   <li data-i18n="vid.rule_content">Nothing offensive, nothing that breaks the law, no personal information.</li>
   <li data-i18n="vid.rule_screen">The 3DS shows videos at 400×240, so big text and simple shots look best.</li>
+  <li data-i18n="vid.rule_download">You can let people download your videos to their 3DS, for free or for RevivetendoCoins that go to you. Downloadable videos get their own channel in the eShop.</li>
 </ul>
 
 <form id="up">
@@ -167,10 +173,41 @@ button.submit:disabled{opacity:.6;cursor:default}
   function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
   function mmss(s) { return Math.floor(s / 60) + ':' + ('0' + (s % 60)).slice(-2); }
 
-  var pollTimer = null;
+  var pollTimer = null, hasWallet = false;
+
+  // downloadRow is the per-video download option (off / free / paid).
+  function downloadRow(v) {
+    var row = el('div', 'dl');
+    row.appendChild(el('span', '', t('vid.dl_label', 'Download to 3DS:')));
+    var sel = el('select');
+    [['off', 'vid.dl_off', 'Off'], ['free', 'vid.dl_free', 'Free'], ['paid', 'vid.dl_paid', 'Paid']].forEach(function (o) {
+      var opt = el('option', '', t(o[1], o[2])); opt.value = o[0];
+      if (o[0] === 'paid' && !hasWallet) opt.disabled = true;
+      sel.appendChild(opt);
+    });
+    sel.value = v.download || 'off';
+    var price = el('input'); price.type = 'number'; price.min = 1; price.max = 500; price.value = v.price || 1;
+    var coins = el('span', '', t('vid.dl_coins', 'coins'));
+    var save = el('button', '', t('vid.dl_save', 'Save'));
+    var note = el('span');
+    function sync() { var paid = sel.value === 'paid'; price.style.display = coins.style.display = paid ? '' : 'none'; }
+    sel.onchange = sync; sync();
+    save.onclick = function () {
+      note.className = ''; note.textContent = '';
+      api('POST', 'download', { id: v.id, mode: sel.value, price: +price.value }).then(function (r) {
+        if (r.ok) { note.className = 'ok'; note.textContent = t('vid.dl_saved', 'Saved.'); }
+        else { note.className = 'err'; note.textContent = apiErr(r); }
+      });
+    };
+    [sel, price, coins, save, note].forEach(function (e) { row.appendChild(e); });
+    if (!hasWallet) row.appendChild(el('div', 'hint', t('vid.dl_no_wallet', 'To charge coins you need a RevivetendoCoin wallet: open the eShop on your 3DS once.')));
+    return row;
+  }
+
   function load() {
     api('GET', 'list').then(function (j) {
       var list = $('list'), vids = j.videos || [], busy = false;
+      hasWallet = !!j.hasWallet;
       list.innerHTML = '';
       if (!vids.length) { list.appendChild(el('p', 'empty', t('vid.none', 'You haven\'t uploaded any videos yet.'))); }
       vids.forEach(function (v) {
@@ -190,6 +227,7 @@ button.submit:disabled{opacity:.6;cursor:default}
         info.appendChild(el('div', 'meta', meta));
         if (v.status === 'live') info.appendChild(el('div', 'meta', fmt(t('vid.stats', '{views} views · {likes} likes · {comments} comments'), { views: v.views, likes: v.likes, comments: v.comments })));
         if (v.reviewNote) info.appendChild(el('div', 'note', v.reviewNote));
+        if (v.status === 'submitted' || v.status === 'live' || v.status === 'rejected') info.appendChild(downloadRow(v));
         if (v.status === 'failed') info.appendChild(el('div', 'note', t(v.errorKey || 'vid.failed_help', v.error || 'This video could not be converted. Try another file (MP4 works best).')));
         var acts = el('div', 'acts');
         if (v.hasPreview) { var a = el('a', '', t('vid.watch', 'Watch preview')); a.href = '/inkay/my/videos/media/' + v.id + '/video.mp4'; a.target = '_blank'; acts.appendChild(a); }
