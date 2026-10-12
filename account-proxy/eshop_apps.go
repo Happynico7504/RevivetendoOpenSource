@@ -176,6 +176,25 @@ func appTicketTitle(ticket int64, accountID, deviceID string) (string, bool) {
 	return title, true
 }
 
+// appTicketTitlesForPID lists the distinct titles a player bought from us,
+// oldest purchase first.
+func appTicketTitlesForPID(pid uint32) []string {
+	appTicketsReady()
+	rows, err := db.Query(`SELECT title_id FROM eshop_app_tickets WHERE pid = $1 GROUP BY title_id ORDER BY MIN(created_at)`, int64(pid))
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var t string
+		if rows.Scan(&t) == nil {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 // appTicketTIVs lists the app tickets owned by this ECS account or device as
 // <TIV> elements (our tickets are version 0).
 func appTicketTIVs(accountID, deviceID string) string {
@@ -305,6 +324,34 @@ func handleNinjaApps(w http.ResponseWriter, r *http.Request, path string, postFo
 		}
 		log.Printf("eshop apps: id_pair %v -> %d", q["title_id[]"], len(pairs))
 		fmt.Fprintf(w, `{"title_id_pairs":{"title_id_pair":%s}}`, mustJSON(pairs))
+		return true
+
+	// The account's software (the eShop's redownload / update list), paged with
+	// limit and offset. Shape from tiger's parser (FUN_00329500):
+	// owned_titles{total, owned_title[{id: ns_uid, title_id: hex}]}; a missing
+	// owned_titles is the generic 72001 (007-2001). Lists the base titles this
+	// player bought from us; Badge Arcade has none here.
+	case path == "/ninja/ws/my/shared_titles":
+		owned := []any{}
+		if pid := fetchRealPID(r); pid != 0 {
+			for _, tid := range appTicketTitlesForPID(pid) {
+				if t := cat.titleByTitleID(tid); t != nil && !t.IsUpdate {
+					owned = append(owned, map[string]any{"id": t.NSUID, "title_id": t.TitleID})
+				}
+			}
+		}
+		total := len(owned)
+		offset, _ := strconv.Atoi(q.Get("offset"))
+		limit, _ := strconv.Atoi(q.Get("limit"))
+		if offset < 0 || offset > total {
+			offset = total
+		}
+		end := total
+		if limit > 0 && offset+limit < total {
+			end = offset + limit
+		}
+		log.Printf("eshop apps: shared_titles -> %d of %d from %s", end-offset, total, ip)
+		fmt.Fprintf(w, `{"owned_titles":{"total":%d,"owned_title":%s}}`, total, mustJSON(owned[offset:end]))
 		return true
 
 	case ninjaECInfoRe.MatchString(path):
