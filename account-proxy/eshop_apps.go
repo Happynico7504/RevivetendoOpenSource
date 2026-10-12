@@ -289,7 +289,13 @@ func handleNinjaApps(w http.ResponseWriter, r *http.Request, path string, postFo
 
 	case ninjaOnlinePriceRe.MatchString(path):
 		var entries []string
-		for _, s := range append(q["title[]"], q["title"]...) {
+		// The channel list asks for all its titles at once, comma-separated
+		// in one title[] value; a title page asks for one.
+		var ids []string
+		for _, v := range append(q["title[]"], q["title"]...) {
+			ids = append(ids, strings.Split(v, ",")...)
+		}
+		for _, s := range ids {
 			id, _ := strconv.ParseInt(s, 10, 64)
 			if a := cat.appByNSUID(id); a != nil {
 				entries = append(entries, fmt.Sprintf(`{"title_id":%d,"eshop_sales_status":"onsale","price":{"regular_price":{"id":%d,"amount":"%d,00 %s","currency":"ECOIN","raw_value":"%d"}}}`,
