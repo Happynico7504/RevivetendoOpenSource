@@ -6760,6 +6760,9 @@ func startOLVProxy() {
 	// genuinely contain a double slash (/api/v//notifications.json) and don't
 	// follow redirects, so that "helpful" stdlib behavior broke NPNS outright.
 	dispatch := func(w http.ResponseWriter, r *http.Request) {
+		if serveNPNSNotifications(w, r) {
+			return
+		}
 		switch r.Host {
 		case "boss.nicochristmann.net": // TEMPORARY — see handleBossCapture doc comment.
 			handleBossCapture(w, r)

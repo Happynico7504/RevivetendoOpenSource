@@ -499,6 +499,24 @@ func serveCCS(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, "", ci.mtime, bytes.NewReader(data))
 }
 
+// serveNPNSNotifications answers nim's push-notification poll
+// (https://<x>-npns.app.nintendo.net/api/v1/notifications.json, which the
+// Nimbus patches turn into *.pretendo.cc) with an empty list. Pretendo does not
+// answer it, so every sleep-mode wake-up logged an upstream failure; the
+// experiment (2026-10-12) is whether that is what keeps nim from continuing a
+// download moved to sleep mode. nim's parser (FUN_00118010) takes
+// {"notifications":[...]} with at most maxlength entries.
+func serveNPNSNotifications(w http.ResponseWriter, r *http.Request) bool {
+	h := strings.ToLower(r.Host)
+	if !strings.Contains(h, "-npns.app.") || !strings.HasSuffix(r.URL.Path, "/notifications.json") {
+		return false
+	}
+	log.Printf("npns: %s %s from %s -> empty notification list", r.Method, r.URL.RequestURI(), realIP(r))
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"notifications":[]}`))
+	return true
+}
+
 func mustJSON(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
