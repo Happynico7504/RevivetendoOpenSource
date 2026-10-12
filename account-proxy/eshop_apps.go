@@ -52,6 +52,75 @@ type samuraiApp struct {
 	// Earlier versions' CIAs (files in eshop-video/apps/), kept so the eShop
 	// can still fetch an installed older version's TMD after an update.
 	OldCIAs []string `json:"old_cias"`
+	// Update title (0004000E + the app's unique id), installed next to the
+	// base and used instead of it - how 3DS updates work, so the version list
+	// and the HOME Menu treat it as an update. Its own store id, always free.
+	Update *struct {
+		NSUID   int64    `json:"ns_uid"`
+		CIA     string   `json:"cia"`
+		OldCIAs []string `json:"old_cias"`
+	} `json:"update"`
+}
+
+// shopTitle is one installable title the eShop deals with: an app's base
+// title or its update title.
+type shopTitle struct {
+	App      *samuraiApp
+	NSUID    int64
+	TitleID  string // 16 upper-case hex digits
+	CIA      string
+	OldCIAs  []string
+	Price    int
+	IsUpdate bool
+}
+
+func (a *samuraiApp) baseTitle() *shopTitle {
+	return &shopTitle{App: a, NSUID: a.NSUID, TitleID: strings.ToUpper(a.TitleID), CIA: a.CIA, OldCIAs: a.OldCIAs, Price: a.Price}
+}
+
+func (a *samuraiApp) updateTitle() *shopTitle {
+	if a.Update == nil || len(a.TitleID) != 16 {
+		return nil
+	}
+	return &shopTitle{App: a, NSUID: a.Update.NSUID, TitleID: "0004000E" + strings.ToUpper(a.TitleID[8:]),
+		CIA: a.Update.CIA, OldCIAs: a.Update.OldCIAs, IsUpdate: true}
+}
+
+// shopTitles lists every base and update title in the catalog.
+func (c *samuraiCatalog) shopTitles() []*shopTitle {
+	var out []*shopTitle
+	for i := range c.Apps {
+		out = append(out, c.Apps[i].baseTitle())
+		if u := c.Apps[i].updateTitle(); u != nil {
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
+func (c *samuraiCatalog) titleByNSUID(id int64) *shopTitle {
+	for _, t := range c.shopTitles() {
+		if t.NSUID == id {
+			return t
+		}
+	}
+	return nil
+}
+
+func (c *samuraiCatalog) titleByTitleID(tid string) *shopTitle {
+	for _, t := range c.shopTitles() {
+		if strings.EqualFold(t.TitleID, tid) {
+			return t
+		}
+	}
+	return nil
+}
+
+func (t *shopTitle) name() string {
+	if t.IsUpdate {
+		return t.App.Name + " (update)"
+	}
+	return t.App.Name
 }
 
 // --- owned tickets ---
@@ -136,15 +205,6 @@ const samuraiAppsDirID = 9000
 func (c *samuraiCatalog) appByNSUID(id int64) *samuraiApp {
 	for i := range c.Apps {
 		if c.Apps[i].NSUID == id {
-			return &c.Apps[i]
-		}
-	}
-	return nil
-}
-
-func (c *samuraiCatalog) appByTitleID(tid string) *samuraiApp {
-	for i := range c.Apps {
-		if strings.EqualFold(c.Apps[i].TitleID, tid) {
 			return &c.Apps[i]
 		}
 	}
@@ -236,8 +296,8 @@ func handleNinjaApps(w http.ResponseWriter, r *http.Request, path string, postFo
 	case path == "/ninja/ws/titles/id_pair":
 		pairs := []any{}
 		for _, tid := range q["title_id[]"] {
-			if a := cat.appByTitleID(tid); a != nil {
-				pairs = append(pairs, map[string]any{"title_id": strings.ToUpper(a.TitleID), "ns_uid": a.NSUID, "type": "T"})
+			if t := cat.titleByTitleID(tid); t != nil {
+				pairs = append(pairs, map[string]any{"title_id": t.TitleID, "ns_uid": t.NSUID, "type": "T"})
 			}
 		}
 		if len(pairs) == 0 {
@@ -251,16 +311,16 @@ func handleNinjaApps(w http.ResponseWriter, r *http.Request, path string, postFo
 		infos := []any{}
 		for _, s := range q["ns_uid[]"] {
 			id, _ := strconv.ParseInt(s, 10, 64)
-			a := cat.appByNSUID(id)
-			if a == nil {
+			t := cat.titleByNSUID(id)
+			if t == nil {
 				continue
 			}
-			ci, err := loadAppCIA(a)
+			ci, err := loadAppCIAFile(t.CIA)
 			if err != nil {
 				log.Printf("eshop apps: ec_info %d: %v", id, err)
 				continue
 			}
-			infos = append(infos, map[string]any{"title_id": strings.ToUpper(a.TitleID), "title_version": ci.version, "content_size": ci.contentSize()})
+			infos = append(infos, map[string]any{"title_id": t.TitleID, "title_version": ci.version, "content_size": ci.contentSize()})
 		}
 		if len(infos) == 0 {
 			return false
@@ -274,17 +334,17 @@ func handleNinjaApps(w http.ResponseWriter, r *http.Request, path string, postFo
 	// titles/ec_info, unwrapped, plus disable_download. Unhandled, it was 011-2500.
 	case ninjaTitleECInfoRe.MatchString(path):
 		id, _ := strconv.ParseInt(ninjaTitleECInfoRe.FindStringSubmatch(path)[1], 10, 64)
-		a := cat.appByNSUID(id)
-		if a == nil {
+		t := cat.titleByNSUID(id)
+		if t == nil {
 			return false
 		}
-		ci, err := loadAppCIA(a)
+		ci, err := loadAppCIAFile(t.CIA)
 		if err != nil {
 			log.Printf("eshop apps: ec_info %d: %v", id, err)
 			return false
 		}
-		log.Printf("eshop apps: title ec_info %d from %s", id, ip)
-		fmt.Fprintf(w, `{"title_ec_info":{"title_id":"%s","title_version":%d,"content_size":%d,"disable_download":false}}`, strings.ToUpper(a.TitleID), ci.version, ci.contentSize())
+		log.Printf("eshop apps: title ec_info %d (%s) from %s", id, t.name(), ip)
+		fmt.Fprintf(w, `{"title_ec_info":{"title_id":"%s","title_version":%d,"content_size":%d,"disable_download":false}}`, t.TitleID, ci.version, ci.contentSize())
 		return true
 
 	case ninjaOnlinePriceRe.MatchString(path):
@@ -297,9 +357,9 @@ func handleNinjaApps(w http.ResponseWriter, r *http.Request, path string, postFo
 		}
 		for _, s := range ids {
 			id, _ := strconv.ParseInt(s, 10, 64)
-			if a := cat.appByNSUID(id); a != nil {
+			if t := cat.titleByNSUID(id); t != nil {
 				entries = append(entries, fmt.Sprintf(`{"title_id":%d,"eshop_sales_status":"onsale","price":{"regular_price":{"id":%d,"amount":"%d,00 %s","currency":"ECOIN","raw_value":"%d"}}}`,
-					a.NSUID, a.NSUID, a.Price, ninjaCoinName, a.Price))
+					t.NSUID, t.NSUID, t.Price, ninjaCoinName, t.Price))
 			}
 		}
 		if len(entries) == 0 {
@@ -311,12 +371,12 @@ func handleNinjaApps(w http.ResponseWriter, r *http.Request, path string, postFo
 
 	case ninjaAppPrepurchRe.MatchString(path):
 		id, _ := strconv.ParseInt(ninjaAppPrepurchRe.FindStringSubmatch(path)[1], 10, 64)
-		a := cat.appByNSUID(id)
-		if a == nil {
+		t := cat.titleByNSUID(id)
+		if t == nil {
 			return false
 		}
 		size := int64(0)
-		if ci, err := loadAppCIA(a); err == nil {
+		if ci, err := loadAppCIAFile(t.CIA); err == nil {
 			size = ci.contentSize()
 		}
 		// Fields as the eShop (tiger, FUN_00331ec0) reads them: purchasing_content
@@ -328,22 +388,23 @@ func handleNinjaApps(w http.ResponseWriter, r *http.Request, path string, postFo
 		if pid := fetchRealPID(r); pid != 0 {
 			bal = walletBalance(pid)
 		}
-		price := ninjaPriceJSON(a.Price)
-		log.Printf("eshop apps: prepurchase_info %d (%s) from %s", id, a.Name, ip)
+		price := ninjaPriceJSON(t.Price)
+		log.Printf("eshop apps: prepurchase_info %d (%s) from %s", id, t.name(), ip)
 		fmt.Fprintf(w, `{"prepurchase_info":{"tax_excluded":false,"current_balance":%s,"total_amount":%s,"purchasing_content":[{"eshop_sales_status":"onsale","content_size":%d,"payment_amount":{"total_amount":%s,"tax_amount":%s,"price":{"regular_price":{"id":%d,"amount":"%d,00 %s","currency":"ECOIN","raw_value":"%d"}}}}]}}`,
-			ninjaBalanceJSON(bal), price, size, price, ninjaPriceJSON(0), a.NSUID, a.Price, ninjaCoinName, a.Price)
+			ninjaBalanceJSON(bal), price, size, price, ninjaPriceJSON(0), t.NSUID, t.Price, ninjaCoinName, t.Price)
 		return true
 
 	case r.Method == http.MethodPost && ninjaAppPurchaseRe.MatchString(path):
 		id, _ := strconv.ParseInt(ninjaAppPurchaseRe.FindStringSubmatch(path)[1], 10, 64)
-		a := cat.appByNSUID(id)
-		if a == nil {
+		t := cat.titleByNSUID(id)
+		if t == nil {
 			return false
 		}
+		a := t.App
 		bal := ninjaCoinDaily
 		ticket := time.Now().UnixNano() / 1000
 		if pid := fetchRealPID(r); pid != 0 {
-			price := a.Price
+			price := t.Price
 			if pid == a.OwnerPID {
 				price = 0 // sellers get their own titles for free
 			}
@@ -371,9 +432,9 @@ func handleNinjaApps(w http.ResponseWriter, r *http.Request, path string, postFo
 			}
 			log.Printf("eshop apps: PID %d bought %s for %d coins, balance %d", pid, a.Name, price, bal)
 		}
-		ninjaTicketTitle.Store(ticket, a.TitleID)
-		appTicketRecordPurchase(ticket, a.TitleID, fetchRealPID(r))
-		log.Printf("eshop apps: !purchase %d (%s) from %s form=%v -> ticket %d", id, a.Name, ip, postForm, ticket)
+		ninjaTicketTitle.Store(ticket, t.TitleID)
+		appTicketRecordPurchase(ticket, t.TitleID, fetchRealPID(r))
+		log.Printf("eshop apps: !purchase %d (%s) from %s form=%v -> ticket %d", id, t.name(), ip, postForm, ticket)
 		fmt.Fprintf(w, `{"transaction_result":{"transaction_id":"%d","ticket_id":%d,"post_balance":%s}}`, ticket, ticket, ninjaBalanceJSON(bal))
 		return true
 	}
@@ -399,10 +460,6 @@ func (c *appCIA) contentSize() int64 {
 }
 
 var appCIACache sync.Map // file path -> *appCIA
-
-func loadAppCIA(a *samuraiApp) (*appCIA, error) {
-	return loadAppCIAFile(a.CIA)
-}
 
 // loadAppCIAFile loads a CIA from eshop-video/apps/, cached until it changes.
 func loadAppCIAFile(name string) (*appCIA, error) {
@@ -475,16 +532,16 @@ func serveCCS(w http.ResponseWriter, r *http.Request) {
 	ip := realIP(r)
 	m := ccsPathRe.FindStringSubmatch(r.URL.Path)
 	cat, err := loadSamuraiCatalog()
-	var a *samuraiApp
+	var t *shopTitle
 	if m != nil && err == nil {
-		a = cat.appByTitleID(m[1])
+		t = cat.titleByTitleID(m[1])
 	}
-	if a == nil {
+	if t == nil {
 		log.Printf("eshop apps: CCS %s %s (range %q) from %s -> 404", r.Method, r.URL.RequestURI(), r.Header.Get("Range"), ip)
 		http.NotFound(w, r)
 		return
 	}
-	ci, err := loadAppCIA(a)
+	ci, err := loadAppCIAFile(t.CIA)
 	if err != nil {
 		log.Printf("eshop apps: CCS %s: %v", r.URL.Path, err)
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
@@ -499,7 +556,7 @@ func serveCCS(w http.ResponseWriter, r *http.Request) {
 		data = ci.tmd
 		if v, ok := strings.CutPrefix(m[2], "tmd."); ok && v != strconv.Itoa(int(ci.version)) {
 			data = nil
-			for _, old := range a.OldCIAs {
+			for _, old := range t.OldCIAs {
 				oc, err := loadAppCIAFile(old)
 				if err == nil && strconv.Itoa(int(oc.version)) == v {
 					data, ci = oc.tmd, oc
@@ -544,10 +601,9 @@ func serveTagayaVersionlist(w http.ResponseWriter, r *http.Request) bool {
 	buf.Write(hdr)
 	n := 0
 	if cat, err := loadSamuraiCatalog(); err == nil {
-		for i := range cat.Apps {
-			a := &cat.Apps[i]
-			tid, err := strconv.ParseUint(a.TitleID, 16, 64)
-			ci, cerr := loadAppCIA(a)
+		for _, t := range cat.shopTitles() {
+			tid, err := strconv.ParseUint(t.TitleID, 16, 64)
+			ci, cerr := loadAppCIAFile(t.CIA)
 			if err != nil || cerr != nil {
 				continue
 			}
@@ -606,17 +662,17 @@ func casListTitlesEx(body []byte, deviceID, messageID string) (string, bool) {
 	var titles strings.Builder
 	n := 0
 	for _, m := range casTitleIDRe.FindAllStringSubmatch(string(body), -1) {
-		a := cat.appByTitleID(m[1])
-		if a == nil {
+		t := cat.titleByTitleID(m[1])
+		if t == nil {
 			continue
 		}
 		version, size := 0, int64(0)
-		if ci, err := loadAppCIA(a); err == nil {
+		if ci, err := loadAppCIAFile(t.CIA); err == nil {
 			version, size = int(ci.version), ci.contentSize()
 		}
 		n++
 		fmt.Fprintf(&titles, `<Titles><TitleId>%s</TitleId><Attributes><Name>Version</Name><Value>%d</Value></Attributes><Attributes><Name>MaxUserFileSize</Name><Value>%d</Value></Attributes><Prices><ItemId>%d</ItemId><Price><Amount>%d</Amount><Currency>EUR</Currency></Price><LicenseKind>PERMANENT</LicenseKind></Prices></Titles>`,
-			strings.ToUpper(a.TitleID), version, size, a.NSUID, a.Price)
+			t.TitleID, version, size, t.NSUID, t.Price)
 	}
 	if n == 0 {
 		return "", false
