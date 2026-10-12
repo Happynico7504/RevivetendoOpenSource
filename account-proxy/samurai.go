@@ -327,9 +327,34 @@ func handleSamurai(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		id, _ := strconv.ParseInt(endpoint[1], 10, 64)
-		if a := cat.appByNSUID(id); a != nil {
-			log.Printf("eshop apps: title page %d (%s) from %s", id, a.Name, ip)
-			out = map[string]any{"title": samuraiTitleJSON(a, true)}
+		if t := cat.titleByNSUID(id); t != nil {
+			log.Printf("eshop apps: title page %d (%s) from %s", id, t.name(), ip)
+			out = map[string]any{"title": samuraiShopTitleJSON(t, true)}
+		}
+
+	// Title lists: by id (title[]=…, the eShop looks up an update title this
+	// way) or by our Homebrew genre (95, the search screen).
+	case "titles":
+		q := r.URL.Query()
+		var list []any
+		var ids []string
+		for _, v := range append(q["title[]"], q["title"]...) {
+			ids = append(ids, strings.Split(v, ",")...)
+		}
+		for _, s := range ids {
+			id, _ := strconv.ParseInt(s, 10, 64)
+			if t := cat.titleByNSUID(id); t != nil {
+				list = append(list, samuraiShopTitleJSON(t, false))
+			}
+		}
+		if len(ids) == 0 && strings.Contains(r.URL.RawQuery, "genre%5B%5D=95") {
+			for i := range cat.Apps {
+				list = append(list, samuraiTitleJSON(&cat.Apps[i], false))
+			}
+		}
+		if list != nil {
+			log.Printf("eshop apps: titles %s -> %d from %s", r.URL.RawQuery, len(list), ip)
+			out = map[string]any{"titles": map[string]any{"title": list, "length": len(list), "offset": 0, "total": len(list)}}
 		}
 
 	// Search screen. Shapes from archived samurai.ctr.shop.nintendo.net XML (genres

@@ -254,6 +254,20 @@ func samuraiAppsDirectoryContents(cat *samuraiCatalog) map[string]any {
 
 // samuraiTitleJSON is an app as a samurai title, the short form for lists or
 // the full title page.
+// samuraiShopTitleJSON is samuraiTitleJSON for a base or update title: an
+// update is shown as its app with its own id and "(update)" in the name.
+func samuraiShopTitleJSON(t *shopTitle, full bool) map[string]any {
+	m := samuraiTitleJSON(t.App, full)
+	if t.IsUpdate {
+		m["id"] = t.NSUID
+		m["name"] = t.name()
+		if full {
+			m["formal_name"] = t.name()
+		}
+	}
+	return m
+}
+
 func samuraiTitleJSON(a *samuraiApp, full bool) map[string]any {
 	m := map[string]any{
 		"id": a.NSUID, "public": true, "new": a.New,
@@ -331,6 +345,12 @@ func handleNinjaApps(w http.ResponseWriter, r *http.Request, path string, postFo
 	// owned_titles{total, owned_title[{id: ns_uid, title_id: hex}]}; a missing
 	// owned_titles is the generic 72001 (007-2001). Lists the base titles this
 	// player bought from us; Badge Arcade has none here.
+	// "Rate this software" upload after playing; we keep no ratings.
+	case path == "/ninja/ws/my/votable_titles/!put":
+		log.Printf("eshop apps: votable_titles/!put from %s form=%v", ip, postForm)
+		w.Write([]byte(`{}`))
+		return true
+
 	case path == "/ninja/ws/my/shared_titles":
 		owned := []any{}
 		if pid := fetchRealPID(r); pid != 0 {
