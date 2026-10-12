@@ -418,11 +418,11 @@ var casTitleIDRe = regexp.MustCompile(`<cas:TitleId>([0-9A-Fa-f]{16})</cas:Title
 // apps; ok is false when none of the asked titles is one. One <Titles> per
 // title, like ListItems' <Items> (nim's strings pair them the same way), fields
 // in nim's parse order: TitleId, Attributes, Prices (see the ListItems notes in
-// main.go - Prices before Attributes is never found). mint (FUN_001ec010)
-// rejects a title whose first price <Amount> is not "0", and reads the
-// Version and MaxUserFileSize attributes. MaxUserFileSize "0" marks the title
-// as not downloadable (FUN_0015eef0; it was 007-2001), so it carries the
-// content size.
+// main.go - Prices before Attributes is never found). The eShop (tiger,
+// FUN_0022ae24) takes the first price. (mint, Badge Arcade's purchase applet,
+// rejects a non-"0" <Amount> on its own free path - not the eShop.) It reads the
+// Version and MaxUserFileSize attributes as numbers; MaxUserFileSize carries
+// the content size (mint treats "0" as not downloadable).
 func casListTitlesEx(body []byte, deviceID, messageID string) (string, bool) {
 	cat, err := loadSamuraiCatalog()
 	if err != nil {
@@ -440,8 +440,8 @@ func casListTitlesEx(body []byte, deviceID, messageID string) (string, bool) {
 			version, size = int(ci.version), ci.contentSize()
 		}
 		n++
-		fmt.Fprintf(&titles, `<Titles><TitleId>%s</TitleId><Attributes><Name>Version</Name><Value>%d</Value></Attributes><Attributes><Name>MaxUserFileSize</Name><Value>%d</Value></Attributes><Prices><ItemId>%d</ItemId><Price><Amount>0</Amount><Currency>EUR</Currency></Price><LicenseKind>PERMANENT</LicenseKind></Prices></Titles>`,
-			strings.ToUpper(a.TitleID), version, size, a.NSUID)
+		fmt.Fprintf(&titles, `<Titles><TitleId>%s</TitleId><Attributes><Name>Version</Name><Value>%d</Value></Attributes><Attributes><Name>MaxUserFileSize</Name><Value>%d</Value></Attributes><Prices><ItemId>%d</ItemId><Price><Amount>%d</Amount><Currency>EUR</Currency></Price><LicenseKind>PERMANENT</LicenseKind></Prices></Titles>`,
+			strings.ToUpper(a.TitleID), version, size, a.NSUID, a.Price)
 	}
 	if n == 0 {
 		return "", false
