@@ -876,10 +876,11 @@ func wscTunnelRegion(via string) string {
 	return strings.ToUpper(via)
 }
 
-type WSCNatShameRow struct {
+type WSCShameRow struct {
 	PID          int64
 	PNID         string
 	BlockedUntil time.Time
+	Reason       string
 }
 
 type WSCDashData struct {
@@ -887,7 +888,7 @@ type WSCDashData struct {
 	Players    []WSCPlayerRow
 	Gatherings []WSCGatheringRow
 	Matches    []WSCMatchRow
-	NatShame   []WSCNatShameRow
+	Shame      []WSCShameRow
 }
 
 func lookupPNIDs(pids []int64) map[int64]string {
@@ -959,10 +960,11 @@ func fetchWSCStatus() WSCDashData {
 			Connection  string  `json:"connection"`
 			TunnelVia   string  `json:"tunnel_via"`
 		} `json:"matches"`
-		NatHallOfShame []struct {
-			PID          int64 `json:"pid"`
-			BlockedUntil int64 `json:"blocked_until"`
-		} `json:"nat_hall_of_shame"`
+		HallOfShame []struct {
+			PID          int64  `json:"pid"`
+			BlockedUntil int64  `json:"blocked_until"`
+			Reason       string `json:"reason"`
+		} `json:"connection_hall_of_shame"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		return data
@@ -985,7 +987,7 @@ func fetchWSCStatus() WSCDashData {
 			pidSet[p] = struct{}{}
 		}
 	}
-	for _, n := range raw.NatHallOfShame {
+	for _, n := range raw.HallOfShame {
 		pidSet[n.PID] = struct{}{}
 	}
 	pids := make([]int64, 0, len(pidSet))
@@ -1067,11 +1069,12 @@ func fetchWSCStatus() WSCDashData {
 		data.Matches = append(data.Matches, row)
 	}
 
-	for _, n := range raw.NatHallOfShame {
-		data.NatShame = append(data.NatShame, WSCNatShameRow{
+	for _, n := range raw.HallOfShame {
+		data.Shame = append(data.Shame, WSCShameRow{
 			PID:          n.PID,
 			PNID:         pnids[n.PID],
 			BlockedUntil: time.Unix(n.BlockedUntil, 0),
+			Reason:       n.Reason,
 		})
 	}
 	return data
@@ -1174,15 +1177,16 @@ tr:last-child td{border-bottom:none}
 <p style="color:#aaa;font-size:.9rem;margin-top:0" data-i18n="wsc.no_matches">No matches recorded yet.</p>
 {{end}}
 
-<h2><span data-i18n="wsc.shame">NAT Hall of Shame</span>{{if .NatShame}} <span style="background:#fee2e2;color:#991b1b;border-radius:999px;padding:.1rem .5rem;font-size:.75rem;font-weight:700;vertical-align:middle">{{len .NatShame}}</span>{{end}}</h2>
-{{if .NatShame}}
-<p style="color:#aaa;font-size:.85rem;margin-top:0" data-i18n="wsc.shame_desc">Players temporarily excluded from matchmaking after a failed NAT traversal attempt.</p>
+<h2><span data-i18n="wsc.shame">Connection Hall of Shame</span>{{if .Shame}} <span style="background:#fee2e2;color:#991b1b;border-radius:999px;padding:.1rem .5rem;font-size:.75rem;font-weight:700;vertical-align:middle">{{len .Shame}}</span>{{end}}</h2>
+{{if .Shame}}
+<p style="color:#aaa;font-size:.85rem;margin-top:0" data-i18n="wsc.shame_desc">Players temporarily excluded from matchmaking after a failed match setup.</p>
 <table>
-<tr><th>PNID</th><th>PID</th><th data-i18n="wsc.blocked_until">Blocked Until</th></tr>
-{{range .NatShame}}
+<tr><th>PNID</th><th>PID</th><th data-i18n="wsc.shame_reason">Reason</th><th data-i18n="wsc.blocked_until">Blocked Until</th></tr>
+{{range .Shame}}
 <tr>
   <td>{{if .PNID}}<strong>@{{.PNID}}</strong>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
   <td class="mono">{{.PID}}</td>
+  <td>{{.Reason}}</td>
   <td class="mono" style="white-space:nowrap">{{localTime .BlockedUntil "datetime-sec"}}</td>
 </tr>
 {{end}}
@@ -1346,7 +1350,7 @@ func apiWSCPlayers(w http.ResponseWriter, r *http.Request) {
 			pidSet[p.PID] = struct{}{}
 		}
 	}
-	for _, n := range data.NatShame {
+	for _, n := range data.Shame {
 		pidSet[n.PID] = struct{}{}
 	}
 	pids := make([]int64, 0, len(pidSet))
@@ -1375,17 +1379,18 @@ func apiWSCPlayers(w http.ResponseWriter, r *http.Request) {
 		ClubName    string       `json:"club_name,omitempty"`
 		Players     []PlayerJSON `json:"players"`
 	}
-	type NatShameJSON struct {
+	type ShameJSON struct {
 		PID          int64  `json:"pid"`
 		PNID         string `json:"pnid"`
 		MiiName      string `json:"mii_name,omitempty"`
 		BlockedUntil int64  `json:"blocked_until"` // unix seconds
+		Reason       string `json:"reason"`
 	}
 	type ResponseJSON struct {
 		ServerUp   bool            `json:"server_up"`
 		Players    []PlayerJSON    `json:"players"`
 		Gatherings []GatheringJSON `json:"gatherings"`
-		NatShame   []NatShameJSON  `json:"nat_hall_of_shame"`
+		Shame      []ShameJSON     `json:"connection_hall_of_shame"`
 	}
 
 	resp := ResponseJSON{ServerUp: data.ServerUp}
@@ -1423,12 +1428,13 @@ func apiWSCPlayers(w http.ResponseWriter, r *http.Request) {
 		}
 		resp.Gatherings = append(resp.Gatherings, gj)
 	}
-	for _, n := range data.NatShame {
-		resp.NatShame = append(resp.NatShame, NatShameJSON{
+	for _, n := range data.Shame {
+		resp.Shame = append(resp.Shame, ShameJSON{
 			PID:          n.PID,
 			PNID:         n.PNID,
 			MiiName:      miiNames[n.PID],
 			BlockedUntil: n.BlockedUntil.Unix(),
+			Reason:       n.Reason,
 		})
 	}
 	json.NewEncoder(w).Encode(resp)

@@ -124,6 +124,9 @@ func p2pOpen(gid, host uint32, existingOnly bool) *p2pTunnel {
 	if existingOnly && !had {
 		return nil
 	}
+	if _, limited := p2pLimited.Load(gid); limited && !had {
+		return nil // turned down by the rate limit: its consoles already have each other's real addresses
+	}
 	members := dbGetGatheringPlayers(gid)
 	ordered := []uint32{host}
 	for _, pid := range members {
@@ -161,6 +164,19 @@ func p2pOpen(gid, host uint32, existingOnly bool) *p2pTunnel {
 	if json.NewDecoder(resp.Body).Decode(&t) != nil || net.ParseIP(t.IP) == nil {
 		return nil
 	}
+	if !had {
+		if pid, n := p2pOverTunnelLimit(t.Ports); pid != 0 {
+			fmt.Printf("P2PTunnel: gid=%d not tunneled: PID=%d already had tunnels for %d matches in %s - direct instead\n", gid, pid, n, p2pTunnelWindow)
+			p2pClose(gid)
+			p2pLimited.Store(gid, time.Now())
+			return nil
+		}
+	}
+	var oldPorts map[uint32]int
+	if had {
+		oldPorts = old.(*p2pTunnel).Ports
+	}
+	p2pNoteTunnelUse(t.Ports, oldPorts)
 	t.at = time.Now()
 	p2pTunnels.Store(gid, &t)
 	if !had {
@@ -173,6 +189,75 @@ func p2pOpen(gid, host uint32, existingOnly bool) *p2pTunnel {
 		fmt.Printf("P2PTunnel: gid=%d via %s %s ports=%v (%s) hard=%v\n", gid, t.Instance, t.IP, t.Ports, t.Reason, hard)
 	}
 	return &t
+}
+
+// p2pClose tells the hub to drop a gathering's tunnel.
+func p2pClose(gid uint32) {
+	body, _ := json.Marshal(map[string]any{"key": p2pKey(gid)})
+	if resp, err := p2pHTTP.Post(edgeHubURL+"/p2p/close", "application/json", bytes.NewReader(body)); err == nil {
+		resp.Body.Close()
+	}
+}
+
+// ---- tunnel rate limit ------------------------------------------------------------------------
+//
+// A console gets tunnels for at most p2pTunnelLimit matches (gatherings) per p2pTunnelWindow.
+// A gathering that would take one of its consoles past that is not tunneled: its consoles try
+// to connect directly, as without a tunnel. Joining a gathering that already has a tunnel still
+// counts but is never refused - its other consoles already talk through it.
+
+const (
+	p2pTunnelLimit  = 3
+	p2pTunnelWindow = 15 * time.Minute
+)
+
+var (
+	p2pTunnelUseMu sync.Mutex
+	p2pTunnelUse   = map[uint32][]time.Time{} // pid -> when it got a tunnel for a new match
+	// p2pLimited: gatherings the rate limit kept direct; they stay direct.
+	p2pLimited sync.Map
+)
+
+// p2pTunnelUseLocked drops a pid's uses older than the window and returns the rest.
+func p2pTunnelUseLocked(pid uint32, now time.Time) []time.Time {
+	kept := p2pTunnelUse[pid][:0]
+	for _, at := range p2pTunnelUse[pid] {
+		if now.Sub(at) < p2pTunnelWindow {
+			kept = append(kept, at)
+		}
+	}
+	if len(kept) == 0 {
+		delete(p2pTunnelUse, pid)
+	} else {
+		p2pTunnelUse[pid] = kept
+	}
+	return kept
+}
+
+// p2pOverTunnelLimit returns a console of a new tunnel that already used up its tunnels, and
+// how many it had, or 0.
+func p2pOverTunnelLimit(ports map[uint32]int) (uint32, int) {
+	p2pTunnelUseMu.Lock()
+	defer p2pTunnelUseMu.Unlock()
+	now := time.Now()
+	for pid := range ports {
+		if n := len(p2pTunnelUseLocked(pid, now)); n >= p2pTunnelLimit {
+			return pid, n
+		}
+	}
+	return 0, 0
+}
+
+// p2pNoteTunnelUse counts a match for every console on the tunnel that was not on it before.
+func p2pNoteTunnelUse(ports, oldPorts map[uint32]int) {
+	p2pTunnelUseMu.Lock()
+	defer p2pTunnelUseMu.Unlock()
+	now := time.Now()
+	for pid := range ports {
+		if _, was := oldPorts[pid]; !was {
+			p2pTunnelUse[pid] = append(p2pTunnelUseLocked(pid, now), now)
+		}
+	}
 }
 
 // p2pAlias rewrites a station URL to the console's alias on the tunnel. The console's real NAT
@@ -208,6 +293,17 @@ func p2pJanitor() {
 			}
 			return true
 		})
+		p2pLimited.Range(func(k, v any) bool {
+			if time.Since(v.(time.Time)) > 4*time.Hour {
+				p2pLimited.Delete(k)
+			}
+			return true
+		})
+		p2pTunnelUseMu.Lock()
+		for pid := range p2pTunnelUse {
+			p2pTunnelUseLocked(pid, time.Now())
+		}
+		p2pTunnelUseMu.Unlock()
 	}
 }
 

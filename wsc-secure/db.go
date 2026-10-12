@@ -250,8 +250,8 @@ func dbFindGathering(gameMode uint32, requesterNatm uint32) uint32 {
 			continue
 		}
 		if isBlockedFromMatchmaking(host) {
-			// Host just failed NAT traversal and is serving out a matchmaking
-			// block - see natFailureBlockedUntil's doc comment. Their gathering
+			// Host's last match setup failed and they are serving out a matchmaking
+			// block - see matchSetupBlocked's doc comment. Their gathering
 			// is still legitimate (don't delete it), just not offered to other
 			// searchers for now.
 			skippedGids = append(skippedGids, int64(gid))

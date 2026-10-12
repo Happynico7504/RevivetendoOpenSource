@@ -712,33 +712,59 @@ func isInMatchStartGrace(pid uint32) bool {
 	return true
 }
 
-// natFailureBlockedUntil holds pids that just failed NAT traversal (typically a
-// symmetric NAT/strict firewall that can never hole-punch, not a one-off blip), and
-// when their matchmaking block expires. A player behind a NAT that can never
-// hole-punch would otherwise keep re-entering matchmaking, pairing with and wasting
-// the time of a new real opponent every attempt. Enforced in two places: a blocked
-// pid always gets its own solo gathering in handleAutoMatchmakeRaw rather than
-// joining a real waiting player, and dbFindGathering skips any candidate gathering
-// hosted by a currently-blocked pid - so blocked players are fully isolated from
-// real matchmaking in both directions without needing a client-visible rejection.
-var natFailureBlockedUntil sync.Map // uint32 pid → time.Time (block expiry)
+// matchSetupBlocked holds pids whose last match setup failed, why, and when their
+// matchmaking block expires (the dashboards' "Connection Hall of Shame"). Failures:
+// a failed NAT traversal (the reporter), a joiner leaving within 30s before the match
+// started (the joiner), a gathering nobody could connect to (its host, after 3 such
+// joiners in a row), and a player going stale mid-setup. A player whose setups keep
+// failing (often a symmetric NAT/strict firewall that can never hole-punch) would
+// otherwise keep re-entering matchmaking, pairing with and wasting the time of a new
+// real opponent every attempt. Enforced in two places: a blocked pid always gets its
+// own solo gathering in handleAutoMatchmakeRaw rather than joining a real waiting
+// player, and dbFindGathering skips any candidate gathering hosted by a
+// currently-blocked pid - so blocked players are fully isolated from real matchmaking
+// in both directions without needing a client-visible rejection.
+var matchSetupBlocked sync.Map // uint32 pid → setupBlock
 
-const natFailureBlockDuration = 15 * time.Minute
+type setupBlock struct {
+	until  time.Time
+	reason string
+}
 
-func blockFromMatchmaking(pid uint32) {
-	natFailureBlockedUntil.Store(pid, time.Now().Add(natFailureBlockDuration))
+const matchSetupBlockDuration = 15 * time.Minute
+
+// blockFromMatchmaking (re)starts pid's block. One failed setup often shows up twice (a failed
+// NAT traversal, then the joiner leaving), so a block still running keeps its first reason.
+func blockFromMatchmaking(pid uint32, reason string) {
+	if b, ok := matchSetupBlocked.Load(pid); ok && time.Now().Before(b.(setupBlock).until) {
+		reason = b.(setupBlock).reason
+	}
+	fmt.Printf("MatchSetupFailed: PID=%d (%s) — blocking from matchmaking for %s\n", pid, reason, matchSetupBlockDuration)
+	matchSetupBlocked.Store(pid, setupBlock{until: time.Now().Add(matchSetupBlockDuration), reason: reason})
 }
 
 func isBlockedFromMatchmaking(pid uint32) bool {
-	until, ok := natFailureBlockedUntil.Load(pid)
+	b, ok := matchSetupBlocked.Load(pid)
 	if !ok {
 		return false
 	}
-	if time.Now().After(until.(time.Time)) {
-		natFailureBlockedUntil.Delete(pid)
+	if time.Now().After(b.(setupBlock).until) {
+		matchSetupBlocked.Delete(pid)
 		return false
 	}
 	return true
+}
+
+// blockIfSetupFailed blocks pid when it drops out of a gathering of at least two players
+// whose match never started.
+func blockIfSetupFailed(pid, gid uint32, reason string) {
+	if gid == 0 {
+		return
+	}
+	if _, started := p2pStarted.Load(gid); started || len(dbGetGatheringPlayers(gid)) < 2 {
+		return
+	}
+	blockFromMatchmaking(pid, reason)
 }
 
 // stationPIDRe extracts the PID field from a PRUDP station string, e.g.
@@ -1014,6 +1040,7 @@ func watchStaleConnections() {
 				return true // a new packet landed - no longer stale, skip this cycle
 			}
 			fmt.Printf("StaleDisconnect: PID=%d idleFor=%s — cleaning up gatherings and session (PRUDP session itself untouched)\n", pid, idleFor.Round(time.Second))
+			blockIfSetupFailed(pid, dbFindGatheringForPID(pid), "dropped during match setup")
 			currentClient.Delete(pid)
 			connectedPIDs.Delete(pid)
 			pidConnectedAt.Delete(pid)
@@ -1076,9 +1103,10 @@ type wscMatchInfo struct {
 	TunnelVia   string  `json:"tunnel_via,omitempty"`
 }
 
-type wscNatShameInfo struct {
-	PID          int64 `json:"pid"`
-	BlockedUntil int64 `json:"blocked_until"` // unix seconds
+type wscShameInfo struct {
+	PID          int64  `json:"pid"`
+	BlockedUntil int64  `json:"blocked_until"` // unix seconds
+	Reason       string `json:"reason"`
 }
 
 type wscGatheringInfo struct {
@@ -1213,26 +1241,26 @@ func startStatusServer() {
 		}
 
 		now := time.Now()
-		var natShame []wscNatShameInfo
-		natFailureBlockedUntil.Range(func(k, v interface{}) bool {
-			until := v.(time.Time)
-			if now.After(until) {
-				natFailureBlockedUntil.Delete(k)
+		var shame []wscShameInfo
+		matchSetupBlocked.Range(func(k, v interface{}) bool {
+			b := v.(setupBlock)
+			if now.After(b.until) {
+				matchSetupBlocked.Delete(k)
 				return true
 			}
-			natShame = append(natShame, wscNatShameInfo{PID: int64(k.(uint32)), BlockedUntil: until.Unix()})
+			shame = append(shame, wscShameInfo{PID: int64(k.(uint32)), BlockedUntil: b.until.Unix(), Reason: b.reason})
 			return true
 		})
-		if natShame == nil {
-			natShame = []wscNatShameInfo{}
+		if shame == nil {
+			shame = []wscShameInfo{}
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"sessions":          sessions,
-			"gatherings":        gatherings,
-			"matches":           matches,
-			"nat_hall_of_shame": natShame,
+			"sessions":                 sessions,
+			"gatherings":               gatherings,
+			"matches":                  matches,
+			"connection_hall_of_shame": shame,
 		})
 	})
 	if err := http.ListenAndServe("127.0.0.1:9015", mux); err != nil {
@@ -2285,8 +2313,10 @@ func endParticipation(err error, client *nex.Client, callID uint32, gid uint32, 
 	// gathering so it doesn't trap new joiners with an unreachable host.
 	if rec, ok := playerJoinedAt.LoadAndDelete(client.PID()); ok {
 		jr := rec.(joinRecord)
-		if jr.gid == gid && time.Since(jr.when) < 30*time.Second {
-			p2pRecordFailure(gid, client.PID(), dbGetGatheringHost(gid))
+		if _, started := p2pStarted.Load(gid); jr.gid == gid && time.Since(jr.when) < 30*time.Second && !started {
+			host := dbGetGatheringHost(gid)
+			p2pRecordFailure(gid, client.PID(), host)
+			blockFromMatchmaking(client.PID(), "left during match setup")
 			n := 0
 			if v, loaded := gatheringFailCount.Load(gid); loaded {
 				n = v.(int)
@@ -2295,6 +2325,9 @@ func endParticipation(err error, client *nex.Client, callID uint32, gid uint32, 
 			if n >= 3 {
 				fmt.Printf("EndParticipation: gid=%d had %d consecutive quick-exits, closing\n", gid, n)
 				dbCloseGathering(gid)
+				if host != 0 && host != client.PID() {
+					blockFromMatchmaking(host, "nobody could connect to their match")
+				}
 				gatheringFailCount.Delete(gid)
 			} else {
 				gatheringFailCount.Store(gid, n)
@@ -2495,7 +2528,7 @@ func handleAutoMatchmakeRaw(packet *nex.PacketV1) {
 	fmt.Printf("AutoMatchmakeRaw: PID=%d gameMode=%d (sport=0x%02x) maxPlayers=%d natm=%d system=%q attribs=%q\n", client.PID(), gameMode, gameMode>>24, maxPlayers, natm, autoSystemType, autoAttribs)
 
 	// A player who just failed NAT traversal always gets a fresh solo gathering
-	// instead of searching for a real one to join - see natFailureBlockedUntil's
+	// instead of searching for a real one to join - see matchSetupBlocked's
 	// doc comment. dbFindGathering separately skips gatherings hosted BY a blocked
 	// pid, so this covers both directions.
 	var gid uint32
@@ -2911,8 +2944,7 @@ func reportNATTraversalResult(err error, client *nex.Client, callID uint32, cid 
 			gatheringFailCount.Delete(gid)
 		}
 	} else {
-		fmt.Printf("NAT traversal FAILED: PID=%d — blocking from matchmaking for %s\n", client.PID(), natFailureBlockDuration)
-		blockFromMatchmaking(client.PID())
+		blockFromMatchmaking(client.PID(), "NAT traversal failed")
 	}
 }
 
