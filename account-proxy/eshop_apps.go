@@ -51,6 +51,82 @@ type samuraiApp struct {
 	OwnerPID    uint32 `json:"owner_pid"` // seller: paid purchases are credited to this wallet; 0 = Revivetendo
 }
 
+// --- owned tickets ---
+//
+// Every app purchase is kept in eshop_app_tickets: the ticket id we returned
+// from !purchase, the title, the buyer's PID, and - once nim fetches the
+// ticket with AccountGetETickets - the console's ECS AccountId and DeviceId.
+// ECS then lists them as the account's owned tickets (<TIV>ticket.version</TIV>
+// in GetAccountStatus and AccountListETicketIds). Without that, a download the
+// player moved to sleep mode never continued: the background task checked in
+// with GetAccountStatus three times and gave up (2026-10-12). The table also
+// lets AccountGetETickets resolve tickets after an account-proxy restart (the
+// ninjaTicketTitle map is in memory only).
+
+const appTicketSchema = `CREATE TABLE IF NOT EXISTS eshop_app_tickets (
+	ticket_id   BIGINT      PRIMARY KEY,
+	title_id    TEXT        NOT NULL,
+	pid         BIGINT      NOT NULL DEFAULT 0,
+	account_id  TEXT        NOT NULL DEFAULT '',
+	device_id   TEXT        NOT NULL DEFAULT '',
+	created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS eshop_app_tickets_account ON eshop_app_tickets (account_id);
+CREATE INDEX IF NOT EXISTS eshop_app_tickets_device ON eshop_app_tickets (device_id);`
+
+var appTicketSchemaOnce sync.Once
+
+func appTicketsReady() {
+	appTicketSchemaOnce.Do(func() {
+		if _, err := db.Exec(appTicketSchema); err != nil {
+			log.Printf("eshop apps: ticket table: %v", err)
+		}
+	})
+}
+
+func appTicketRecordPurchase(ticket int64, titleID string, pid uint32) {
+	appTicketsReady()
+	if _, err := db.Exec(`INSERT INTO eshop_app_tickets (ticket_id, title_id, pid) VALUES ($1, $2, $3) ON CONFLICT (ticket_id) DO NOTHING`,
+		ticket, strings.ToUpper(titleID), int64(pid)); err != nil {
+		log.Printf("eshop apps: recording ticket %d: %v", ticket, err)
+	}
+}
+
+// appTicketTitle returns the title an app ticket was bought for, binding the
+// ticket to the console's ECS account and device on the way.
+func appTicketTitle(ticket int64, accountID, deviceID string) (string, bool) {
+	appTicketsReady()
+	var title string
+	if db.QueryRow(`UPDATE eshop_app_tickets SET account_id = $2, device_id = $3 WHERE ticket_id = $1 RETURNING title_id`,
+		ticket, accountID, deviceID).Scan(&title) != nil {
+		return "", false
+	}
+	return title, true
+}
+
+// appTicketTIVs lists the app tickets owned by this ECS account or device as
+// <TIV> elements (our tickets are version 0).
+func appTicketTIVs(accountID, deviceID string) string {
+	if accountID == "" && deviceID == "" {
+		return ""
+	}
+	appTicketsReady()
+	rows, err := db.Query(`SELECT ticket_id FROM eshop_app_tickets
+		WHERE (account_id <> '' AND account_id = $1) OR (device_id <> '' AND device_id = $2) ORDER BY ticket_id`, accountID, deviceID)
+	if err != nil {
+		return ""
+	}
+	defer rows.Close()
+	var sb strings.Builder
+	for rows.Next() {
+		var t int64
+		if rows.Scan(&t) == nil {
+			fmt.Fprintf(&sb, "<TIV>%d.0</TIV>", t)
+		}
+	}
+	return sb.String()
+}
+
 // samuraiAppsDirID is the directory (channel) mint shows the apps in.
 const samuraiAppsDirID = 9000
 
@@ -289,6 +365,7 @@ func handleNinjaApps(w http.ResponseWriter, r *http.Request, path string, postFo
 			log.Printf("eshop apps: PID %d bought %s for %d coins, balance %d", pid, a.Name, price, bal)
 		}
 		ninjaTicketTitle.Store(ticket, a.TitleID)
+		appTicketRecordPurchase(ticket, a.TitleID, fetchRealPID(r))
 		log.Printf("eshop apps: !purchase %d (%s) from %s form=%v -> ticket %d", id, a.Name, ip, postForm, ticket)
 		fmt.Fprintf(w, `{"transaction_result":{"transaction_id":"%d","ticket_id":%d,"post_balance":%s}}`, ticket, ticket, ninjaBalanceJSON(bal))
 		return true
