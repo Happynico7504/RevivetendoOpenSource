@@ -536,8 +536,13 @@ func myVideosChannelSubmit(w http.ResponseWriter, r *http.Request) {
 		videoError(w, http.StatusTooManyRequests, "vid.err_rate", "Too many uploads, please try again later.")
 		return
 	}
-	tmp, err := os.MkdirTemp("", "rvt-channel-*")
+	// Convert next to the submissions so the finished images can be renamed
+	// into place (/tmp is another filesystem).
+	parent := filepath.Join(videoRoot, "channel-submissions")
+	os.MkdirAll(parent, 0o755)
+	tmp, err := os.MkdirTemp(parent, ".tmp-*")
 	if err != nil {
+		log.Printf("videos: channel submit temp dir: %v", err)
 		videoError(w, http.StatusInternalServerError, "vid.err_generic", "Something went wrong, please try again.")
 		return
 	}
