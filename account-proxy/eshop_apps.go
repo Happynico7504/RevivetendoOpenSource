@@ -118,7 +118,7 @@ func (c *samuraiCatalog) titleByTitleID(tid string) *shopTitle {
 
 func (t *shopTitle) name() string {
 	if t.IsUpdate {
-		return t.App.Name + " (update)"
+		return t.App.Name + " Update"
 	}
 	return t.App.Name
 }
@@ -244,8 +244,12 @@ func samuraiAppsDirectory(cat *samuraiCatalog) map[string]any {
 func samuraiAppsDirectoryContents(cat *samuraiCatalog) map[string]any {
 	d := samuraiAppsDirectory(cat)
 	contents := []any{}
-	for i := range cat.Apps {
-		contents = append(contents, map[string]any{"index": len(contents) + 1, "title": samuraiTitleJSON(&cat.Apps[i], false)})
+	// Updates are shop entries of their own, right after their app, like on
+	// Nintendo's eShop: that is where a player gets a newer update for an app
+	// that already has one installed (the eShop only offers an update by
+	// itself after downloading an app without one).
+	for _, t := range cat.shopTitles() {
+		contents = append(contents, map[string]any{"index": len(contents) + 1, "title": samuraiShopTitleJSON(t, false)})
 	}
 	d["component"] = "title"
 	d["contents"] = map[string]any{"content": contents, "length": len(contents), "offset": 0, "total": len(contents)}
