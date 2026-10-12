@@ -31,8 +31,6 @@ func registerVideosAdmin() {
 	http.HandleFunc("/admin/videos/", requireClientCert(adminVideos))
 	http.HandleFunc("/admin/videos/review", requireClientCert(adminVideosReview))
 	http.HandleFunc("/admin/videos/media/", requireClientCert(adminVideosMedia))
-	http.HandleFunc("/admin/videos/channel", requireClientCert(adminVideosChannel))
-	http.HandleFunc("/admin/videos/chimg/", requireClientCert(adminVideosChannelImage))
 }
 
 type videoChannel struct {
