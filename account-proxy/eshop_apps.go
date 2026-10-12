@@ -48,6 +48,7 @@ type samuraiApp struct {
 	Price       int    `json:"price"`  // RevivetendoCoins, 0 = free
 	CIA         string `json:"cia"`    // file in eshop-video/apps/
 	New         bool   `json:"new"`
+	OwnerPID    uint32 `json:"owner_pid"` // seller: paid purchases are credited to this wallet; 0 = Revivetendo
 }
 
 // samuraiAppsDirID is the directory (channel) mint shows the apps in.
@@ -257,22 +258,36 @@ func handleNinjaApps(w http.ResponseWriter, r *http.Request, path string, postFo
 			return false
 		}
 		bal := ninjaCoinDaily
+		ticket := time.Now().UnixNano() / 1000
 		if pid := fetchRealPID(r); pid != 0 {
+			price := a.Price
+			if pid == a.OwnerPID {
+				price = 0 // sellers get their own titles for free
+			}
 			var ok bool
-			if a.Price > 0 {
-				bal, ok = walletSpend(pid, a.Price)
+			if price > 0 {
+				bal, ok = walletSpend(pid, price)
 				if !ok {
-					log.Printf("eshop apps: purchase of %s REFUSED for PID %d: %d coins needed, balance %d", a.Name, pid, a.Price, bal)
+					log.Printf("eshop apps: purchase of %s REFUSED for PID %d: %d coins needed, balance %d", a.Name, pid, price, bal)
 					w.WriteHeader(http.StatusBadRequest)
 					w.Write([]byte(`{"error":{"code":"3001","message":"insufficient balance"}}`))
 					return true
 				}
+				// Earnings go to the seller in full and are not limited by the
+				// 500-coin cap (that only stops the free daily grant). The ticket
+				// id as ref makes the credit happen once per purchase.
+				if a.OwnerPID != 0 {
+					if sbal, applied, err := walletAdjust(a.OwnerPID, price, nil, "sale "+a.TitleID, fmt.Sprintf("sale:%d", ticket)); err != nil {
+						log.Printf("eshop apps: crediting seller %d for %s: %v", a.OwnerPID, a.Name, err)
+					} else if applied {
+						log.Printf("eshop apps: seller %d earned %d coins for %s, balance %d", a.OwnerPID, price, a.Name, sbal)
+					}
+				}
 			} else {
 				bal = walletBalance(pid)
 			}
-			log.Printf("eshop apps: PID %d bought %s for %d coins, balance %d", pid, a.Name, a.Price, bal)
+			log.Printf("eshop apps: PID %d bought %s for %d coins, balance %d", pid, a.Name, price, bal)
 		}
-		ticket := time.Now().UnixNano() / 1000
 		ninjaTicketTitle.Store(ticket, a.TitleID)
 		log.Printf("eshop apps: !purchase %d (%s) from %s form=%v -> ticket %d", id, a.Name, ip, postForm, ticket)
 		fmt.Fprintf(w, `{"transaction_result":{"transaction_id":"%d","ticket_id":%d,"post_balance":%s}}`, ticket, ticket, ninjaBalanceJSON(bal))
