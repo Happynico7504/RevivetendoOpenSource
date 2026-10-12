@@ -81,6 +81,7 @@ type samuraiCatalog struct {
 	About    string           `json:"about"`
 	Channels []samuraiChannel `json:"channels"`
 	Videos   []samuraiVideo   `json:"videos"`
+	Apps     []samuraiApp     `json:"apps"` // homebrew titles, see eshop_apps.go
 }
 
 type samuraiNews struct {
@@ -222,6 +223,11 @@ func handleSamurai(w http.ResponseWriter, r *http.Request) {
 				"description": ch.Description,
 			})
 		}
+		if len(cat.Apps) > 0 {
+			d := samuraiAppsDirectory(cat)
+			d["index"] = len(dirs) + 1
+			dirs = append(dirs, d)
+		}
 		out = map[string]any{"directories": map[string]any{"directory": dirs, "length": len(dirs), "catalog_id": 1}}
 
 	case "directory":
@@ -229,6 +235,10 @@ func handleSamurai(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		id, _ := strconv.ParseInt(endpoint[1], 10, 64)
+		if id == samuraiAppsDirID && len(cat.Apps) > 0 {
+			out = samuraiAppsDirectoryContents(cat)
+			break
+		}
 		for _, ch := range cat.Channels {
 			if ch.ID != id {
 				continue
@@ -260,6 +270,16 @@ func handleSamurai(w http.ResponseWriter, r *http.Request) {
 		id, _ := strconv.ParseInt(endpoint[1], 10, 64)
 		if v := cat.video(id); v != nil {
 			out = map[string]any{"movie": samuraiMovieJSON(v)}
+		}
+
+	case "title":
+		if len(endpoint) < 2 {
+			break
+		}
+		id, _ := strconv.ParseInt(endpoint[1], 10, 64)
+		if a := cat.appByNSUID(id); a != nil {
+			log.Printf("eshop apps: title page %d (%s) from %s", id, a.Name, ip)
+			out = map[string]any{"title": samuraiTitleJSON(a, true)}
 		}
 
 	// Search screen. Shapes from archived samurai.ctr.shop.nintendo.net XML (genres

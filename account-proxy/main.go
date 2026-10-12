@@ -7209,6 +7209,9 @@ func handleNinjaShop(w http.ResponseWriter, r *http.Request) {
 		captureShopRequest("ninja", r, b)
 		postForm, _ = url.ParseQuery(string(b))
 	}
+	if handleNinjaApps(w, r, path, postForm, ip) {
+		return
+	}
 
 	switch {
 	case path == "/ninja/ws/service_hosts":
@@ -7735,6 +7738,10 @@ func nusExperimentStatus(deviceID, method string) int {
 }
 
 func handleNUSShop(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/ccs/") {
+		serveCCS(w, r)
+		return
+	}
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "read error", http.StatusInternalServerError)
