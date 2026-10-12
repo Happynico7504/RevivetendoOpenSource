@@ -138,6 +138,7 @@ var (
 	ninjaAppPurchaseRe = regexp.MustCompile(`^/ninja/ws/[^/]*/title/(\d+)/!purchase$`)
 	ninjaAppPrepurchRe = regexp.MustCompile(`^/ninja/ws/[^/]*/title/(\d+)/prepurchase_info$`)
 	ninjaECInfoRe      = regexp.MustCompile(`^/ninja/ws/[^/]*/titles/ec_info$`)
+	ninjaTitleECInfoRe = regexp.MustCompile(`^/ninja/ws/[^/]*/title/(\d+)/ec_info$`)
 	ninjaOnlinePriceRe = regexp.MustCompile(`^/ninja/ws/[^/]*/titles/online_prices$`)
 )
 
@@ -188,6 +189,24 @@ func handleNinjaApps(w http.ResponseWriter, r *http.Request, path string, postFo
 		}
 		log.Printf("eshop apps: ec_info %v from %s", q["ns_uid[]"], ip)
 		fmt.Fprintf(w, `{"title_ec_infos":{"title_ec_info":%s}}`, mustJSON(infos))
+		return true
+
+	// The title page asks for one title at a time. No parser for this one is in
+	// code.bin (the page lives in a module we have not dumped): same fields as
+	// titles/ec_info, unwrapped, plus disable_download. Unhandled, it was 011-2500.
+	case ninjaTitleECInfoRe.MatchString(path):
+		id, _ := strconv.ParseInt(ninjaTitleECInfoRe.FindStringSubmatch(path)[1], 10, 64)
+		a := cat.appByNSUID(id)
+		if a == nil {
+			return false
+		}
+		ci, err := loadAppCIA(a)
+		if err != nil {
+			log.Printf("eshop apps: ec_info %d: %v", id, err)
+			return false
+		}
+		log.Printf("eshop apps: title ec_info %d from %s", id, ip)
+		fmt.Fprintf(w, `{"title_ec_info":{"title_id":"%s","title_version":%d,"content_size":%d,"disable_download":false}}`, strings.ToUpper(a.TitleID), ci.version, ci.contentSize())
 		return true
 
 	case ninjaOnlinePriceRe.MatchString(path):
