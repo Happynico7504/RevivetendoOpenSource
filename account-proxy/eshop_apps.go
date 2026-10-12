@@ -148,16 +148,14 @@ func (c *samuraiCatalog) appByTitleID(tid string) *samuraiApp {
 	return nil
 }
 
+// samuraiAppsDirectory is the Apps channel. Its artwork is our own
+// (custom-tools/eshop-art/make_art.py, same style as Revivetendo TV in blue).
 func samuraiAppsDirectory(cat *samuraiCatalog) map[string]any {
-	icon, banner := "", ""
-	if len(cat.Apps) > 0 {
-		icon, banner = cat.Apps[0].Icon, cat.Apps[0].Banner
-	}
 	return map[string]any{
 		"id": samuraiAppsDirID, "type": "normal", "standard": false, "new": true,
 		"name": "Apps", "description": "Homebrew from the Revivetendo community",
-		"icon_url": samuraiMediaURL(icon), "icon_width": 102, "icon_height": 76,
-		"banner_url": samuraiMediaURL(banner),
+		"icon_url": samuraiMediaURL("i/apps-channel-icon.jpg"), "icon_width": 102, "icon_height": 76,
+		"banner_url": samuraiMediaURL("i/apps-channel-banner.jpg"),
 	}
 }
 
