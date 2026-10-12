@@ -8041,6 +8041,12 @@ func handleCAS(w http.ResponseWriter, r *http.Request) {
 	// <Attributes>, looking for Attributes first walks the cursor past Prices before nim ever
 	// looks for it. Reordered to put <Prices> after <Attributes>, matching nim's internal check
 	// order instead of guessing at content formatting.
+	if method.XMLName.Local == "ListTitlesEx" {
+		if resp, ok := casListTitlesEx(body, deviceID, messageID); ok {
+			w.Write([]byte(resp))
+			return
+		}
+	}
 	if method.XMLName.Local == "ListItems" {
 		titleID := soapFieldValue(method.Fields, "TitleId")
 		if titleID == "" {

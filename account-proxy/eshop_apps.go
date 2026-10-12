@@ -401,3 +401,40 @@ func mustJSON(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
 }
+
+var casTitleIDRe = regexp.MustCompile(`<cas:TitleId>([0-9A-Fa-f]{16})</cas:TitleId>`)
+
+// casListTitlesEx answers mint's CAS ListTitlesEx (sent through nim) for our
+// apps; ok is false when none of the asked titles is one. One <Titles> per
+// title, like ListItems' <Items> (nim's strings pair them the same way), fields
+// in nim's parse order: TitleId, Attributes, Prices (see the ListItems notes in
+// main.go - Prices before Attributes is never found). mint (FUN_001ec010)
+// rejects a title whose first price <Amount> is not "0", and reads the
+// Version and MaxUserFileSize attributes ("0" = no save data).
+func casListTitlesEx(body []byte, deviceID, messageID string) (string, bool) {
+	cat, err := loadSamuraiCatalog()
+	if err != nil {
+		return "", false
+	}
+	var titles strings.Builder
+	n := 0
+	for _, m := range casTitleIDRe.FindAllStringSubmatch(string(body), -1) {
+		a := cat.appByTitleID(m[1])
+		if a == nil {
+			continue
+		}
+		version := 0
+		if ci, err := loadAppCIA(a); err == nil {
+			version = int(ci.version)
+		}
+		n++
+		fmt.Fprintf(&titles, `<Titles><TitleId>%s</TitleId><Attributes><Name>Version</Name><Value>%d</Value></Attributes><Attributes><Name>MaxUserFileSize</Name><Value>0</Value></Attributes><Prices><ItemId>%d</ItemId><Price><Amount>0</Amount><Currency>EUR</Currency></Price><LicenseKind>PERMANENT</LicenseKind></Prices></Titles>`,
+			strings.ToUpper(a.TitleID), version, a.NSUID)
+	}
+	if n == 0 {
+		return "", false
+	}
+	log.Printf("eshop apps: CAS ListTitlesEx -> %d title(s)", n)
+	return fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><soapenv:Body><ListTitlesExResponse xmlns="urn:cas.wsapi.broadon.com"><Version>2.0</Version><DeviceId>%s</DeviceId><MessageId>%s</MessageId><TimeStamp>%d</TimeStamp><ErrorCode>0</ErrorCode><ListResultTotalSize>%d</ListResultTotalSize>%s</ListTitlesExResponse></soapenv:Body></soapenv:Envelope>`,
+		deviceID, messageID, time.Now().UnixMilli(), n, titles.String()), true
+}
