@@ -185,8 +185,8 @@ func videoSyncCatalog() error {
 		// lists these videos on its "Downloadable videos" channel.
 		if l.download == "free" || l.download == "paid" {
 			entry["download"] = map[string]any{"mode": l.download, "price": l.price}
-			if videoTitleBuilt(l.id) {
-				apps = append(apps, videoTitleCatalogEntry(l.id, l.pid, l.title, desc, l.uploader, l.download, l.price))
+			if e := videoTitleCatalogEntry(l.id, l.pid, l.title, desc, l.uploader, l.download, l.price); e != nil {
+				apps = append(apps, e)
 			}
 		}
 		videos = append(videos, entry)

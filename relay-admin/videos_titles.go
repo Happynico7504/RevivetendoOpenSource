@@ -11,11 +11,17 @@ package main
 //
 // No compiling: makerom and bannertool (/home/nico/custom-tools/dkp-local-bin)
 // put the fixed player program together with the per-video RomFS and
-// metadata. A title is (re)built when it is missing or anything that goes into
-// it changed - the video, its pictures, name or uploader, or the player
-// files - which a hash in apps/video-<id>.json records. The check only needs
-// S3 ETags, so it runs on every catalog sync (an approval, a download option,
-// an edit) and once at startup.
+// metadata. The first build is the base title (version 0), which then never
+// changes. When anything that goes into a title changes later - the video,
+// its pictures, name or uploader, or the player files - the next revision is
+// built as an update title (0004000E, version 1024 + revision), so consoles
+// that have the video get the change the way 3DS updates work. A hash of the
+// inputs in apps/video-<id>.json says what is built. The check only needs S3
+// ETags, so it runs on every catalog sync (an approval, a download option, an
+// edit) and once at startup.
+//
+// The unique ids stay below 0xF8000: NS only applies updates to unique ids up
+// to 0xF7FFF (or 0xFF000-0xFF3FF) without the Nimbus NS patch.
 
 import (
 	"context"
@@ -35,26 +41,36 @@ import (
 )
 
 const (
-	// Title unique id videoTitleUIDBase + video id (title 00040000 0FA..00);
-	// store id videoTitleNSUIDBase + video id.
-	videoTitleUIDBase   = 0xFA000
-	videoTitleMaxID     = 0x4FFF // keeps the unique id below 0xFF000
-	videoTitleNSUIDBase = 50010099200000
-	// Part of every build hash: bump it to rebuild every title after changing
-	// how titles are built.
-	videoTitleBuildVersion = "1"
+	// Title unique id videoTitleUIDBase + video id (base 00040000 0F4..00,
+	// update 0004000E 0F4..00); store ids NSUID base + video id.
+	videoTitleUIDBase         = 0xF4000
+	videoTitleMaxID           = 0x3FFF // keeps the unique id at most 0xF7FFF
+	videoTitleNSUIDBase       = 50010099200000
+	videoTitleUpdateNSUIDBase = 50010099300000
+	// Part of every build hash: bump it to rebuild every title (as an update)
+	// after changing how titles are built.
+	videoTitleBuildVersion = "2"
+	// Older update CIAs kept for consoles that still have that version (the
+	// eShop fetches the installed version's TMD).
+	videoTitleKeepOldUpdates = 2
 )
 
+func videoTitleUID(id int64) int64 { return videoTitleUIDBase + id }
+
 func videoTitleID(id int64) string {
-	return fmt.Sprintf("00040000%08X", uint32(videoTitleUIDBase+id)<<8)
+	return fmt.Sprintf("00040000%08X", uint32(videoTitleUID(id))<<8)
 }
 
-func videoTitleCIA(id int64) string { return "video-" + strconv.FormatInt(id, 10) + ".cia" }
-
-func videoTitleIcon(id int64) string   { return "i/video-" + strconv.FormatInt(id, 10) + "-icon.jpg" }
-func videoTitleBanner(id int64) string { return "i/video-" + strconv.FormatInt(id, 10) + "-banner.jpg" }
+func videoTitleIDName(id int64) string { return "video-" + strconv.FormatInt(id, 10) }
+func videoTitleCIA(id int64) string    { return videoTitleIDName(id) + ".cia" }
+func videoTitleUpdateCIA(id int64, rev int) string {
+	return fmt.Sprintf("%s-update-v%d.cia", videoTitleIDName(id), 1024+rev)
+}
+func videoTitleIcon(id int64) string   { return "i/" + videoTitleIDName(id) + "-icon.jpg" }
+func videoTitleBanner(id int64) string { return "i/" + videoTitleIDName(id) + "-banner.jpg" }
 
 func videoPlayerDir() string { return filepath.Join(videoRoot, "player") }
+func videoAppsDir() string   { return filepath.Join(videoRoot, "apps") }
 
 func videoDkpTool(name string) string {
 	dir := os.Getenv("VIDEO_DKP_BIN")
@@ -64,11 +80,43 @@ func videoDkpTool(name string) string {
 	return filepath.Join(dir, name)
 }
 
-// videoTitleBuilt reports whether the title's CIA exists (what the catalog
-// lists).
-func videoTitleBuilt(id int64) bool {
-	_, err := os.Stat(filepath.Join(videoRoot, "apps", videoTitleCIA(id)))
-	return err == nil
+// videoTitleState is apps/video-<id>.json: what is built for a video.
+type videoTitleState struct {
+	TitleID    string    `json:"title_id"`
+	Hash       string    `json:"hash"`     // inputs of the newest build
+	Revision   int       `json:"revision"` // 0 = base only, n = update version 1024+n
+	Update     string    `json:"update,omitempty"`
+	OldUpdates []string  `json:"old_updates,omitempty"`
+	BuiltAt    time.Time `json:"built_at"`
+}
+
+func videoTitleSidecar(id int64) string {
+	return filepath.Join(videoAppsDir(), videoTitleIDName(id)+".json")
+}
+
+func videoTitleLoad(id int64) (videoTitleState, bool) {
+	var s videoTitleState
+	raw, err := os.ReadFile(videoTitleSidecar(id))
+	if err != nil || json.Unmarshal(raw, &s) != nil {
+		return s, false
+	}
+	// Built for another title id (an earlier unique id range): start over.
+	if s.TitleID != videoTitleID(id) {
+		return videoTitleState{}, false
+	}
+	if _, err := os.Stat(filepath.Join(videoAppsDir(), videoTitleCIA(id))); err != nil {
+		return videoTitleState{}, false
+	}
+	return s, true
+}
+
+func videoTitleSave(id int64, s videoTitleState) error {
+	raw, _ := json.MarshalIndent(s, "", "  ")
+	tmp := videoTitleSidecar(id) + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, videoTitleSidecar(id))
 }
 
 var videoTitleKick = make(chan struct{}, 1)
@@ -122,15 +170,46 @@ func videoTitlesBuildAll() {
 			log.Printf("video titles: #%d: %v", j.id, err)
 			continue
 		}
-		if videoTitleBuilt(j.id) && videoTitleStoredHash(j.id) == hash {
+		state, ok := videoTitleLoad(j.id)
+		if ok && state.Hash == hash {
 			continue
 		}
 		start := time.Now()
-		if err := videoTitleBuild(j, hash); err != nil {
-			log.Printf("video titles: #%d build failed: %v", j.id, err)
+		if !ok {
+			// First build: the base title.
+			if err := videoTitleBuild(j, -1, filepath.Join(videoAppsDir(), videoTitleCIA(j.id))); err != nil {
+				log.Printf("video titles: #%d build failed: %v", j.id, err)
+				continue
+			}
+			state = videoTitleState{TitleID: videoTitleID(j.id), Hash: hash}
+			log.Printf("video titles: #%d %q built as %s in %s", j.id, j.title, state.TitleID, time.Since(start).Round(time.Millisecond))
+		} else {
+			// A change: the next revision as an update.
+			rev := state.Revision + 1
+			if rev > 1023 {
+				log.Printf("video titles: #%d has no update versions left", j.id)
+				continue
+			}
+			name := videoTitleUpdateCIA(j.id, rev)
+			if err := videoTitleBuild(j, rev, filepath.Join(videoAppsDir(), name)); err != nil {
+				log.Printf("video titles: #%d update build failed: %v", j.id, err)
+				continue
+			}
+			if state.Update != "" {
+				state.OldUpdates = append(state.OldUpdates, state.Update)
+			}
+			for len(state.OldUpdates) > videoTitleKeepOldUpdates {
+				os.Remove(filepath.Join(videoAppsDir(), state.OldUpdates[0]))
+				state.OldUpdates = state.OldUpdates[1:]
+			}
+			state.Revision, state.Update, state.Hash = rev, name, hash
+			log.Printf("video titles: #%d %q update v%d built in %s", j.id, j.title, 1024+rev, time.Since(start).Round(time.Millisecond))
+		}
+		state.BuiltAt = time.Now().UTC()
+		if err := videoTitleSave(j.id, state); err != nil {
+			log.Printf("video titles: #%d: %v", j.id, err)
 			continue
 		}
-		log.Printf("video titles: #%d %q built as %s in %s", j.id, j.title, videoTitleID(j.id), time.Since(start).Round(time.Millisecond))
 		built++
 	}
 	if built > 0 {
@@ -177,6 +256,8 @@ func videoFetchFile(id int64, name, dst string) error {
 	return c.FGetObject(context.Background(), videoS3Bucket, videoS3Key(id, name), dst, minio.GetObjectOptions{})
 }
 
+var videoPlayerFiles = []string{"moflex-player.elf", "video-title.rsf", "video-update.rsf", "chime.wav", "fix_update_cia.py"}
+
 func videoTitleHash(j videoTitleJob) (string, error) {
 	h := sha256.New()
 	fmt.Fprintf(h, "v%s\x00%d\x00%s\x00%s\x00%s\x00", videoTitleBuildVersion, j.id, j.title, j.uploader, j.kind)
@@ -187,7 +268,7 @@ func videoTitleHash(j videoTitleJob) (string, error) {
 		}
 		fmt.Fprintf(h, "%s=%s\x00", name, stamp)
 	}
-	for _, name := range []string{"moflex-player.elf", "video-title.rsf", "chime.wav"} {
+	for _, name := range videoPlayerFiles {
 		f, err := os.Open(filepath.Join(videoPlayerDir(), name))
 		if err != nil {
 			return "", err
@@ -198,23 +279,9 @@ func videoTitleHash(j videoTitleJob) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func videoTitleSidecar(id int64) string {
-	return filepath.Join(videoRoot, "apps", "video-"+strconv.FormatInt(id, 10)+".json")
-}
-
-func videoTitleStoredHash(id int64) string {
-	raw, err := os.ReadFile(videoTitleSidecar(id))
-	if err != nil {
-		return ""
-	}
-	var s struct {
-		Hash string `json:"hash"`
-	}
-	json.Unmarshal(raw, &s)
-	return s.Hash
-}
-
-func videoTitleBuild(j videoTitleJob, hash string) error {
+// videoTitleBuild builds the base title (rev < 0) or update revision rev into
+// out, and installs the eShop icon and banner.
+func videoTitleBuild(j videoTitleJob, rev int, out string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	work, err := os.MkdirTemp(videoRoot, ".title-build-")
@@ -276,33 +343,49 @@ func videoTitleBuild(j videoTitleJob, hash string) error {
 		"-a", filepath.Join(videoPlayerDir(), "chime.wav"), "-o", bnr); err != nil {
 		return err
 	}
-	uid := videoTitleUIDBase + j.id
+	uid := videoTitleUID(j.id)
+	rsf := "video-title.rsf"
+	var version []string
+	if rev >= 0 {
+		// Update: Category Patch, version 1024 + rev (major 1).
+		rsf = "video-update.rsf"
+		version = []string{"-major", "1", "-minor", strconv.Itoa(rev >> 4), "-micro", strconv.Itoa(rev & 15)}
+	}
 	cia := filepath.Join(work, "title.cia")
-	if err := videoRun(ctx, videoDkpTool("makerom"), "-f", "cia", "-target", "t", "-exefslogo", "-o", cia,
-		"-elf", filepath.Join(videoPlayerDir(), "moflex-player.elf"), "-rsf", filepath.Join(videoPlayerDir(), "video-title.rsf"),
+	args := []string{"-f", "cia", "-target", "t", "-exefslogo", "-o", cia,
+		"-elf", filepath.Join(videoPlayerDir(), "moflex-player.elf"), "-rsf", filepath.Join(videoPlayerDir(), rsf),
 		"-icon", smdh, "-banner", bnr,
-		"-DAPP_ROMFS="+romfs, "-DAPP_TITLE=rvtvideo",
-		fmt.Sprintf("-DAPP_PRODUCT_CODE=CTR-N-V%05X", uid), fmt.Sprintf("-DAPP_UNIQUE_ID=0x%X", uid)); err != nil {
+		"-DAPP_ROMFS=" + romfs, "-DAPP_TITLE=rvtvideo",
+		fmt.Sprintf("-DAPP_PRODUCT_CODE=CTR-N-V%05X", uid), fmt.Sprintf("-DAPP_UNIQUE_ID=0x%X", uid)}
+	if err := videoRun(ctx, videoDkpTool("makerom"), append(args, version...)...); err != nil {
 		return err
 	}
+	if rev >= 0 {
+		// The update's exheader must carry the base's program id, or the
+		// system keeps running the base.
+		fixed := filepath.Join(work, "update.cia")
+		if err := videoRun(ctx, "python3", "-I", filepath.Join(videoPlayerDir(), "fix_update_cia.py"), cia, fixed); err != nil {
+			return err
+		}
+		cia = fixed
+	}
 
-	// Install: pictures first, then the CIA (what the catalog checks), then
-	// the hash.
 	media := filepath.Join(videoRoot, "media")
 	for src, dst := range map[string]string{shopIcon: videoTitleIcon(j.id), shopBanner: videoTitleBanner(j.id)} {
 		if err := os.Rename(src, filepath.Join(media, dst)); err != nil {
 			return err
 		}
 	}
-	if err := os.Rename(cia, filepath.Join(videoRoot, "apps", videoTitleCIA(j.id))); err != nil {
-		return err
-	}
-	raw, _ := json.Marshal(map[string]any{"hash": hash, "title_id": videoTitleID(j.id), "built_at": time.Now().UTC()})
-	return os.WriteFile(videoTitleSidecar(j.id), raw, 0o644)
+	return os.Rename(cia, out)
 }
 
-// videoTitleCatalogEntry is the catalog "apps" entry for a built title.
+// videoTitleCatalogEntry is the catalog "apps" entry for a video's title, or
+// nil while none is built.
 func videoTitleCatalogEntry(id, pid int64, title, desc, uploader, mode string, price int) map[string]any {
+	state, ok := videoTitleLoad(id)
+	if !ok {
+		return nil
+	}
 	publisher := uploader
 	if publisher == "" {
 		publisher = "Revivetendo"
@@ -310,11 +393,19 @@ func videoTitleCatalogEntry(id, pid int64, title, desc, uploader, mode string, p
 	if mode != "paid" {
 		price = 0
 	}
-	return map[string]any{
-		"ns_uid": videoTitleNSUIDBase + id, "title_id": videoTitleID(id),
+	e := map[string]any{
+		"ns_uid": videoTitleNSUIDBase + id, "title_id": state.TitleID,
 		"name": title, "description": desc, "publisher": publisher,
 		"icon": videoTitleIcon(id), "banner": videoTitleBanner(id),
 		"price": price, "cia": videoTitleCIA(id), "new": true,
 		"owner_pid": pid, "video_id": id,
 	}
+	if state.Update != "" {
+		old := state.OldUpdates
+		if old == nil {
+			old = []string{}
+		}
+		e["update"] = map[string]any{"ns_uid": videoTitleUpdateNSUIDBase + id, "cia": state.Update, "old_cias": old}
+	}
+	return e
 }
