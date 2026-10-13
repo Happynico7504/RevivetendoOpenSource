@@ -394,8 +394,14 @@ func handleNinjaApps(w http.ResponseWriter, r *http.Request, path string, postFo
 	switch {
 	case path == "/ninja/ws/titles/id_pair":
 		pairs := []any{}
-		for _, tid := range q["title_id[]"] {
-			if t := cat.titleByTitleID(tid); t != nil {
+		// The Updates screen asks for every installed title's update id at
+		// once, comma-separated in one title_id[] value.
+		var tids []string
+		for _, v := range q["title_id[]"] {
+			tids = append(tids, strings.Split(v, ",")...)
+		}
+		for _, tid := range tids {
+			if t := cat.titleByTitleID(strings.TrimSpace(tid)); t != nil {
 				pairs = append(pairs, map[string]any{"title_id": t.TitleID, "ns_uid": t.NSUID, "type": "T"})
 			}
 		}
