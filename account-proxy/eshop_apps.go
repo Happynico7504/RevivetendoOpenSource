@@ -31,6 +31,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -851,7 +852,14 @@ func serveTagayaVersionlist(w http.ResponseWriter, r *http.Request) bool {
 	hdr := make([]byte, 16)
 	binary.LittleEndian.PutUint16(hdr, 1)
 	buf.Write(hdr)
-	n := 0
+	// Entries sorted by title id: the list is a lookup table and was served
+	// base/update interleaved (not sorted) when the Updates screen skipped
+	// an outdated app, 2026-10-13.
+	type entry struct {
+		tid     uint64
+		version uint32
+	}
+	var entries []entry
 	if cat, err := loadSamuraiCatalog(); err == nil {
 		for _, t := range cat.shopTitles() {
 			if t.Newest != nil {
@@ -862,13 +870,17 @@ func serveTagayaVersionlist(w http.ResponseWriter, r *http.Request) bool {
 			if err != nil || cerr != nil {
 				continue
 			}
-			e := make([]byte, 16)
-			binary.LittleEndian.PutUint64(e, tid)
-			binary.LittleEndian.PutUint32(e[8:], uint32(ci.version))
-			buf.Write(e)
-			n++
+			entries = append(entries, entry{tid, uint32(ci.version)})
 		}
 	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].tid < entries[j].tid })
+	for _, en := range entries {
+		e := make([]byte, 16)
+		binary.LittleEndian.PutUint64(e, en.tid)
+		binary.LittleEndian.PutUint32(e[8:], en.version)
+		buf.Write(e)
+	}
+	n := len(entries)
 	log.Printf("tagaya: versionlist (%d titles) for %s from %s", n, r.Host, realIP(r))
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Write(buf.Bytes())
