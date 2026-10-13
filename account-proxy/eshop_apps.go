@@ -98,7 +98,8 @@ func (a *samuraiApp) baseTitle() *shopTitle {
 // a shop listing of its own: the eShop refuses an update whose listing the
 // player already owns ("you already have this"), so a newer version needs a
 // new ns_uid - the configured one plus the TMD version x 1000 (unique per
-// version and per app). Older versions stay listed and point to the newest.
+// version and per app). Published entries are never changed: older versions
+// stay listed exactly as they were; Newest only marks them for the pointers.
 func (a *samuraiApp) updateTitles() []*shopTitle {
 	if a.Update == nil || len(a.TitleID) != 16 {
 		return nil
@@ -155,11 +156,10 @@ func (c *samuraiCatalog) titleByTitleID(tid string) *shopTitle {
 }
 
 func (t *shopTitle) name() string {
-	switch {
-	case t.Newest != nil:
+	// A published update entry never changes: its name carries its own
+	// version from the start, so a newer version is simply another entry.
+	if t.IsUpdate {
 		return t.App.Name + " Update (v" + versionString(t.Version) + ")"
-	case t.IsUpdate:
-		return t.App.Name + " Update"
 	}
 	return t.App.Name
 }
@@ -320,14 +320,13 @@ func samuraiShopTitleJSON(t *shopTitle, full bool) map[string]any {
 	if t.IsUpdate {
 		m["id"] = t.NSUID
 		m["name"] = t.name()
-		m["new"] = t.Newest == nil
+		// Only this version's own data, so the entry stays exactly as it was
+		// published; which version is current is said by the pointers (id_pair,
+		// the version list, the app's own listing), not by editing old entries.
+		m["new"] = false
 		if full {
 			m["formal_name"] = t.name()
-			desc := "Update data for " + t.App.Name + ", version " + versionString(t.Version) + "."
-			if t.Newest != nil {
-				desc = "Replaced by " + t.Newest.name() + " v" + versionString(t.Newest.Version) + " - download that one instead.\n\n" + desc
-			}
-			m["description"] = desc
+			m["description"] = "Update data for " + t.App.Name + ", version " + versionString(t.Version) + "."
 		}
 	}
 	return m
