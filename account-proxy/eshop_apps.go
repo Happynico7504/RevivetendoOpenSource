@@ -155,6 +155,17 @@ func (c *samuraiCatalog) titleByTitleID(tid string) *shopTitle {
 	return nil
 }
 
+// downloadCIA is what this entry installs. An older update entry stays as it
+// was published but references the newest update: buying or downloading it
+// gets the newest version (the eShop may remember an old entry - it went
+// straight to the v1.0.0 entry and reinstalled 1.0.0 over itself, 2026-10-13).
+func (t *shopTitle) downloadCIA() string {
+	if t.Newest != nil {
+		return t.Newest.CIA
+	}
+	return t.CIA
+}
+
 func (t *shopTitle) name() string {
 	// A published update entry never changes: its name carries its own
 	// version from the start, so a newer version is simply another entry.
@@ -533,7 +544,7 @@ func handleNinjaApps(w http.ResponseWriter, r *http.Request, path string, postFo
 			if t == nil {
 				continue
 			}
-			ci, err := loadAppCIAFile(t.CIA)
+			ci, err := loadAppCIAFile(t.downloadCIA())
 			if err != nil {
 				log.Printf("eshop apps: ec_info %d: %v", id, err)
 				continue
@@ -556,7 +567,7 @@ func handleNinjaApps(w http.ResponseWriter, r *http.Request, path string, postFo
 		if t == nil {
 			return false
 		}
-		ci, err := loadAppCIAFile(t.CIA)
+		ci, err := loadAppCIAFile(t.downloadCIA())
 		if err != nil {
 			log.Printf("eshop apps: ec_info %d: %v", id, err)
 			return false
@@ -594,7 +605,7 @@ func handleNinjaApps(w http.ResponseWriter, r *http.Request, path string, postFo
 			return false
 		}
 		size := int64(0)
-		if ci, err := loadAppCIAFile(t.CIA); err == nil {
+		if ci, err := loadAppCIAFile(t.downloadCIA()); err == nil {
 			size = ci.contentSize()
 		}
 		// Fields as the eShop (tiger, FUN_00331ec0) reads them: purchasing_content
