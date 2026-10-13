@@ -74,23 +74,10 @@ type samuraiVideo struct {
 // samuraiDownloadsDirID is the channel listing every downloadable video.
 const samuraiDownloadsDirID = 9001
 
-func (c *samuraiCatalog) downloadableVideos() []*samuraiVideo {
-	var out []*samuraiVideo
-	for i := range c.Videos {
-		if c.Videos[i].Download != nil {
-			out = append(out, &c.Videos[i])
-		}
-	}
-	return out
-}
-
-// samuraiDownloadsDirectory is the "Downloadable videos" channel. Its icon and
-// banner are the first channel's.
+// samuraiDownloadsDirectory is the "Downloadable videos" channel, with its
+// own green artwork (custom-tools/eshop-art; TV is red, Apps blue).
 func samuraiDownloadsDirectory(c *samuraiCatalog) map[string]any {
-	icon, banner := "", ""
-	if len(c.Channels) > 0 {
-		icon, banner = c.Channels[0].Icon, c.Channels[0].Banner
-	}
+	icon, banner := "i/downloads-channel-icon.jpg", "i/downloads-channel-banner.jpg"
 	return map[string]any{
 		"id": samuraiDownloadsDirID, "type": "normal", "standard": false, "new": true,
 		"name": "Downloadable videos", "description": "Videos you can download to your Nintendo 3DS",
@@ -257,12 +244,12 @@ func handleSamurai(w http.ResponseWriter, r *http.Request) {
 				"description": ch.Description,
 			})
 		}
-		if len(cat.downloadableVideos()) > 0 {
+		if samuraiHasApps(cat, true) {
 			d := samuraiDownloadsDirectory(cat)
 			d["index"] = len(dirs) + 1
 			dirs = append(dirs, d)
 		}
-		if len(cat.Apps) > 0 {
+		if samuraiHasApps(cat, false) {
 			d := samuraiAppsDirectory(cat)
 			d["index"] = len(dirs) + 1
 			dirs = append(dirs, d)
@@ -274,18 +261,13 @@ func handleSamurai(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		id, _ := strconv.ParseInt(endpoint[1], 10, 64)
-		if vids := cat.downloadableVideos(); id == samuraiDownloadsDirID && len(vids) > 0 {
-			d := samuraiDownloadsDirectory(cat)
-			contents := []any{}
-			for _, v := range vids {
-				contents = append(contents, map[string]any{"index": len(contents) + 1, "movie": samuraiMovieJSON(v)})
-			}
-			d["component"] = "movie"
-			d["contents"] = map[string]any{"content": contents, "length": len(contents), "offset": 0, "total": len(contents)}
-			out = map[string]any{"directory": d}
+		// Downloadable videos: their installable titles (relay-admin builds one
+		// per downloadable video, videos_titles.go), bought like apps.
+		if id == samuraiDownloadsDirID && samuraiHasApps(cat, true) {
+			out = samuraiTitlesDirectory(samuraiDownloadsDirectory(cat), cat, true)
 			break
 		}
-		if id == samuraiAppsDirID && len(cat.Apps) > 0 {
+		if id == samuraiAppsDirID && samuraiHasApps(cat, false) {
 			out = samuraiAppsDirectoryContents(cat)
 			break
 		}

@@ -50,6 +50,10 @@ type samuraiApp struct {
 	CIA         string `json:"cia"`    // file in eshop-video/apps/
 	New         bool   `json:"new"`
 	OwnerPID    uint32 `json:"owner_pid"` // seller: paid purchases are credited to this wallet; 0 = Revivetendo
+	// Set on the titles relay-admin builds for downloadable videos
+	// (videos_titles.go): listed on the "Downloadable videos" channel instead
+	// of Apps.
+	VideoID int64 `json:"video_id"`
 	// Earlier versions' CIAs (files in eshop-video/apps/), kept so the eShop
 	// can still fetch an installed older version's TMD after an update.
 	OldCIAs []string `json:"old_cias"`
@@ -304,13 +308,32 @@ func samuraiAppsDirectory(cat *samuraiCatalog) map[string]any {
 }
 
 func samuraiAppsDirectoryContents(cat *samuraiCatalog) map[string]any {
-	d := samuraiAppsDirectory(cat)
+	return samuraiTitlesDirectory(samuraiAppsDirectory(cat), cat, false)
+}
+
+// samuraiHasApps reports whether the catalog has apps (videos false) or video
+// titles (videos true).
+func samuraiHasApps(cat *samuraiCatalog, videos bool) bool {
+	for i := range cat.Apps {
+		if (cat.Apps[i].VideoID != 0) == videos {
+			return true
+		}
+	}
+	return false
+}
+
+// samuraiTitlesDirectory fills a channel with the apps, or with the
+// downloadable video titles.
+func samuraiTitlesDirectory(d map[string]any, cat *samuraiCatalog, videos bool) map[string]any {
 	contents := []any{}
 	// Updates are shop entries of their own, right after their app, like on
 	// Nintendo's eShop: that is where a player gets a newer update for an app
 	// that already has one installed (the eShop only offers an update by
 	// itself after downloading an app without one).
 	for _, t := range cat.shopTitles() {
+		if (t.App.VideoID != 0) != videos {
+			continue
+		}
 		contents = append(contents, map[string]any{"index": len(contents) + 1, "title": samuraiShopTitleJSON(t, false)})
 	}
 	d["component"] = "title"

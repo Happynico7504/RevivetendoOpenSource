@@ -145,6 +145,8 @@ func registerVideos() {
 	registerVideoChannels()
 	go videoWorker()
 	go videoJanitor()
+	go videoTitleWorker()
+	videoTitlesKick()
 }
 
 func videoJSON(w http.ResponseWriter, status int, v any) {

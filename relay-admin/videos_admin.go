@@ -132,6 +132,17 @@ func videoSyncCatalog() error {
 	}
 	rows.Close()
 
+	// Apps: hand-made entries stay; the video titles (video_id) are rebuilt
+	// from the downloadable live videos whose title is built (videos_titles.go).
+	var apps []any
+	oldApps, _ := cat["apps"].([]any)
+	for _, a := range oldApps {
+		if m, ok := a.(map[string]any); ok && jsonInt(m["video_id"]) != 0 {
+			continue
+		}
+		apps = append(apps, a)
+	}
+
 	var videos []any
 	old, _ := cat["videos"].([]any)
 	for _, v := range old {
@@ -174,6 +185,9 @@ func videoSyncCatalog() error {
 		// lists these videos on its "Downloadable videos" channel.
 		if l.download == "free" || l.download == "paid" {
 			entry["download"] = map[string]any{"mode": l.download, "price": l.price}
+			if videoTitleBuilt(l.id) {
+				apps = append(apps, videoTitleCatalogEntry(l.id, l.pid, l.title, desc, l.uploader, l.download, l.price))
+			}
 		}
 		videos = append(videos, entry)
 		ch := l.channel
@@ -186,6 +200,12 @@ func videoSyncCatalog() error {
 		videos = []any{}
 	}
 	cat["videos"] = videos
+	if apps != nil || cat["apps"] != nil {
+		if apps == nil {
+			apps = []any{}
+		}
+		cat["apps"] = apps
+	}
 	for _, c := range chans {
 		m, _ := c.(map[string]any)
 		ids := append([]any{}, byChannel[jsonInt(m["id"])]...)
@@ -198,7 +218,11 @@ func videoSyncCatalog() error {
 		m["videos"] = ids
 	}
 
-	return videoWriteCatalog(cat)
+	if err := videoWriteCatalog(cat); err != nil {
+		return err
+	}
+	videoTitlesKick() // build titles that are missing or out of date
+	return nil
 }
 
 // videoWriteCatalog replaces catalog.json atomically. Callers hold
