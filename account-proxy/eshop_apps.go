@@ -279,8 +279,12 @@ func appTicketTIVs(accountID, deviceID string) string {
 		return ""
 	}
 	appTicketsReady()
+	// Update tickets (0004000E) are left out: listed as owned, they made the
+	// eShop mark every later update entry of that title "already downloaded".
+	// Nintendo's updates were never account purchases either.
 	rows, err := db.Query(`SELECT ticket_id FROM eshop_app_tickets
-		WHERE (account_id <> '' AND account_id = $1) OR (device_id <> '' AND device_id = $2) ORDER BY ticket_id`, accountID, deviceID)
+		WHERE ((account_id <> '' AND account_id = $1) OR (device_id <> '' AND device_id = $2))
+		  AND upper(title_id) NOT LIKE '0004000E%' ORDER BY ticket_id`, accountID, deviceID)
 	if err != nil {
 		return ""
 	}
