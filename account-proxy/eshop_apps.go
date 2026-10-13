@@ -307,6 +307,16 @@ func samuraiShopTitleJSON(t *shopTitle, full bool) map[string]any {
 	// listing stands for.
 	m["title_id"] = t.TitleID
 	m["title_version"] = t.Version
+	// An app with an update: its listing carries the update title and its
+	// newest version, so the page can compare it with the installed update
+	// and offer it (experiment 2026-10-13; the base download itself goes by
+	// ec_info/CAS, which keep the base title).
+	if !t.IsUpdate {
+		if ups := t.App.updateTitles(); len(ups) > 0 {
+			m["title_id"] = ups[0].TitleID
+			m["title_version"] = ups[0].Version
+		}
+	}
 	if t.IsUpdate {
 		m["id"] = t.NSUID
 		m["name"] = t.name()
