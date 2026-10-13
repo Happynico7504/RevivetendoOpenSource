@@ -4,7 +4,7 @@ package main
 // video whose uploader made it downloadable (videos_download.go) gets its own
 // 3DS title - the moflex player (eshop-video/player/, built from
 // /home/nico/custom-tools/moflex-player) with that one video in its RomFS,
-// which the player starts at once - with the video's name, an icon and a
+// which the player starts at once, plus info.txt (name and length) - with the video's name, an icon and a
 // HOME Menu banner made from its thumbnail and banner. account-proxy sells
 // them through its eShop app code (eshop_apps.go) on the "Downloadable
 // videos" channel, crediting paid downloads to the uploader.
@@ -140,10 +140,11 @@ func videoTitleWorker() {
 type videoTitleJob struct {
 	id, pid               int64
 	title, uploader, kind string // kind "2d" or "3d"
+	seconds               int
 }
 
 func videoTitlesBuildAll() {
-	rows, err := db.Query(`SELECT id, pid, title, stereo FROM eshop_videos
+	rows, err := db.Query(`SELECT id, pid, title, stereo, seconds FROM eshop_videos
 		WHERE status = 'live' AND download_mode IN ('free', 'paid') ORDER BY id`)
 	if err != nil {
 		log.Printf("video titles: %v", err)
@@ -153,7 +154,7 @@ func videoTitlesBuildAll() {
 	for rows.Next() {
 		var j videoTitleJob
 		var stereo string
-		if rows.Scan(&j.id, &j.pid, &j.title, &stereo) == nil {
+		if rows.Scan(&j.id, &j.pid, &j.title, &stereo, &j.seconds) == nil {
 			j.kind = map[bool]string{false: "2d", true: "3d"}[stereo != ""]
 			j.uploader, _ = pnidForPID(j.pid)
 			jobs = append(jobs, j)
@@ -260,7 +261,7 @@ var videoPlayerFiles = []string{"moflex-player.elf", "video-title.rsf", "video-u
 
 func videoTitleHash(j videoTitleJob) (string, error) {
 	h := sha256.New()
-	fmt.Fprintf(h, "v%s\x00%d\x00%s\x00%s\x00%s\x00", videoTitleBuildVersion, j.id, j.title, j.uploader, j.kind)
+	fmt.Fprintf(h, "v%s\x00%d\x00%s\x00%s\x00%s\x00%d\x00", videoTitleBuildVersion, j.id, j.title, j.uploader, j.kind, j.seconds)
 	for _, name := range []string{"video.moflex", "thumb.jpg", "banner.jpg"} {
 		stamp, err := videoFileStamp(j.id, name)
 		if err != nil {
@@ -296,6 +297,10 @@ func videoTitleBuild(j videoTitleJob, rev int, out string) error {
 	// The player plays romfs:/video-2d|3d.moflex at start (the name tells it
 	// how the frames pair up).
 	if err := videoFetchFile(j.id, "video.moflex", filepath.Join(romfs, "video-"+j.kind+".moflex")); err != nil {
+		return err
+	}
+	// Name and length for the player's screen (moflex files carry no length).
+	if err := os.WriteFile(filepath.Join(romfs, "info.txt"), []byte(fmt.Sprintf("%s\n%d\n", j.title, j.seconds)), 0o644); err != nil {
 		return err
 	}
 	thumb, banner := filepath.Join(work, "thumb.jpg"), filepath.Join(work, "banner.jpg")
