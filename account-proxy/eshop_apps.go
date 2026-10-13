@@ -82,7 +82,15 @@ func (a *samuraiApp) updateTitle() *shopTitle {
 	if a.Update == nil || len(a.TitleID) != 16 {
 		return nil
 	}
-	return &shopTitle{App: a, NSUID: a.Update.NSUID, TitleID: "0004000E" + strings.ToUpper(a.TitleID[8:]),
+	// Every update version is a shop item of its own: the eShop refuses an
+	// update whose item the player already owns ("you already have this"),
+	// so a newer version needs a new ns_uid. Derived from the configured one
+	// plus the TMD version x 1000 (unique per version and per app).
+	ns := a.Update.NSUID
+	if ci, err := loadAppCIAFile(a.Update.CIA); err == nil {
+		ns += int64(ci.version) * 1000
+	}
+	return &shopTitle{App: a, NSUID: ns, TitleID: "0004000E" + strings.ToUpper(a.TitleID[8:]),
 		CIA: a.Update.CIA, OldCIAs: a.Update.OldCIAs, IsUpdate: true}
 }
 
