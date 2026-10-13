@@ -694,8 +694,20 @@ func serveCCS(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	} else {
+		// Content ids differ per build, so an older version's content lives
+		// only in its own CIA.
 		id, _ := strconv.ParseUint(m[2], 16, 32)
 		data = ci.contents[uint32(id)]
+		for _, old := range t.OldCIAs {
+			if data != nil {
+				break
+			}
+			if oc, err := loadAppCIAFile(old); err == nil {
+				if d, ok := oc.contents[uint32(id)]; ok {
+					data, ci = d, oc
+				}
+			}
+		}
 	}
 	if data == nil {
 		log.Printf("eshop apps: CCS %s from %s -> no such content", r.URL.Path, ip)
