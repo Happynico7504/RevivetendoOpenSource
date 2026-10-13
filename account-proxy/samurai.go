@@ -347,7 +347,16 @@ func handleSamurai(w http.ResponseWriter, r *http.Request) {
 				list = append(list, samuraiShopTitleJSON(t, false))
 			}
 		}
-		if len(ids) == 0 && strings.Contains(r.URL.RawQuery, "genre%5B%5D=95") {
+		if len(ids) == 0 && q.Get("title_type") == "patch" {
+			for _, t := range cat.shopTitles() {
+				if t.IsUpdate {
+					list = append(list, samuraiShopTitleJSON(t, false))
+				}
+			}
+			if list == nil {
+				list = []any{}
+			}
+		} else if len(ids) == 0 && strings.Contains(r.URL.RawQuery, "genre%5B%5D=95") {
 			for i := range cat.Apps {
 				list = append(list, samuraiTitleJSON(&cat.Apps[i], false))
 			}
@@ -367,15 +376,28 @@ func handleSamurai(w http.ResponseWriter, r *http.Request) {
 		out = map[string]any{"publishers": map[string]any{"publisher": []any{map[string]any{"id": 1, "name": "Revivetendo"}}, "length": 1}}
 
 	case "searchcategory":
-		out = map[string]any{"search_categories": map[string]any{"search_category_group": []any{map[string]any{
-			"id":   3,
-			"name": "Revivetendo TV",
-			"search_category": []any{map[string]any{
-				"id":     6,
-				"name":   "All Videos",
-				"params": map[string]any{"param": []any{map[string]any{"key": "genre[]", "value": "94"}}},
-			}},
-		}}}}
+		// Apps and their updates get a group of their own, like Nintendo's
+		// eShop listed software updates under their own filter. The filter
+		// params are ours (the eShop passes them back to "titles" as-is).
+		out = map[string]any{"search_categories": map[string]any{"search_category_group": []any{
+			map[string]any{
+				"id":   3,
+				"name": "Revivetendo TV",
+				"search_category": []any{map[string]any{
+					"id":     6,
+					"name":   "All Videos",
+					"params": map[string]any{"param": []any{map[string]any{"key": "genre[]", "value": "94"}}},
+				}},
+			},
+			map[string]any{
+				"id":   4,
+				"name": "Revivetendo Apps",
+				"search_category": []any{
+					map[string]any{"id": 7, "name": "All Apps", "params": map[string]any{"param": []any{map[string]any{"key": "genre[]", "value": "95"}}}},
+					map[string]any{"id": 8, "name": "Software Updates", "params": map[string]any{"param": []any{map[string]any{"key": "title_type", "value": "patch"}}}},
+				},
+			},
+		}}}
 
 	case "movies", "contents":
 		contents := []any{}

@@ -278,7 +278,9 @@ func samuraiTitleJSON(a *samuraiApp, full bool) map[string]any {
 		"product_code": "CTR-N-" + strings.ToUpper(a.TitleID[8:12]),
 		"name":         a.Name,
 		"icon_url":     samuraiMediaURL(a.Icon),
-		"platform":     map[string]any{"id": 124, "device": "CTR", "category": 2, "name": "Nintendo 3DS Download Software"},
+		// 19 = "Nintendo 3DS (Download)" on archived samurai title pages (124
+		// is Wii U download software).
+		"platform":     map[string]any{"id": 19, "device": "CTR", "name": "Nintendo 3DS (Download)"},
 		"publisher":    map[string]any{"id": 1, "name": a.Publisher},
 		"retail_sales": false, "eshop_sales": true,
 		"release_date_on_eshop": "2026-10-12",
