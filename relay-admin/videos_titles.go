@@ -35,6 +35,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/minio/minio-go/v7"
@@ -161,6 +162,7 @@ func videoTitlesBuildAll() {
 		}
 	}
 	rows.Close()
+	videoTitlesRemoveStale(jobs)
 	built := 0
 	for _, j := range jobs {
 		if j.id > videoTitleMaxID {
@@ -217,6 +219,42 @@ func videoTitlesBuildAll() {
 		if err := videoSyncCatalog(); err != nil {
 			log.Printf("video titles: catalog sync: %v", err)
 		}
+	}
+}
+
+// videoTitlesRemoveStale deletes what was built for videos that are no longer
+// downloadable (download switched off, unpublished, deleted). The catalog sync
+// that triggered this run has already dropped their listings.
+func videoTitlesRemoveStale(jobs []videoTitleJob) {
+	keep := map[int64]bool{}
+	for _, j := range jobs {
+		keep[j.id] = true
+	}
+	sidecars, _ := filepath.Glob(filepath.Join(videoAppsDir(), "video-*.json"))
+	for _, sc := range sidecars {
+		idStr := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(sc), "video-"), ".json")
+		id, err := strconv.ParseInt(idStr, 10, 64)
+		if err != nil || keep[id] {
+			continue
+		}
+		var state videoTitleState
+		if raw, err := os.ReadFile(sc); err == nil {
+			json.Unmarshal(raw, &state)
+		}
+		files := []string{filepath.Join(videoAppsDir(), videoTitleCIA(id))}
+		for _, u := range append(state.OldUpdates, state.Update) {
+			if u != "" {
+				files = append(files, filepath.Join(videoAppsDir(), u))
+			}
+		}
+		media := filepath.Join(videoRoot, "media")
+		files = append(files, filepath.Join(media, videoTitleIcon(id)), filepath.Join(media, videoTitleBanner(id)), sc)
+		for _, f := range files {
+			if err := os.Remove(f); err != nil && !os.IsNotExist(err) {
+				log.Printf("video titles: #%d: %v", id, err)
+			}
+		}
+		log.Printf("video titles: #%d is no longer downloadable, removed its title (%s)", id, state.TitleID)
 	}
 }
 
