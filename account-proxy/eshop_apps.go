@@ -95,37 +95,19 @@ func (a *samuraiApp) baseTitle() *shopTitle {
 		Price: a.Price, Version: ciaVersion(a.CIA)}
 }
 
-// updateTitles lists an app's update versions, newest first. Every version is
-// a shop listing of its own: the eShop refuses an update whose listing the
-// player already owns ("you already have this"), so a newer version needs a
-// new ns_uid - the configured one plus the TMD version x 1000 (unique per
-// version and per app). Published entries are never changed: older versions
-// stay listed exactly as they were; Newest only marks them for the pointers.
+// updateTitles lists an app's update as ONE listing, like Nintendo's: every
+// version replaces the previous one on the console, and the single store page
+// always offers the newest ("cia"; "old_cias" stay downloadable by TMD
+// version but get no listing). The console must not own the update on the
+// account (see appTicketTIVs), or the eShop hides it from the Updates screen
+// and calls newer versions "already downloaded". Newest is always nil now.
 func (a *samuraiApp) updateTitles() []*shopTitle {
 	if a.Update == nil || len(a.TitleID) != 16 {
 		return nil
 	}
 	tid := "0004000E" + strings.ToUpper(a.TitleID[8:])
-	files := []string{a.Update.CIA}
-	for i := len(a.Update.OldCIAs) - 1; i >= 0; i-- {
-		files = append(files, a.Update.OldCIAs[i])
-	}
-	var out []*shopTitle
-	for i, f := range files {
-		v := ciaVersion(f)
-		var others []string
-		for j, g := range files {
-			if j != i {
-				others = append(others, g)
-			}
-		}
-		t := &shopTitle{App: a, NSUID: a.Update.NSUID + int64(v)*1000, TitleID: tid, CIA: f, OldCIAs: others, IsUpdate: true, Version: v}
-		if i > 0 {
-			t.Newest = out[0]
-		}
-		out = append(out, t)
-	}
-	return out
+	return []*shopTitle{{App: a, NSUID: a.Update.NSUID, TitleID: tid, CIA: a.Update.CIA, OldCIAs: a.Update.OldCIAs,
+		IsUpdate: true, Version: ciaVersion(a.Update.CIA)}}
 }
 
 // shopTitles lists every base and update title in the catalog.
@@ -168,10 +150,8 @@ func (t *shopTitle) downloadCIA() string {
 }
 
 func (t *shopTitle) name() string {
-	// A published update entry never changes: its name carries its own
-	// version from the start, so a newer version is simply another entry.
 	if t.IsUpdate {
-		return t.App.Name + " Update (v" + versionString(t.Version) + ")"
+		return t.App.Name + " Update"
 	}
 	return t.App.Name
 }
@@ -280,12 +260,12 @@ func appTicketTIVs(accountID, deviceID string) string {
 		return ""
 	}
 	appTicketsReady()
-	// Update tickets are listed too: without them every entry showed as
-	// downloadable even when installed. "Already downloaded" vs "newer" is
-	// decided by the one shared title_version per title id (all update entries
-	// report the newest, see samuraiShopTitleJSON).
+	// Update tickets (0004000E) are left out, as Nintendo's free updates were
+	// never account purchases: an owned update is hidden from the Updates
+	// screen and its newer versions show as "already downloaded".
 	rows, err := db.Query(`SELECT ticket_id FROM eshop_app_tickets
-		WHERE (account_id <> '' AND account_id = $1) OR (device_id <> '' AND device_id = $2) ORDER BY ticket_id`, accountID, deviceID)
+		WHERE ((account_id <> '' AND account_id = $1) OR (device_id <> '' AND device_id = $2))
+		  AND upper(title_id) NOT LIKE '0004000E%' ORDER BY ticket_id`, accountID, deviceID)
 	if err != nil {
 		return ""
 	}
@@ -368,13 +348,10 @@ func samuraiShopTitleJSON(t *shopTitle, full bool) map[string]any {
 	if t.IsUpdate {
 		m["id"] = t.NSUID
 		m["name"] = t.name()
-		// Only this version's own data, so the entry stays exactly as it was
-		// published; which version is current is said by the pointers (id_pair,
-		// the version list, the app's own listing), not by editing old entries.
 		m["new"] = false
 		if full {
 			m["formal_name"] = t.name()
-			m["description"] = "Update data for " + t.App.Name + ", version " + versionString(t.Version) + "."
+			m["description"] = "Update data for " + t.App.Name + ". Current version: " + versionString(t.Version) + "."
 		}
 	}
 	return m
