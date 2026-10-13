@@ -358,7 +358,7 @@ func handleSamurai(w http.ResponseWriter, r *http.Request) {
 			}
 		} else if len(ids) == 0 && strings.Contains(r.URL.RawQuery, "genre%5B%5D=95") {
 			for i := range cat.Apps {
-				list = append(list, samuraiTitleJSON(&cat.Apps[i], false))
+				list = append(list, samuraiShopTitleJSON(cat.Apps[i].baseTitle(), false))
 			}
 		}
 		if list != nil {

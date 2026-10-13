@@ -72,26 +72,58 @@ type shopTitle struct {
 	OldCIAs  []string
 	Price    int
 	IsUpdate bool
+	Version  uint16 // TMD title version of CIA
+	// For an older update version: the current one, which it points to.
+	Newest *shopTitle
+}
+
+// versionString is a TMD title version as the 3DS shows it (major.minor.micro).
+func versionString(v uint16) string {
+	return fmt.Sprintf("%d.%d.%d", v>>10, (v>>4)&0x3f, v&0xf)
+}
+
+func ciaVersion(name string) uint16 {
+	if ci, err := loadAppCIAFile(name); err == nil {
+		return ci.version
+	}
+	return 0
 }
 
 func (a *samuraiApp) baseTitle() *shopTitle {
-	return &shopTitle{App: a, NSUID: a.NSUID, TitleID: strings.ToUpper(a.TitleID), CIA: a.CIA, OldCIAs: a.OldCIAs, Price: a.Price}
+	return &shopTitle{App: a, NSUID: a.NSUID, TitleID: strings.ToUpper(a.TitleID), CIA: a.CIA, OldCIAs: a.OldCIAs,
+		Price: a.Price, Version: ciaVersion(a.CIA)}
 }
 
-func (a *samuraiApp) updateTitle() *shopTitle {
+// updateTitles lists an app's update versions, newest first. Every version is
+// a shop listing of its own: the eShop refuses an update whose listing the
+// player already owns ("you already have this"), so a newer version needs a
+// new ns_uid - the configured one plus the TMD version x 1000 (unique per
+// version and per app). Older versions stay listed and point to the newest.
+func (a *samuraiApp) updateTitles() []*shopTitle {
 	if a.Update == nil || len(a.TitleID) != 16 {
 		return nil
 	}
-	// Every update version is a shop item of its own: the eShop refuses an
-	// update whose item the player already owns ("you already have this"),
-	// so a newer version needs a new ns_uid. Derived from the configured one
-	// plus the TMD version x 1000 (unique per version and per app).
-	ns := a.Update.NSUID
-	if ci, err := loadAppCIAFile(a.Update.CIA); err == nil {
-		ns += int64(ci.version) * 1000
+	tid := "0004000E" + strings.ToUpper(a.TitleID[8:])
+	files := []string{a.Update.CIA}
+	for i := len(a.Update.OldCIAs) - 1; i >= 0; i-- {
+		files = append(files, a.Update.OldCIAs[i])
 	}
-	return &shopTitle{App: a, NSUID: ns, TitleID: "0004000E" + strings.ToUpper(a.TitleID[8:]),
-		CIA: a.Update.CIA, OldCIAs: a.Update.OldCIAs, IsUpdate: true}
+	var out []*shopTitle
+	for i, f := range files {
+		v := ciaVersion(f)
+		var others []string
+		for j, g := range files {
+			if j != i {
+				others = append(others, g)
+			}
+		}
+		t := &shopTitle{App: a, NSUID: a.Update.NSUID + int64(v)*1000, TitleID: tid, CIA: f, OldCIAs: others, IsUpdate: true, Version: v}
+		if i > 0 {
+			t.Newest = out[0]
+		}
+		out = append(out, t)
+	}
+	return out
 }
 
 // shopTitles lists every base and update title in the catalog.
@@ -99,9 +131,7 @@ func (c *samuraiCatalog) shopTitles() []*shopTitle {
 	var out []*shopTitle
 	for i := range c.Apps {
 		out = append(out, c.Apps[i].baseTitle())
-		if u := c.Apps[i].updateTitle(); u != nil {
-			out = append(out, u)
-		}
+		out = append(out, c.Apps[i].updateTitles()...)
 	}
 	return out
 }
@@ -125,7 +155,10 @@ func (c *samuraiCatalog) titleByTitleID(tid string) *shopTitle {
 }
 
 func (t *shopTitle) name() string {
-	if t.IsUpdate {
+	switch {
+	case t.Newest != nil:
+		return t.App.Name + " Update (v" + versionString(t.Version) + ")"
+	case t.IsUpdate:
 		return t.App.Name + " Update"
 	}
 	return t.App.Name
@@ -270,11 +303,21 @@ func samuraiAppsDirectoryContents(cat *samuraiCatalog) map[string]any {
 // update is shown as its app with its own id and "(update)" in the name.
 func samuraiShopTitleJSON(t *shopTitle, full bool) map[string]any {
 	m := samuraiTitleJSON(t.App, full)
+	// tiger's title page (FUN_002409dc) reads which title and version a
+	// listing stands for.
+	m["title_id"] = t.TitleID
+	m["title_version"] = t.Version
 	if t.IsUpdate {
 		m["id"] = t.NSUID
 		m["name"] = t.name()
+		m["new"] = t.Newest == nil
 		if full {
 			m["formal_name"] = t.name()
+			desc := "Update data for " + t.App.Name + ", version " + versionString(t.Version) + "."
+			if t.Newest != nil {
+				desc = "Replaced by " + t.Newest.name() + " v" + versionString(t.Newest.Version) + " - download that one instead.\n\n" + desc
+			}
+			m["description"] = desc
 		}
 	}
 	return m
@@ -683,6 +726,9 @@ func serveTagayaVersionlist(w http.ResponseWriter, r *http.Request) bool {
 	n := 0
 	if cat, err := loadSamuraiCatalog(); err == nil {
 		for _, t := range cat.shopTitles() {
+			if t.Newest != nil {
+				continue // only the newest version of each title
+			}
 			tid, err := strconv.ParseUint(t.TitleID, 16, 64)
 			ci, cerr := loadAppCIAFile(t.CIA)
 			if err != nil || cerr != nil {
