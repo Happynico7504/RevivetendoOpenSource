@@ -236,6 +236,31 @@ func appTicketTitlesForPID(pid uint32) []string {
 	return out
 }
 
+type appPurchase struct {
+	Ticket  int64
+	TitleID string
+	Created time.Time
+}
+
+// appTicketPurchasesForPID lists a player's app and update purchases, newest
+// first.
+func appTicketPurchasesForPID(pid uint32) []appPurchase {
+	appTicketsReady()
+	rows, err := db.Query(`SELECT ticket_id, title_id, created_at FROM eshop_app_tickets WHERE pid = $1 ORDER BY created_at DESC LIMIT 200`, int64(pid))
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []appPurchase
+	for rows.Next() {
+		var p appPurchase
+		if rows.Scan(&p.Ticket, &p.TitleID, &p.Created) == nil {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // appTicketTIVs lists the app tickets owned by this ECS account or device as
 // <TIV> elements (our tickets are version 0).
 func appTicketTIVs(accountID, deviceID string) string {
@@ -417,6 +442,60 @@ func handleNinjaApps(w http.ResponseWriter, r *http.Request, path string, postFo
 	// owned_titles{total, owned_title[{id: ns_uid, title_id: hex}]}; a missing
 	// owned_titles is the generic 72001 (007-2001). Lists the base titles this
 	// player bought from us; Badge Arcade has none here.
+	// Account activity (purchase history): the apps and updates this player got
+	// from us, newest first, paged. Shape from tiger's parsers (FUN_00313d58,
+	// FUN_0031311c): transactions{total, offset, transaction[{index, id, date,
+	// type, description, transaction_amount.amount, balance.amount, title.id,
+	// traceable, receipt}]}. date uses the receipt's display format; the
+	// balance after each purchase is not recorded, so it shows the current one.
+	case path == "/ninja/ws/my/transactions":
+		var entries []any
+		pid := fetchRealPID(r)
+		if pid != 0 {
+			bal := ninjaBalanceJSON(walletBalance(pid))
+			var balAmount struct {
+				Amount string `json:"amount"`
+			}
+			json.Unmarshal([]byte(bal), &balAmount)
+			for _, p := range appTicketPurchasesForPID(pid) {
+				t := cat.titleByTitleID(p.TitleID)
+				if t == nil {
+					continue
+				}
+				price := t.Price
+				if t.IsUpdate || pid == t.App.OwnerPID {
+					price = 0
+				}
+				entries = append(entries, map[string]any{
+					"index": len(entries) + 1, "id": p.Ticket,
+					"date":               p.Created.Format("2006/01/02 15:04:05"),
+					"type":               "title_purchase",
+					"description":        t.name(),
+					"transaction_amount": map[string]any{"amount": fmt.Sprintf("-%d,00 %s", price, ninjaCoinName)},
+					"balance":            map[string]any{"amount": balAmount.Amount},
+					"title":              map[string]any{"id": t.NSUID},
+					"traceable":          false, "receipt": false,
+				})
+			}
+		}
+		total := len(entries)
+		offset, _ := strconv.Atoi(q.Get("offset"))
+		limit, _ := strconv.Atoi(q.Get("limit"))
+		if offset < 0 || offset > total {
+			offset = total
+		}
+		end := total
+		if limit > 0 && offset+limit < total {
+			end = offset + limit
+		}
+		page := []any{}
+		if total > 0 {
+			page = entries[offset:end]
+		}
+		log.Printf("eshop apps: transactions -> %d of %d for PID %d", len(page), total, pid)
+		fmt.Fprintf(w, `{"transactions":{"total":%d,"offset":%d,"length":%d,"transaction":%s}}`, total, offset, len(page), mustJSON(page))
+		return true
+
 	// "Rate this software" upload after playing; we keep no ratings.
 	case path == "/ninja/ws/my/votable_titles/!put":
 		log.Printf("eshop apps: votable_titles/!put from %s form=%v", ip, postForm)
