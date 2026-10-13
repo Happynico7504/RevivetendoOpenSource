@@ -279,12 +279,12 @@ func appTicketTIVs(accountID, deviceID string) string {
 		return ""
 	}
 	appTicketsReady()
-	// Update tickets (0004000E) are left out: listed as owned, they made the
-	// eShop mark every later update entry of that title "already downloaded".
-	// Nintendo's updates were never account purchases either.
+	// Update tickets are listed too: without them every entry showed as
+	// downloadable even when installed. "Already downloaded" vs "newer" is
+	// decided by the one shared title_version per title id (all update entries
+	// report the newest, see samuraiShopTitleJSON).
 	rows, err := db.Query(`SELECT ticket_id FROM eshop_app_tickets
-		WHERE ((account_id <> '' AND account_id = $1) OR (device_id <> '' AND device_id = $2))
-		  AND upper(title_id) NOT LIKE '0004000E%' ORDER BY ticket_id`, accountID, deviceID)
+		WHERE (account_id <> '' AND account_id = $1) OR (device_id <> '' AND device_id = $2) ORDER BY ticket_id`, accountID, deviceID)
 	if err != nil {
 		return ""
 	}
@@ -347,6 +347,13 @@ func samuraiShopTitleJSON(t *shopTitle, full bool) map[string]any {
 	// listing stands for.
 	m["title_id"] = t.TitleID
 	m["title_version"] = t.Version
+	// tiger keeps ONE version per title id (FUN_00260c48), so every update
+	// entry reports the newest version - a pointer like ec_info, not a change
+	// of the entry; otherwise the last entry viewed decides what "installed
+	// and up to date" means for all of them.
+	if t.Newest != nil {
+		m["title_version"] = t.Newest.Version
+	}
 	// An app with an update: its listing carries the update title and its
 	// newest version, so the page can compare it with the installed update
 	// and offer it (experiment 2026-10-13; the base download itself goes by
