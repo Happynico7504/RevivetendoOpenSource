@@ -14,7 +14,7 @@ mkdir -p "$BUILD"
 # "rebuild + restart" requests handled by restartd both use it.
 BUILD_ORDER=(account-grpc friends-nex wiiu-chat relay-admin account-proxy mk8-authentication mk8-secure
 	angry-birds-star-wars wsc-authentication wsc-secure mc-authentication mc-secure swapdoodle
-	badge-arcade-authentication badge-arcade-secure relayhub)
+	badge-arcade-authentication badge-arcade-secure disney-infinity-3-wiiu-nex-server relayhub)
 declare -A SRC_DIR=(
 	[account-grpc]=grpc-stubs [friends-nex]=friends-nex [wiiu-chat]=wiiu-chat-secure
 	[relay-admin]=relay-admin [account-proxy]=account-proxy
@@ -22,14 +22,14 @@ declare -A SRC_DIR=(
 	[angry-birds-star-wars]=angry-birds-star-wars [wsc-authentication]=wsc-authentication
 	[wsc-secure]=wsc-secure [mc-authentication]=minecraft-authentication [mc-secure]=minecraft-secure
 	[swapdoodle]=swapdoodle [badge-arcade-authentication]=badge-arcade-authentication
-	[badge-arcade-secure]=badge-arcade-secure [relayhub]=relayhub
+	[badge-arcade-secure]=badge-arcade-secure [disney-infinity-3-wiiu-nex-server]=disney-infinity-3-wiiu-nex-server [relayhub]=relayhub
 )
 declare -A BIN_NAME=(
 	[account-grpc]=account-grpc [friends-nex]=friends-nex [wiiu-chat]=wiiu-chat [relay-admin]=relay-admin
 	[account-proxy]=account-proxy [mk8-authentication]=mk8-auth [mk8-secure]=mk8-secure
 	[angry-birds-star-wars]=absw [wsc-authentication]=wsc-auth [wsc-secure]=wsc-secure
 	[mc-authentication]=mc-auth [mc-secure]=mc-secure [swapdoodle]=swapdoodle
-	[badge-arcade-authentication]=badge-arcade-auth [badge-arcade-secure]=badge-arcade-secure [relayhub]=relayhub
+	[badge-arcade-authentication]=badge-arcade-auth [badge-arcade-secure]=badge-arcade-secure [disney-infinity-3-wiiu-nex-server]=disney-infinity-3-wiiu-nex-server [relayhub]=relayhub
 )
 declare -A BUILD_PKG=([account-grpc]=./cmd/account [relayhub]=./cmd/relayhub)
 # relayhub depends on the sibling relaylink module, account-proxy and relay-admin on badgearcade
@@ -289,6 +289,10 @@ WSC_AUTH_PID=$!
 	env $(cat .env | xargs) KERBEROS_PASSWORD="$WSC_KERBEROS_PASSWORD" "$BUILD/wsc-secure") &
 WSC_SECURE_PID=$!
 
+(cd "$ROOT/disney-infinity-3-wiiu-nex-server" && autostart disney-infinity-3-wiiu-nex-server "$LOG/disney-infinity-3-wiiu-nex-server.log" \
+	env $(cat .env | xargs) KERBEROS_PASSWORD="$DISNEY_INFINITY_KERBEROS_PASSWORD" "$BUILD/disney-infinity-3-wiiu-nex-server") &
+DISNEY_INFINITY_PID=$!
+
 MC_KERBEROS_PASSWORD="$(openssl rand -hex 16)"
 export MC_KERBEROS_PASSWORD
 (cd "$ROOT/minecraft-authentication" && autostart mc-authentication "$LOG/mc-authentication.log" \
@@ -342,7 +346,7 @@ fi
 # either, so a request can never stop the thing that is listening for requests.
 SERVICES=(account-grpc friends-nex relay-admin account-proxy mk8-authentication mk8-secure
 	angry-birds-star-wars wsc-authentication wsc-secure mc-authentication mc-secure
-	swapdoodle badge-arcade-authentication badge-arcade-secure discord-bot)
+	swapdoodle badge-arcade-authentication badge-arcade-secure discord-bot disney-infinity-3-wiiu-nex-server)
 if [ -n "$MII_BOT_PID" ]; then
 	SERVICES+=(mii-bot)
 fi
