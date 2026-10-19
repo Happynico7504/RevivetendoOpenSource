@@ -26,6 +26,7 @@ require (
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260706201446-f0a921348800 // indirect
 	gopkg.in/ini.v1 v1.67.3 // indirect
 )
 
@@ -33,6 +34,8 @@ require (
 	github.com/Happynico7504/badgearcade v0.0.0
 	github.com/minio/minio-go/v7 v7.3.0
 	github.com/redis/go-redis/v9 v9.22.0
+	google.golang.org/grpc v1.84.0
+	google.golang.org/protobuf v1.36.11
 )
 
 replace github.com/Happynico7504/badgearcade => ../badgearcade

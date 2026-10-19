@@ -48,6 +48,10 @@ type adminBadgeArcadeItem struct {
 	ReviewNote  string
 	Names       []adminBadgeArcadeName // English first, then languages that differ
 	Outline     string                 // "automatic" / "N custom shapes"
+	Tint        string                 // stages: rail strip colour
+	Template    string                 // layouts: template machine
+	Spots       int                    // layouts: badge spots
+	Obstacles   int                    // layouts: obstacles
 	BadgeID     uint32
 	UpdatedAt   time.Time
 	SubmittedAt sql.NullTime
@@ -102,6 +106,19 @@ func adminBadgeArcade(w http.ResponseWriter, r *http.Request) {
 		it.BadgeID = BadgeArcadeBadgeID(it.ID)
 		var sp badgeEditorSpec
 		json.Unmarshal(spec, &sp)
+		switch it.Kind {
+		case "stage":
+			it.Tint = sp.Tint
+			items = append(items, it)
+			continue
+		case "crane":
+			var ls badgeEditorLayoutSpec
+			json.Unmarshal(spec, &ls)
+			it.Template, it.Spots = ls.Layout.Template, layoutSpotCount(ls)
+			it.Obstacles = len(ls.Layout.Objects) - it.Spots
+			items = append(items, it)
+			continue
+		}
 		en := sp.Names[1]
 		it.Names = append(it.Names, adminBadgeArcadeName{"English", en})
 		for i := 0; i < 12; i++ {
@@ -171,6 +188,9 @@ func adminBadgeArcadeReview(w http.ResponseWriter, r *http.Request) {
 }
 
 // adminBadgeArcadeImage renders /admin/badge-arcade/img/{id}/{art|home|machine}.png.
+// For stages, machine.png is the top screen after ETC1 compression and
+// home.png a 200x120 thumbnail of it; layouts (art = their render) serve
+// their art for every name.
 func adminBadgeArcadeImage(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/admin/badge-arcade/img/"), "/")
 	if len(parts) != 2 {
@@ -183,7 +203,8 @@ func adminBadgeArcadeImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var art, spec []byte
-	if err := db.QueryRow(`SELECT art, spec FROM badge_arcade_creations WHERE id = $1`, id).Scan(&art, &spec); err != nil {
+	var kind string
+	if err := db.QueryRow(`SELECT kind, art, spec FROM badge_arcade_creations WHERE id = $1`, id).Scan(&kind, &art, &spec); err != nil {
 		http.NotFound(w, r)
 		return
 	}
@@ -198,8 +219,32 @@ func adminBadgeArcadeImage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad art", http.StatusInternalServerError)
 		return
 	}
+	if kind == "crane" {
+		if parts[1] == "home.png" {
+			w.Write(pngBytes(badgearcade.CoverImage(img, 200, 120)))
+		} else {
+			w.Write(art)
+		}
+		return
+	}
 	var sp badgeEditorSpec
 	json.Unmarshal(spec, &sp)
+	if kind == "stage" {
+		st, err := badgeEditorBuildStage("CrSt_Review", img, sp)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		switch parts[1] {
+		case "machine.png":
+			w.Write(pngBytes(st.Screen()))
+		case "home.png":
+			w.Write(pngBytes(badgearcade.CoverImage(st.Screen(), 200, 120)))
+		default:
+			http.NotFound(w, r)
+		}
+		return
+	}
 	p := badgearcade.BuildPrize(badgearcade.PrizeSpec{BadgeID: BadgeArcadeBadgeID(id), FileName: "Pr_Review", Category: "Review", Image: img, Collision: sp.Collision})
 	switch parts[1] {
 	case "home.png":
@@ -236,7 +281,7 @@ a{color:#2563eb}
 .imgs{display:flex;gap:.75rem;align-items:flex-end}
 .imgs figure{margin:0;text-align:center;font-size:.7rem;color:#666}
 .imgs img{display:block;border-radius:6px;background:repeating-conic-gradient(#e5e7eb 0 25%,#fff 0 50%) 0 0/12px 12px}
-.imgs .big{width:128px;height:128px}.imgs .home{width:128px;height:128px;image-rendering:pixelated}
+.imgs .big{width:128px;height:128px}.imgs .wide{width:300px;height:180px}.imgs .home{width:128px;height:128px;image-rendering:pixelated}
 h2{font-size:1.05rem;margin:0 0 .25rem}
 .meta{font-size:.8rem;color:#666;margin-bottom:.5rem}
 table{border-collapse:collapse;font-size:.85rem;margin-bottom:.6rem}
@@ -248,6 +293,7 @@ button{font:inherit;cursor:pointer;border:none;border-radius:4px;padding:.35rem 
 .ok{background:#dcfce7;color:#166534}.no{background:#fee2e2;color:#991b1b}.re{background:#e0e7ff;color:#3730a3}
 .note{font-size:.85rem;background:#fff7ed;border:1px solid #fed7aa;border-radius:6px;padding:.4rem .7rem;margin-bottom:.5rem}
 .empty{color:#666}
+
 </style>
 </head>
 <body>
@@ -259,13 +305,20 @@ button{font:inherit;cursor:pointer;border:none;border-radius:4px;padding:.35rem 
 {{range .Items}}
 <div class="item">
   <div class="imgs">
+    {{if eq .Kind "crane"}}
+    <figure><img class="wide" src="/inkay/admin/badge-arcade/img/{{.ID}}/art.png" alt=""><figcaption>layout (server render; spots drawn with the creator's badge)</figcaption></figure>
+    {{else if eq .Kind "stage"}}
+    <figure><img class="wide" src="/inkay/admin/badge-arcade/img/{{.ID}}/art.png" alt=""><figcaption>artwork (400×240)</figcaption></figure>
+    <figure><img class="wide" src="/inkay/admin/badge-arcade/img/{{.ID}}/machine.png" alt=""><figcaption>on the 3DS (after compression)</figcaption></figure>
+    {{else}}
     <figure><img class="big" src="/inkay/admin/badge-arcade/img/{{.ID}}/art.png" alt=""><figcaption>artwork</figcaption></figure>
     <figure><img class="home" src="/inkay/admin/badge-arcade/img/{{.ID}}/home.png" alt=""><figcaption>HOME Menu (64×64)</figcaption></figure>
     <figure><img class="big" src="/inkay/admin/badge-arcade/img/{{.ID}}/machine.png" alt=""><figcaption>in the machine</figcaption></figure>
+    {{end}}
   </div>
   <div>
     <h2>#{{.ID}} {{.Title}}</h2>
-    <div class="meta">by <strong>{{if .PNID}}{{.PNID}}{{else}}?{{end}}</strong> (PID {{.PID}}) · {{.Kind}} · outline {{.Outline}} · badge ID {{.BadgeID}}<br>
+    <div class="meta">by <strong>{{if .PNID}}{{.PNID}}{{else}}?{{end}}</strong> (PID {{.PID}}) · {{.Kind}} · {{if eq .Kind "crane"}}template {{.Template}} · {{.Spots}} badge spot(s) · {{.Obstacles}} obstacle(s)/attachment(s){{else if eq .Kind "stage"}}rail colour <span style="display:inline-block;width:.8em;height:.8em;border-radius:2px;vertical-align:middle;background:{{.Tint}}"></span> {{.Tint}}{{else}}outline {{.Outline}} · badge ID {{.BadgeID}}{{end}}<br>
       {{if .SubmittedAt.Valid}}submitted {{.SubmittedAt.Time.Format "2006-01-02 15:04"}} · {{end}}{{if .ReviewedAt.Valid}}reviewed {{.ReviewedAt.Time.Format "2006-01-02 15:04"}} · {{end}}updated {{.UpdatedAt.Format "2006-01-02 15:04"}}</div>
     <table>{{range .Names}}<tr><td class="l">{{.Lang}}</td><td>{{.Name}}</td></tr>{{end}}</table>
     {{if .ReviewNote}}<div class="note">Note: {{.ReviewNote}}</div>{{end}}

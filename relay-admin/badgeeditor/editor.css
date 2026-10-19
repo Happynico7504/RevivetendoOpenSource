@@ -41,10 +41,10 @@ summary{cursor:pointer;color:#475569}
 .previews{display:flex;flex-wrap:wrap;gap:1.25rem;align-items:flex-end}
 figure{margin:0;text-align:center}
 figcaption{font-size:.75rem;color:var(--muted);margin-top:.35rem}
-.home,.small,.machine{display:flex;align-items:center;justify-content:center;border-radius:8px;
+.home,.previews .small,.machine{display:flex;align-items:center;justify-content:center;border-radius:8px;
   background:repeating-conic-gradient(#e5e7eb 0 25%,#fff 0 50%) 0 0/16px 16px;border:1px solid var(--line)}
 .home{width:136px;height:136px}.home img{width:128px;height:128px;image-rendering:pixelated}
-.small{width:72px;height:72px}.small img{width:64px;height:64px;image-rendering:pixelated}
+.previews .small{width:72px;height:72px}.previews .small img{width:64px;height:64px;image-rendering:pixelated}
 .machine{position:relative;width:200px;height:200px;background:linear-gradient(#bfe3ff,#e8f6ff)}
 .machine img{position:absolute;width:160px;height:160px;left:20px;top:20px}
 .status{font-size:.85rem;margin:.6rem 0 0;min-height:1.2em}
@@ -63,3 +63,37 @@ button.submit{border-color:#16a34a;color:#166534}
 button.submit:hover{background:#f0fdf4}
 .rules{background:#fff;border:1px solid var(--line);border-radius:8px;padding:.6rem .9rem;margin-top:.75rem;font-size:.85rem}
 .rules p{margin:.2rem 0}.rules ul{margin:.3rem 0 .2rem;padding-left:1.2rem}.rules li{margin:.15rem 0}
+.modes{display:flex;gap:.4rem;margin-top:.6rem}
+.modes a{text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:.2rem .85rem;font-size:.85rem;color:#334155}
+.modes a.on{background:var(--accent);border-color:var(--accent);color:#fff}
+.stage-main{grid-template-columns:minmax(0,520px) minmax(0,1fr)}
+.stage-main .art{grid-row:span 2}
+.dropzone.wide{max-width:520px;aspect-ratio:5/3;background:#fff}
+.screen{display:flex;border-radius:8px;overflow:hidden;border:1px solid var(--line);max-width:100%}
+.screen img{width:400px;max-width:100%;aspect-ratio:5/3;display:block;background:#f1f5f9}
+.rail{width:30px;height:144px;border-radius:6px;overflow:hidden;border:1px solid var(--line);background:#f1f5f9}
+.rail img{width:30px;height:144px;display:block;image-rendering:pixelated}
+.item img.wide{width:132px;height:79px}
+@media (max-width:760px){.stage-main{grid-template-columns:1fr}}
+.layout-main{grid-template-columns:minmax(0,1fr) 320px}
+.layout-main .templates,.layout-main .art{grid-column:1}
+.layout-main .props{grid-column:2;grid-row:1/span 3}
+.layout-main .preview,.layout-main .save{grid-column:1}
+@media (max-width:900px){.layout-main{grid-template-columns:1fr}.layout-main .props{grid-column:1;grid-row:auto}}
+.tplgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:.5rem;margin-top:.6rem;max-height:420px;overflow:auto}
+.tpl{background:#fff;border:1px solid var(--line);border-radius:8px;padding:.4rem;text-align:center;font-size:.72rem;cursor:pointer}
+.tpl:hover{border-color:var(--accent)}
+.tpl img{width:64px;height:64px;display:block;margin:0 auto .25rem;border-radius:6px;image-rendering:pixelated}
+.tpl .warn{color:#b45309}
+.lycanvas{width:100%;max-width:960px;aspect-ratio:3/2;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:#334155}
+#canvas{width:100%;height:100%;display:block;touch-action:none;cursor:default}
+.palette{display:grid;grid-template-columns:repeat(auto-fill,minmax(64px,1fr));gap:.35rem;margin-top:.5rem;max-height:360px;overflow:auto}
+.palette button{padding:.2rem;height:64px;display:flex;align-items:center;justify-content:center;background:#e2e8f0}
+.palette img{max-width:56px;max-height:56px}
+.palette .inv{font-size:.6rem;color:var(--muted)}
+.prop{display:grid;grid-template-columns:90px 1fr 56px;gap:.4rem;align-items:center;font-size:.8rem;margin:.3rem 0}
+.prop input[type=range]{width:100%}
+.prop input[type=number]{width:56px;font:inherit;font-size:.8rem;border:1px solid #d1d5db;border-radius:4px;padding:.1rem .2rem}
+.muted{color:var(--muted)}
+select{font:inherit;font-size:.85rem;border:1px solid #d1d5db;border-radius:6px;padding:.25rem .4rem;background:#fff}
+.picker .item{cursor:pointer}.picker .item input{display:block;margin:0 auto .2rem}

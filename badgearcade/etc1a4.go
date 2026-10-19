@@ -1,18 +1,19 @@
 package badgearcade
 
-// 3DS ETC1A4 textures, as used by Badge Arcade's Miiverse gallery (Mii.Etc1_a4,
-// 128x128). Layout: the image is split into 8x8 tiles in row-major order; each
-// tile holds four 4x4 blocks in the order top-left, top-right, bottom-left,
-// bottom-right; each block is 8 bytes of 4-bit alpha followed by 8 bytes of
-// ETC1, both stored as little-endian uint64. Inside a block, pixel (x, y) is
-// index x*4+y for the alpha nibbles and the ETC1 index bits. Verified against
-// a real Mii face from Nintendo's archived gallery (testdata/badgearcade_mii.etc1a4).
+// 3DS ETC1 and ETC1A4 textures: badge art (.prb, 128x128 ETC1A4), the Miiverse
+// gallery (Mii.Etc1_a4, 128x128 ETC1A4) and crane stages (.crb, ETC1).
+// Layout: the image is split into 8x8 tiles in row-major order; each tile
+// holds four 4x4 blocks in the order top-left, top-right, bottom-left,
+// bottom-right. An ETC1 block is the standard ETC1 64-bit word stored as a
+// little-endian uint64; ETC1A4 puts 8 bytes of 4-bit alpha (little-endian
+// uint64) before each one. Inside a block, pixel (x, y) is index x*4+y for the
+// alpha nibbles and the ETC1 index bits. Verified against Nintendo's badges
+// and crane stages: decoding them any other way gives visibly noisy blocks.
 
 import (
 	"encoding/binary"
 	"image"
 	"image/color"
-	"math/bits"
 )
 
 var etc1Modifiers = [8][2]int{{2, 8}, {5, 17}, {9, 29}, {13, 42}, {18, 60}, {24, 80}, {33, 106}, {47, 183}}
@@ -40,119 +41,119 @@ func clamp255(v int) uint8 {
 	return uint8(v)
 }
 
-// DecodeETC1A4 decodes a w x h ETC1A4 texture.
-func DecodeETC1A4(data []byte, w, h int) *image.NRGBA {
-	img := image.NewNRGBA(image.Rect(0, 0, w, h))
-	for bi, o := range etc1a4BlockOrigins(w, h) {
-		if (bi+1)*16 > len(data) {
-			break
-		}
-		alpha := binary.LittleEndian.Uint64(data[bi*16:])
-		block := binary.LittleEndian.Uint64(data[bi*16+8:])
-		// The u64 is the standard big-endian ETC1 word; the bit layout below is
-		// Ohana3DS's, which reads each half byte-swapped.
-		top, bottom := bits.ReverseBytes32(uint32(block>>32)), bits.ReverseBytes32(uint32(block))
-		var base [2][3]int
-		if top&0x2000000 != 0 { // differential
-			for c, sh := range []uint{3, 11, 19} {
-				v1 := int(top>>sh) & 0x1f
-				d := int(top>>(sh-3)) & 7
-				if d >= 4 {
-					d -= 8
-				}
-				v2 := v1 + d
-				base[0][c] = v1<<3 | v1>>2
-				base[1][c] = v2<<3 | v2>>2
-			}
-		} else { // individual
-			for c, sh := range []uint{4, 12, 20} {
-				v1, v2 := int(top>>sh)&0xf, int(top>>(sh-4))&0xf
-				base[0][c], base[1][c] = v1<<4|v1, v2<<4|v2
-			}
-		}
-		tables := [2]int{int(top>>29) & 7, int(top>>26) & 7}
-		flip := top&0x1000000 != 0
-		for x := 0; x < 4; x++ {
-			for y := 0; y < 4; y++ {
-				i := uint(x*4 + y)
-				half := 0
-				if (!flip && x >= 2) || (flip && y >= 2) {
-					half = 1
-				}
-				ci := (bottom>>(i+16))&1<<1 | (bottom>>i)&1
-				mod := etc1Modifiers[tables[half]][ci&1]
-				if ci >= 2 {
-					mod = -mod
-				}
-				a := uint8(alpha>>(i*4)) & 0xf
-				img.SetNRGBA(o[0]+x, o[1]+y, color.NRGBA{
-					clamp255(base[half][0] + mod), clamp255(base[half][1] + mod), clamp255(base[half][2] + mod), a<<4 | a,
-				})
-			}
-		}
+// etc1Half reports which half (sub-block) of a 4x4 block pixel (x, y) is in.
+func etc1Half(x, y int, flip bool) int {
+	if (!flip && x >= 2) || (flip && y >= 2) {
+		return 1
 	}
-	return img
+	return 0
 }
 
-// EncodeETC1A4 encodes a w x h image (w, h multiples of 8) as ETC1A4, using
-// ETC1's individual mode with an exhaustive search over flip and tables -
-// plenty for a 128x128 Mii face.
-func EncodeETC1A4(img image.Image, w, h int) []byte {
-	px := func(x, y int) (int, int, int, uint8) {
-		c := color.NRGBAModel.Convert(img.At(img.Bounds().Min.X+x, img.Bounds().Min.Y+y)).(color.NRGBA)
-		return int(c.R), int(c.G), int(c.B), c.A
+// decodeETC1Block returns the 4x4 pixels of an ETC1 word, indexed [x][y].
+func decodeETC1Block(word uint64) (px [4][4][3]uint8) {
+	hi, lo := uint32(word>>32), uint32(word)
+	var base [2][3]int
+	if hi&2 != 0 { // differential
+		for c, sh := range []uint{27, 19, 11} {
+			v1 := int(hi>>sh) & 0x1f
+			d := int(hi>>(sh-3)) & 7
+			if d >= 4 {
+				d -= 8
+			}
+			v2 := (v1 + d) & 0x1f
+			base[0][c] = v1<<3 | v1>>2
+			base[1][c] = v2<<3 | v2>>2
+		}
+	} else { // individual
+		for c, sh := range []uint{28, 20, 12} {
+			v1, v2 := int(hi>>sh)&0xf, int(hi>>(sh-4))&0xf
+			base[0][c], base[1][c] = v1<<4|v1, v2<<4|v2
+		}
 	}
-	origins := etc1a4BlockOrigins(w, h)
-	out := make([]byte, len(origins)*16)
-	for bi, o := range origins {
-		var rgb [4][4][3]int
-		var alpha uint64
-		for x := 0; x < 4; x++ {
-			for y := 0; y < 4; y++ {
-				r, g, b, a := px(o[0]+x, o[1]+y)
-				rgb[x][y] = [3]int{r, g, b}
-				alpha |= uint64(a>>4) << (uint(x*4+y) * 4)
+	tables := [2]int{int(hi>>5) & 7, int(hi>>2) & 7}
+	flip := hi&1 != 0
+	for x := 0; x < 4; x++ {
+		for y := 0; y < 4; y++ {
+			i := uint(x*4 + y)
+			half := etc1Half(x, y, flip)
+			ci := (lo>>(i+16))&1<<1 | (lo>>i)&1
+			mod := etc1Modifiers[tables[half]][ci&1]
+			if ci >= 2 {
+				mod = -mod
+			}
+			for c := 0; c < 3; c++ {
+				px[x][y][c] = clamp255(base[half][c] + mod)
 			}
 		}
-		bestErr := -1
-		var best uint64
-		for _, flip := range []bool{false, true} {
-			var top, bottom uint32
-			if flip {
-				top |= 0x1000000
+	}
+	return px
+}
+
+// encodeETC1Block encodes 4x4 pixels (indexed [x][y]) as an ETC1 word, trying
+// both flips in individual and (where the base colours are close enough)
+// differential mode, with an exhaustive search over the modifier tables.
+func encodeETC1Block(rgb [4][4][3]int) uint64 {
+	bestErr := -1
+	var best uint64
+	for _, flip := range []bool{false, true} {
+		var halves [2][][3]int
+		var idx [2][]uint
+		for x := 0; x < 4; x++ {
+			for y := 0; y < 4; y++ {
+				h := etc1Half(x, y, flip)
+				halves[h] = append(halves[h], rgb[x][y])
+				idx[h] = append(idx[h], uint(x*4+y))
 			}
-			total := 0
-			for half := 0; half < 2; half++ {
-				var pixels [][3]int
-				var idx []uint
-				for x := 0; x < 4; x++ {
-					for y := 0; y < 4; y++ {
-						h := 0
-						if (!flip && x >= 2) || (flip && y >= 2) {
-							h = 1
-						}
-						if h == half {
-							pixels = append(pixels, rgb[x][y])
-							idx = append(idx, uint(x*4+y))
-						}
-					}
-				}
-				var avg [3]int
-				for _, p := range pixels {
-					for c := 0; c < 3; c++ {
-						avg[c] += p[c]
-					}
-				}
-				var q [3]int // 4-bit base colour
+		}
+		var avg [2][3]int
+		for h := 0; h < 2; h++ {
+			for _, p := range halves[h] {
 				for c := 0; c < 3; c++ {
-					q[c] = (avg[c]/len(pixels)*15 + 127) / 255
+					avg[h][c] += p[c]
 				}
+			}
+			for c := 0; c < 3; c++ {
+				avg[h][c] /= len(halves[h])
+			}
+		}
+		for _, diff := range []bool{false, true} {
+			var hi uint32
+			var base [2][3]int
+			ok := true
+			for c, sh := range []uint{27, 19, 11} {
+				if diff {
+					v1, v2 := (avg[0][c]*31+127)/255, (avg[1][c]*31+127)/255
+					d := v2 - v1
+					if d < -4 || d > 3 {
+						ok = false
+						break
+					}
+					hi |= uint32(v1)<<sh | uint32(d&7)<<(sh-3)
+					base[0][c], base[1][c] = v1<<3|v1>>2, v2<<3|v2>>2
+				} else {
+					v1, v2 := (avg[0][c]*15+127)/255, (avg[1][c]*15+127)/255
+					hi |= uint32(v1)<<(sh+1) | uint32(v2)<<(sh-3)
+					base[0][c], base[1][c] = v1<<4|v1, v2<<4|v2
+				}
+			}
+			if !ok {
+				continue
+			}
+			if diff {
+				hi |= 2
+			}
+			if flip {
+				hi |= 1
+			}
+			var lo uint32
+			total := 0
+			for h := 0; h < 2; h++ {
 				halfBest, bestTable := -1, 0
 				var bestCodes []uint32
 				for t := 0; t < 8; t++ {
 					sum := 0
-					codes := make([]uint32, len(pixels))
-					for pi, p := range pixels {
+					codes := make([]uint32, len(halves[h]))
+					for pi, p := range halves[h] {
 						pe := -1
 						for ci := uint32(0); ci < 4; ci++ {
 							mod := etc1Modifiers[t][ci&1]
@@ -161,7 +162,7 @@ func EncodeETC1A4(img image.Image, w, h int) []byte {
 							}
 							e := 0
 							for c := 0; c < 3; c++ {
-								d := int(clamp255(q[c]<<4|q[c]+mod)) - p[c]
+								d := int(clamp255(base[h][c]+mod)) - p[c]
 								e += d * d
 							}
 							if pe < 0 || e < pe {
@@ -175,21 +176,91 @@ func EncodeETC1A4(img image.Image, w, h int) []byte {
 					}
 				}
 				total += halfBest
-				if half == 0 {
-					top |= uint32(q[0])<<4 | uint32(q[1])<<12 | uint32(q[2])<<20 | uint32(bestTable)<<29
-				} else {
-					top |= uint32(q[0]) | uint32(q[1])<<8 | uint32(q[2])<<16 | uint32(bestTable)<<26
-				}
-				for pi, i := range idx {
-					bottom |= (bestCodes[pi]>>1&1)<<(i+16) | (bestCodes[pi]&1)<<i
+				hi |= uint32(bestTable) << (5 - 3*uint(h))
+				for pi, i := range idx[h] {
+					lo |= (bestCodes[pi]>>1&1)<<(i+16) | (bestCodes[pi]&1)<<i
 				}
 			}
 			if bestErr < 0 || total < bestErr {
-				bestErr, best = total, uint64(bits.ReverseBytes32(top))<<32|uint64(bits.ReverseBytes32(bottom))
+				bestErr, best = total, uint64(hi)<<32|uint64(lo)
 			}
 		}
+	}
+	return best
+}
+
+// DecodeETC1A4 decodes a w x h ETC1A4 texture.
+func DecodeETC1A4(data []byte, w, h int) *image.NRGBA {
+	img := image.NewNRGBA(image.Rect(0, 0, w, h))
+	for bi, o := range etc1a4BlockOrigins(w, h) {
+		if (bi+1)*16 > len(data) {
+			break
+		}
+		alpha := binary.LittleEndian.Uint64(data[bi*16:])
+		px := decodeETC1Block(binary.LittleEndian.Uint64(data[bi*16+8:]))
+		for x := 0; x < 4; x++ {
+			for y := 0; y < 4; y++ {
+				a := uint8(alpha>>(uint(x*4+y)*4)) & 0xf
+				p := px[x][y]
+				img.SetNRGBA(o[0]+x, o[1]+y, color.NRGBA{p[0], p[1], p[2], a<<4 | a})
+			}
+		}
+	}
+	return img
+}
+
+// DecodeETC1 decodes a w x h ETC1 texture (opaque).
+func DecodeETC1(data []byte, w, h int) *image.NRGBA {
+	img := image.NewNRGBA(image.Rect(0, 0, w, h))
+	for bi, o := range etc1a4BlockOrigins(w, h) {
+		if (bi+1)*8 > len(data) {
+			break
+		}
+		px := decodeETC1Block(binary.LittleEndian.Uint64(data[bi*8:]))
+		for x := 0; x < 4; x++ {
+			for y := 0; y < 4; y++ {
+				p := px[x][y]
+				img.SetNRGBA(o[0]+x, o[1]+y, color.NRGBA{p[0], p[1], p[2], 255})
+			}
+		}
+	}
+	return img
+}
+
+// blockPixels reads the 4x4 block at o from img as [x][y] RGB plus the
+// block's 4-bit alpha word.
+func blockPixels(img image.Image, o [2]int) (rgb [4][4][3]int, alpha uint64) {
+	b := img.Bounds()
+	for x := 0; x < 4; x++ {
+		for y := 0; y < 4; y++ {
+			c := color.NRGBAModel.Convert(img.At(b.Min.X+o[0]+x, b.Min.Y+o[1]+y)).(color.NRGBA)
+			rgb[x][y] = [3]int{int(c.R), int(c.G), int(c.B)}
+			alpha |= uint64(c.A>>4) << (uint(x*4+y) * 4)
+		}
+	}
+	return
+}
+
+// EncodeETC1A4 encodes a w x h image (w, h multiples of 8) as ETC1A4.
+func EncodeETC1A4(img image.Image, w, h int) []byte {
+	origins := etc1a4BlockOrigins(w, h)
+	out := make([]byte, len(origins)*16)
+	for bi, o := range origins {
+		rgb, alpha := blockPixels(img, o)
 		binary.LittleEndian.PutUint64(out[bi*16:], alpha)
-		binary.LittleEndian.PutUint64(out[bi*16+8:], best)
+		binary.LittleEndian.PutUint64(out[bi*16+8:], encodeETC1Block(rgb))
+	}
+	return out
+}
+
+// EncodeETC1 encodes a w x h image (w, h multiples of 8) as ETC1; alpha is
+// ignored.
+func EncodeETC1(img image.Image, w, h int) []byte {
+	origins := etc1a4BlockOrigins(w, h)
+	out := make([]byte, len(origins)*8)
+	for bi, o := range origins {
+		rgb, _ := blockPixels(img, o)
+		binary.LittleEndian.PutUint64(out[bi*8:], encodeETC1Block(rgb))
 	}
 	return out
 }

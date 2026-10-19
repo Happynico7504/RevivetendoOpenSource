@@ -1121,6 +1121,7 @@ type wscGatheringInfo struct {
 	PlayerCount int64   `json:"player_count"`
 	Players     []int64 `json:"players"`
 	Open        bool    `json:"open"`
+	InMatch     bool    `json:"in_match"` // host's CloseParticipation (match start) went through
 	Kind        string  `json:"kind"` // "friend", "club" or "public"; see gatheringKind
 	ClubCode    int64   `json:"club_code,omitempty"`
 	ClubName    string  `json:"club_name,omitempty"`
@@ -1208,6 +1209,7 @@ func startStatusServer() {
 					PlayerCount: bsonInt(d["player_count"]),
 				}
 				g.Open, _ = d["open"].(bool)
+				g.InMatch, _ = d["participation_closed"].(bool)
 				g.Kind = gatheringKind(d)
 				g.Connection, g.TunnelVia = gatheringConnection(uint32(g.GID), g.PlayerCount)
 				if code := bsonInt(d["club_code"]); code > 0 {

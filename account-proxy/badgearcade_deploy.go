@@ -6,23 +6,30 @@ package main
 //
 // A deployment is "live" (everyone), "test" (test consoles only, via the
 // experimental package) or "off", for an inclusive UTC date range, and fills
-// either a hall slot or the daily training crane (BonusStage). Deployments
-// show Friday to Sunday of the weekly lineup (see badgeArcadeLineupForEveryone).
+// either a hall slot or the daily training crane (BonusStage), on an approved
+// custom stage (relay-admin's stage editor). Custom badges never appear on
+// Nintendo's stages: deployments without a custom stage are skipped.
+// Deployments show Friday to Sunday of the weekly lineup (see badgeArcadeLineupForEveryone).
 
 import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"image"
+	"image/color"
+	"image/draw"
+	"image/png"
 	"log"
 	"math/rand/v2"
 	"net/http"
 	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,10 +40,15 @@ import (
 const (
 	badgeArcadeCustomBadgeBase = 900000000 // badge ID = base + creation ID (Nintendo's max: 80,100,000)
 	badgeArcadeCustomCraneBase = 9000      // machine ID = base + deployment ID (Nintendo's max: 4,498)
+	// Set (collection book) ID = base + the creator's set number
+	// (badge_arcade_user_sets). Nintendo's books run 25-9905; IDs above that
+	// are untested on hardware.
+	badgeArcadeCustomSetBase = 10000
 )
 
 type badgeArcadeDeploymentBadge struct {
 	CreationID int64
+	Set        *badgeArcadeSet // the creator's set; every custom badge files under one
 	Art        []byte
 	Spec       struct {
 		Names     [badgearcade.DisplayNameLanguages]string `json:"names"`
@@ -44,13 +56,125 @@ type badgeArcadeDeploymentBadge struct {
 	}
 }
 
+// badgeArcadeDeploymentStage is an approved custom stage: 400x240 art plus the
+// rail strip colour.
+type badgeArcadeDeploymentStage struct {
+	CreationID int64
+	Art        []byte
+	Tint       string
+}
+
+// badgeArcadeSet is a creator's set: every custom badge files under the set
+// of the player who made it, named after their Mii ("Nico's Badges") with
+// their Mii's face as the icon. Sets are made automatically, one per creator.
+type badgeArcadeSet struct {
+	No     int64 // stable per creator (badge_arcade_user_sets)
+	PID    int64
+	Icon   []byte // 64x64 PNG
+	Names  [badgearcade.DisplayNameLanguages]string
+	Badges int // the creator's approved badges
+}
+
+// badgeArcadeSetNames is "<name>'s Badges" in the 3DS language slots (0
+// Japanese, 1 English, 2 French, 3 German, 4 Italian, 5 Spanish, 6 Chinese,
+// 7 Korean, 8 Dutch, 9 Portuguese, 10 Russian, 11 Traditional Chinese).
+func badgeArcadeSetNames(name string) (n [badgearcade.DisplayNameLanguages]string) {
+	for i, f := range []string{"%sのバッジ", "%s's Badges", "Badges de %s", "Abzeichen von %s", "Spille di %s", "Insignias de %s",
+		"%s的徽章", "%s의 배지", "Badges van %s", "Emblemas de %s", "Значки: %s", "%s的徽章"} {
+		n[i] = fmt.Sprintf(f, name)
+	}
+	return n
+}
+
+var badgeArcadeUserSetsOnce sync.Once
+
+// loadBadgeArcadeCreatorSet returns (making it on first use) the set of the
+// creator pid, sharing loaded sets through cache. fallbackIcon (a badge's art)
+// is used when the creator's Mii face can't be fetched.
+func loadBadgeArcadeCreatorSet(ctx context.Context, pid int64, fallbackIcon []byte, cache map[int64]*badgeArcadeSet) *badgeArcadeSet {
+	if s, ok := cache[pid]; ok {
+		return s
+	}
+	badgeArcadeUserSetsOnce.Do(func() {
+		if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS badge_arcade_user_sets (
+			pid BIGINT PRIMARY KEY, no BIGSERIAL UNIQUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`); err != nil {
+			log.Printf("badge arcade sets: %v", err)
+		}
+	})
+	set := &badgeArcadeSet{PID: pid}
+	db.ExecContext(ctx, `INSERT INTO badge_arcade_user_sets (pid) VALUES ($1) ON CONFLICT (pid) DO NOTHING`, pid)
+	if err := db.QueryRowContext(ctx, `SELECT no FROM badge_arcade_user_sets WHERE pid = $1`, pid).Scan(&set.No); err != nil {
+		log.Printf("badge arcade sets: creator %d: %v", pid, err)
+		return nil
+	}
+	var name string
+	db.QueryRowContext(ctx, `SELECT COALESCE(NULLIF((SELECT mii_name FROM mii_names WHERE pid = $1), ''),
+		NULLIF((SELECT pnid FROM pnid_cache WHERE pid = $1), ''), 'Revivetendo')`, pid).Scan(&name)
+	set.Names = badgeArcadeSetNames(name)
+	db.QueryRowContext(ctx, `SELECT COUNT(*) FROM badge_arcade_creations WHERE pid = $1 AND kind = 'badge' AND status = 'approved'`, pid).Scan(&set.Badges)
+	// Icon: the Mii's face on a soft background (book icons are opaque).
+	icon := image.NewNRGBA(image.Rect(0, 0, 64, 64))
+	draw.Draw(icon, icon.Bounds(), &image.Uniform{color.NRGBA{0xdb, 0xea, 0xfe, 0xff}}, image.Point{}, draw.Src)
+	if face, err := fetchBadgeArcadeGalleryImage(fmt.Sprintf("%s/mii/%d/normal_face.png", badgeArcadeGalleryAssetBase, pid)); err == nil {
+		draw.Draw(icon, icon.Bounds(), badgearcade.FitImage(face, 64, 64, color.Transparent), image.Point{}, draw.Over)
+	} else if art, _, err := image.Decode(bytes.NewReader(fallbackIcon)); err == nil {
+		log.Printf("badge arcade sets: creator %d has no Mii face (%v), using a badge as the icon", pid, err)
+		draw.Draw(icon, icon.Bounds(), badgearcade.FitImage(art, 64, 64, color.Transparent), image.Point{}, draw.Over)
+	}
+	set.Icon = pngEncode(icon)
+	cache[pid] = set
+	return set
+}
+
+func pngEncode(img image.Image) []byte {
+	var b bytes.Buffer
+	png.Encode(&b, img)
+	return b.Bytes()
+}
+
 type badgeArcadeDeployment struct {
 	ID       int64
 	Name     string
 	Template string
-	Slot     string // "hall" or "training"
+	Layout   *badgearcade.Layout // approved custom layout (on Template), nil = Nintendo's
+	Slot     string              // "hall" or "training"
 	Status   string
 	Badges   []badgeArcadeDeploymentBadge
+	Stage    *badgeArcadeDeploymentStage // nil = none (or not approved): not built
+	Physics  badgeArcadePhysics          // overrides for every badge placement
+}
+
+// badgeArcadePhysics overrides the physics values of a machine's badge
+// placements (nil = keep the template's). Friction and restitution are
+// confirmed on hardware; Unk24 behaves as "physics strength" (probably Box2D's
+// gravity scale): 0.01 barely moves, 2 lags the game. See badgearcade.Placement.
+type badgeArcadePhysics struct {
+	Friction    *float32 `json:"friction,omitempty"`    // Unk18
+	Density     *float32 `json:"density,omitempty"`     // Unk1C
+	Restitution *float32 `json:"restitution,omitempty"` // Unk20
+	Unk24       *float32 `json:"unk24,omitempty"`       // physics strength: Unk24 and Unk28 (always equal in Nintendo's machines)
+}
+
+func (ph badgeArcadePhysics) apply(m *badgearcade.CraneInstance) {
+	for i := range m.MachinePrizes {
+		p := &m.MachinePrizes[i]
+		if ph.Friction != nil {
+			p.Unk18 = *ph.Friction
+		}
+		if ph.Density != nil {
+			p.Unk1C = *ph.Density
+		}
+		if ph.Restitution != nil {
+			p.Unk20 = *ph.Restitution
+		}
+		if ph.Unk24 != nil {
+			p.Unk24, p.Unk28 = *ph.Unk24, *ph.Unk24
+		}
+	}
+}
+
+func (ph badgeArcadePhysics) set() bool {
+	return ph.Friction != nil || ph.Density != nil || ph.Restitution != nil || ph.Unk24 != nil
 }
 
 // loadBadgeArcadeDeployments returns the deployments active on day: live ones,
@@ -61,8 +185,12 @@ func loadBadgeArcadeDeployments(ctx context.Context, day time.Time, includeTest 
 		statuses = append(statuses, "test")
 	}
 	date := day.Format("2006-01-02")
-	rows, err := db.QueryContext(ctx, `SELECT id, name, template, slot, status FROM badge_arcade_deployments
-		WHERE status = ANY($1) AND start_date <= $2::date AND end_date >= $2::date ORDER BY id`, "{"+strings.Join(statuses, ",")+"}", date)
+	rows, err := db.QueryContext(ctx, `SELECT d.id, d.name, d.template, d.slot, d.status, c.id, c.art, c.spec->>'tint', COALESCE(d.physics, '{}'),
+		COALESCE(l.spec->'layout', 'null')
+		FROM badge_arcade_deployments d
+		LEFT JOIN badge_arcade_creations c ON c.id = d.stage_id AND c.status = 'approved' AND c.kind = 'stage'
+		LEFT JOIN badge_arcade_creations l ON l.id = d.layout_id AND l.status = 'approved' AND l.kind = 'crane'
+		WHERE d.status = ANY($1) AND d.start_date <= $2::date AND d.end_date >= $2::date ORDER BY d.id`, "{"+strings.Join(statuses, ",")+"}", date)
 	if err != nil {
 		if strings.Contains(err.Error(), "does not exist") { // relay-admin hasn't created the tables yet
 			return nil, nil
@@ -70,29 +198,50 @@ func loadBadgeArcadeDeployments(ctx context.Context, day time.Time, includeTest 
 		return nil, err
 	}
 	var deps []badgeArcadeDeployment
+	sets := map[int64]*badgeArcadeSet{}
 	for rows.Next() {
 		var d badgeArcadeDeployment
-		if rows.Scan(&d.ID, &d.Name, &d.Template, &d.Slot, &d.Status) == nil {
+		var stageID sql.NullInt64
+		var stageArt []byte
+		var tint sql.NullString
+		var physics, layout []byte
+		if rows.Scan(&d.ID, &d.Name, &d.Template, &d.Slot, &d.Status, &stageID, &stageArt, &tint, &physics, &layout) == nil {
+			json.Unmarshal(physics, &d.Physics)
+			if string(layout) != "null" {
+				var l badgearcade.Layout
+				if json.Unmarshal(layout, &l) == nil && l.Template != "" {
+					d.Layout, d.Template = &l, l.Template
+				}
+			}
+			if stageID.Valid {
+				d.Stage = &badgeArcadeDeploymentStage{CreationID: stageID.Int64, Art: stageArt, Tint: tint.String}
+			}
 			deps = append(deps, d)
 		}
 	}
 	rows.Close()
 	for i := range deps {
-		brows, err := db.QueryContext(ctx, `SELECT c.id, c.art, c.spec FROM badge_arcade_deployment_badges b
+		brows, err := db.QueryContext(ctx, `SELECT c.id, c.pid, c.art, c.spec FROM badge_arcade_deployment_badges b
 			JOIN badge_arcade_creations c ON c.id = b.creation_id
 			WHERE b.deployment_id = $1 AND c.status = 'approved' AND c.kind = 'badge' ORDER BY b.position, c.id`, deps[i].ID)
 		if err != nil {
 			return nil, err
 		}
+		var pids []int64
 		for brows.Next() {
 			var b badgeArcadeDeploymentBadge
+			var pid int64
 			var spec []byte
-			if brows.Scan(&b.CreationID, &b.Art, &spec) == nil {
+			if brows.Scan(&b.CreationID, &pid, &b.Art, &spec) == nil {
 				json.Unmarshal(spec, &b.Spec)
 				deps[i].Badges = append(deps[i].Badges, b)
+				pids = append(pids, pid)
 			}
 		}
 		brows.Close()
+		for j := range deps[i].Badges {
+			deps[i].Badges[j].Set = loadBadgeArcadeCreatorSet(ctx, pids[j], deps[i].Badges[j].Art, sets)
+		}
 	}
 	return deps, nil
 }
@@ -103,6 +252,24 @@ func badgeArcadeDeploymentsFingerprint(deps []badgeArcadeDeployment) string {
 	h := sha256.New()
 	for _, d := range deps {
 		fmt.Fprintf(h, "%d|%s|%s|%s|", d.ID, d.Template, d.Slot, d.Status)
+		if d.Stage != nil {
+			art := sha256.Sum256(d.Stage.Art)
+			fmt.Fprintf(h, "stage:%d:%x:%s|", d.Stage.CreationID, art[:8], d.Stage.Tint)
+		}
+		if d.Layout != nil {
+			l, _ := json.Marshal(d.Layout)
+			fmt.Fprintf(h, "layout:%x|", sha256.Sum256(l))
+		}
+		for _, b := range d.Badges {
+			if b.Set != nil {
+				names, _ := json.Marshal(b.Set.Names)
+				fmt.Fprintf(h, "set:%d:%d:%x:%x|", b.Set.No, b.Set.Badges, sha256.Sum256(b.Set.Icon), sha256.Sum256(names))
+			}
+		}
+		if d.Physics.set() { // only when set, so existing fingerprints stay the same
+			ph, _ := json.Marshal(d.Physics)
+			fmt.Fprintf(h, "physics:%s|", ph)
+		}
 		for _, b := range d.Badges {
 			spec, _ := json.Marshal(b.Spec)
 			art := sha256.Sum256(b.Art)
@@ -118,6 +285,65 @@ func badgeArcadeDeployedBadgeName(creationID int64) string {
 }
 func badgeArcadeDeployedMachineName(deploymentID int64) string {
 	return fmt.Sprintf("Rvt_D%05d", deploymentID)
+}
+func badgeArcadeDeployedStageName(creationID int64) string {
+	return fmt.Sprintf("CrSt_Rvt_S%07d", creationID)
+}
+
+// badgeArcadeStageTint parses a stage's "#rrggbb" strip colour (grey if unset).
+func badgeArcadeStageTint(s string) color.NRGBA {
+	if v, err := strconv.ParseUint(strings.TrimPrefix(s, "#"), 16, 32); err == nil && len(s) == 7 {
+		return color.NRGBA{uint8(v >> 16), uint8(v >> 8), uint8(v), 255}
+	}
+	return color.NRGBA{0x9c, 0xa3, 0xaf, 255}
+}
+
+// buildBadgeArcadeSet builds a creator's collection book (.cab).
+func buildBadgeArcadeSet(set *badgeArcadeSet) (badgearcade.ArchiveFile, error) {
+	icon, _, err := image.Decode(bytes.NewReader(set.Icon))
+	if err != nil {
+		return badgearcade.ArchiveFile{}, fmt.Errorf("bad icon: %v", err)
+	}
+	name := fmt.Sprintf("Rvt_Set%07d", set.No)
+	pages := uint32(max(1, (set.Badges+5)/6)) // inferred; see badgearcade.CollectionBook
+	book, err := badgearcade.BuildCollectionBook(badgearcade.CollectionBookSpec{
+		ID: uint32(badgeArcadeCustomSetBase + set.No), Name: name, Names: set.Names, Icon: icon,
+		TotalBadges: uint32(set.Badges), Pages: pages,
+	})
+	if err != nil {
+		return badgearcade.ArchiveFile{}, err
+	}
+	return badgearcade.ArchiveFile{Path: badgearcade.CategoryPath(name), Data: badgearcade.CompressYaz0(book.Bytes()), Kind: "Category", Name: name}, nil
+}
+
+// badgeArcadeLookupAnyRegion finds a file in any region's archives.
+func badgeArcadeLookupAnyRegion(path string) ([]byte, bool) {
+	for _, prefix := range badgeArcadeGalleryPrefixes {
+		if r, err := loadBadgeArcadeRegion(prefix); err == nil {
+			if d, ok := r.lookup(path); ok {
+				return d, true
+			}
+		}
+	}
+	return nil, false
+}
+
+// buildBadgeArcadeStage builds a custom stage's .crb archive file.
+func buildBadgeArcadeStage(st *badgeArcadeDeploymentStage) (badgearcade.ArchiveFile, error) {
+	img, _, err := image.Decode(bytes.NewReader(st.Art))
+	if err != nil {
+		return badgearcade.ArchiveFile{}, fmt.Errorf("bad stage art: %v", err)
+	}
+	name := badgeArcadeDeployedStageName(st.CreationID)
+	crb, err := badgearcade.BuildCraneStage(name, img, badgeArcadeStageTint(st.Tint))
+	if err != nil {
+		return badgearcade.ArchiveFile{}, err
+	}
+	raw, err := crb.Bytes()
+	if err != nil {
+		return badgearcade.ArchiveFile{}, err
+	}
+	return badgearcade.ArchiveFile{Path: badgearcade.CraneStagePath(name), Data: badgearcade.CompressYaz0(raw), Kind: "Crane", Name: name}, nil
 }
 
 // applyBadgeArcadeDeployments adds the deployments' badges and machines to the
@@ -147,9 +373,12 @@ func applyBadgeArcadeDeployments(prefix string, kept []badgearcade.SARCEntry, sc
 	var hall []string
 	training := ""
 	for _, d := range deps {
+		if d.Stage == nil {
+			log.Printf("badge arcade deploy: deployment %d has no approved custom stage, skipped", d.ID)
+			continue
+		}
 		// The template machine comes from this region's archive, or - when this
-		// region doesn't have it - from one that does, together with the parts
-		// (stage, icon, objects) this region lacks.
+		// region doesn't have it - from one that does.
 		source := weekly
 		var src *badgeArcadeRegion
 		if !target.hasWeekly(badgearcade.CraneInstancePath(d.Template)) {
@@ -158,11 +387,6 @@ func applyBadgeArcadeDeployments(prefix string, kept []badgearcade.SARCEntry, sc
 				continue
 			}
 			source = src.weeklyRaw
-		}
-		category := badgearcade.TemplatePrizeCategory(source, d.Template)
-		if category == "" {
-			log.Printf("badge arcade deploy: %s: deployment %d: template %s has no prizes, skipped", prefix, d.ID, d.Template)
-			continue
 		}
 		var badges []*badgearcade.Prize
 		for _, b := range d.Badges {
@@ -175,10 +399,25 @@ func applyBadgeArcadeDeployments(prefix string, kept []badgearcade.SARCEntry, sc
 				log.Printf("badge arcade deploy: creation %d: bad art: %v", b.CreationID, err)
 				continue
 			}
+			// Custom badges never file under Nintendo's sets: no creator set, no badge.
+			if b.Set == nil {
+				log.Printf("badge arcade deploy: creation %d: no creator set, skipped", b.CreationID)
+				continue
+			}
+			book, err := buildBadgeArcadeSet(b.Set)
+			if err != nil {
+				log.Printf("badge arcade deploy: creation %d: set %d: %v, skipped", b.CreationID, b.Set.No, err)
+				continue
+			}
+			cat := book.Name
+			if !copied[book.Path] {
+				copied[book.Path] = true
+				extra = append(extra, book)
+			}
 			p := badgearcade.BuildPrize(badgearcade.PrizeSpec{
 				BadgeID:   uint32(badgeArcadeCustomBadgeBase + b.CreationID),
 				FileName:  badgeArcadeDeployedBadgeName(b.CreationID),
-				Category:  category,
+				Category:  cat,
 				Names:     b.Spec.Names,
 				Image:     img,
 				Collision: b.Spec.Collision,
@@ -192,26 +431,58 @@ func applyBadgeArcadeDeployments(prefix string, kept []badgearcade.SARCEntry, sc
 			continue
 		}
 		name := badgeArcadeDeployedMachineName(d.ID)
-		m, err := badgearcade.DeployMachine(source, d.Template, name, uint32(badgeArcadeCustomCraneBase+d.ID), badges)
+		var m *badgearcade.CraneInstance
+		if d.Layout != nil {
+			m, err = badgearcade.DeployLayout(source, *d.Layout, name, uint32(badgeArcadeCustomCraneBase+d.ID), badges)
+		} else {
+			m, err = badgearcade.DeployMachine(source, d.Template, name, uint32(badgeArcadeCustomCraneBase+d.ID), badges)
+		}
 		if err != nil {
 			log.Printf("badge arcade deploy: %s: deployment %d: %v", prefix, d.ID, err)
 			continue
 		}
-		if src != nil {
-			parts, missing := badgearcade.MachineParts(m, src.weekly, src.base)
-			if len(missing) > 0 {
-				log.Printf("badge arcade deploy: %s: deployment %d: parts of %s missing in %s: %v, skipped", prefix, d.ID, d.Template, src.prefix, missing)
+		stage, err := buildBadgeArcadeStage(d.Stage)
+		if err != nil {
+			log.Printf("badge arcade deploy: deployment %d: stage %d: %v, skipped", d.ID, d.Stage.CreationID, err)
+			continue
+		}
+		m.Crane = stage.Name
+		d.Physics.apply(m)
+		// Parts this region lacks (icon, obstacles, attachments) come from the
+		// template's region, else from any region: a layout may use obstacles
+		// that only shipped elsewhere.
+		var need []badgearcade.ArchiveFile
+		var missing []string
+		for _, part := range badgearcade.MachinePartPaths(m) {
+			if part.Path == stage.Path || target.has(part.Path) || copied[part.Path] {
 				continue
 			}
-			n := 0
-			for _, part := range parts {
-				if !target.has(part.Path) && !copied[part.Path] {
-					copied[part.Path] = true
-					extra = append(extra, part)
-					n++
-				}
+			data, ok := []byte(nil), false
+			if src != nil {
+				data, ok = src.lookup(part.Path)
 			}
-			log.Printf("badge arcade deploy: %s: deployment %d uses %s from %s (%d parts copied)", prefix, d.ID, d.Template, src.prefix, n)
+			if !ok {
+				data, ok = badgeArcadeLookupAnyRegion(part.Path)
+			}
+			if !ok {
+				missing = append(missing, part.Path)
+				continue
+			}
+			part.Data = data
+			need = append(need, part)
+		}
+		if len(missing) > 0 {
+			log.Printf("badge arcade deploy: %s: deployment %d: parts in no region: %v, skipped", prefix, d.ID, missing)
+			continue
+		}
+		for _, part := range append(need, stage) {
+			if !copied[part.Path] {
+				copied[part.Path] = true
+				extra = append(extra, part)
+			}
+		}
+		if len(need) > 0 {
+			log.Printf("badge arcade deploy: %s: deployment %d: %d parts copied from other regions", prefix, d.ID, len(need))
 		}
 		machines = append(machines, m)
 		if d.Slot == "training" {
@@ -221,7 +492,7 @@ func applyBadgeArcadeDeployments(prefix string, kept []badgearcade.SARCEntry, sc
 		}
 	}
 	if lineup {
-		offHall, offTraining, err := badgeArcadeOfficialForDay(day)
+		offHall, err := badgeArcadeOfficialForDay(day)
 		if err != nil {
 			return "", err
 		}
@@ -236,12 +507,18 @@ func applyBadgeArcadeDeployments(prefix string, kept []badgearcade.SARCEntry, sc
 				hall = append(hall, m.Name)
 			}
 		}
-		if training == "" {
-			official = append(official, offTraining)
-			training = offTraining.Name
+		// The training crane must be one of the day's hall machines: in all of
+		// Nintendo's archived schedules (21 days, 3 regions) it is, and with any
+		// other machine the game picks a random hall machine instead. A training
+		// deployment goes to the front of the hall so the 30-machine cap keeps it.
+		if training != "" {
+			hall = append([]string{training}, hall...)
 		}
 		if len(hall) > badgeArcadeHallSlots {
 			hall = hall[:badgeArcadeHallSlots]
+		}
+		if training == "" && len(hall) > 0 {
+			training = hall[int(day.UTC().Unix()/86400)%len(hall)]
 		}
 		copiedMachines := 0
 		for _, m := range official {
@@ -400,9 +677,10 @@ func badgeArcadeRegionWithTemplate(template string) *badgeArcadeRegion {
 // Weekly lineup, the same in every region: Monday to Thursday show official
 // machines (from all regions' archives, shuffled per week), Friday to Sunday
 // only our deployments (shuffled per day; official ones only when no hall
-// deployment is active). The training crane is official unless a training
-// deployment is active on a Friday to Sunday. Machines a region lacks are
-// copied in with their parts, badges and collection books.
+// deployment is active). The training crane is always one of the day's hall
+// machines (the game ignores any other): a training deployment when one is
+// active on a Friday to Sunday, else a hall machine picked per day. Machines a
+// region lacks are copied in with their parts, badges and collection books.
 //
 // badgeArcadeLineupForEveryone puts it into the stable package; when false,
 // only test consoles (experimental package) get it, and the stable package
@@ -487,16 +765,16 @@ func badgeArcadeWeekday(day time.Time) int { return (int(day.UTC().Weekday()) + 
 // badgeArcadeCustomDay: Friday to Sunday belong to our deployments.
 func badgeArcadeCustomDay(day time.Time) bool { return badgeArcadeWeekday(day) >= 4 }
 
-// badgeArcadeOfficialForDay picks the day's official hall machines and training
-// machine: the week's shuffle of the pool gives each weekday its own 30
-// machines (no repeats within a week) and training machine.
-func badgeArcadeOfficialForDay(day time.Time) (hall []badgeArcadeOfficialMachine, training badgeArcadeOfficialMachine, err error) {
+// badgeArcadeOfficialForDay picks the day's official hall machines: the week's
+// shuffle of the pool gives each weekday its own 30 machines (no repeats
+// within a week).
+func badgeArcadeOfficialForDay(day time.Time) (hall []badgeArcadeOfficialMachine, err error) {
 	pool, err := badgeArcadeOfficialPool()
 	if err != nil {
-		return nil, training, err
+		return nil, err
 	}
 	if len(pool) == 0 {
-		return nil, training, fmt.Errorf("no official machines")
+		return nil, fmt.Errorf("no official machines")
 	}
 	wd := badgeArcadeWeekday(day)
 	monday := day.UTC().Truncate(24*time.Hour).Unix()/86400 - int64(wd)
@@ -505,7 +783,7 @@ func badgeArcadeOfficialForDay(day time.Time) (hall []badgeArcadeOfficialMachine
 	for k := 0; k < badgeArcadeHallSlots; k++ {
 		hall = append(hall, pick(wd*badgeArcadeHallSlots+k))
 	}
-	return hall, pick(7*badgeArcadeHallSlots + wd), nil
+	return hall, nil
 }
 
 // scheduleBadgeArcadeLineup dates the given machines for today: hall machines

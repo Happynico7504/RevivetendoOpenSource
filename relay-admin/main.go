@@ -154,6 +154,23 @@ func formatHMS(d time.Duration) string {
 	return fmt.Sprintf("%02d:%02d:%02d", s/3600, (s%3600)/60, s%60)
 }
 
+// resolveGameName tries game server hex first (current connection), then TitleID as fallback.
+// Returns "" when neither resolves so templates can show a fallback.
+func resolveGameName(titleID int64, serverHex string) string {
+	if serverHex != "" {
+		if name, ok := gameServerTitles[strings.ToUpper(serverHex)]; ok {
+			return name
+		}
+	}
+	if titleID != 0 {
+		key := fmt.Sprintf("%08X", uint64(titleID)&0xFFFFFFFF)
+		if name, ok := gameServerTitles[key]; ok {
+			return name
+		}
+	}
+	return ""
+}
+
 var tmplFuncs = template.FuncMap{
 	// msgKey is the i18n key of a fixed ?msg= notice ("" when it has none).
 	"msgKey": func(msg string) string { return msgKeys[msg] },
@@ -200,22 +217,7 @@ var tmplFuncs = template.FuncMap{
 		}
 		return fmt.Sprintf("%016X", uint64(id))
 	},
-	// resolveGameName tries game server hex first (current connection), then TitleID as fallback.
-	// Returns "" when neither resolves so templates can show a fallback.
-	"resolveGameName": func(titleID int64, serverHex string) string {
-		if serverHex != "" {
-			if name, ok := gameServerTitles[strings.ToUpper(serverHex)]; ok {
-				return name
-			}
-		}
-		if titleID != 0 {
-			key := fmt.Sprintf("%08X", uint64(titleID)&0xFFFFFFFF)
-			if name, ok := gameServerTitles[key]; ok {
-				return name
-			}
-		}
-		return ""
-	},
+	"resolveGameName": resolveGameName,
 	// localTime renders a time.Time as a <span> carrying the real UTC instant plus a
 	// UTC-formatted fallback (for no-JS clients / crawlers). localTimeScript then
 	// rewrites it client-side to the viewer's local wall-clock time, labeled "UTC+X"
@@ -372,6 +374,25 @@ CREATE TABLE IF NOT EXISTS patreon_pending (
 	coins           INTEGER     NOT NULL,
 	created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- One MCP API key per account; only its SHA-256 is kept (shown once on reset).
+CREATE TABLE IF NOT EXISTS mcp_api_keys (
+	pid          BIGINT      PRIMARY KEY,
+	key_hash     TEXT        NOT NULL UNIQUE,
+	key_prefix   TEXT        NOT NULL,
+	created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	last_used_at TIMESTAMPTZ
+);
+
+-- What an account chose to share publicly (both off by default): its Wii U's online state on
+-- the stream overlay (whose URL only carries a PNID), and a listing with online status and
+-- current game on the public Who's Online page.
+CREATE TABLE IF NOT EXISTS presence_sharing (
+	pid            BIGINT      PRIMARY KEY,
+	overlay_online BOOLEAN     NOT NULL DEFAULT false,
+	public_list    BOOLEAN     NOT NULL DEFAULT false,
+	updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 `
 
 const seedRedirects = `
@@ -514,6 +535,8 @@ func main() {
 			log.Printf("swapdoodle s3: %v", err)
 		}
 		swapdoodleS3Bucket = sdEnv["PN_SD_CONFIG_S3_BUCKET"]
+		swapdoodleGRPCPort = strings.TrimSpace(sdEnv["PN_SD_GRPC_SERVER_PORT"])
+		swapdoodleGRPCAPIKey = strings.TrimSpace(sdEnv["PN_SD_CONFIG_GRPC_API_KEY"])
 	} else {
 		log.Printf("swapdoodle .env not found, swapdoodle admin page disabled: %v", err)
 	}
@@ -546,6 +569,10 @@ func main() {
 	http.HandleFunc("/my/discord/presence/callback", myDiscordPresenceCallback)
 	http.HandleFunc("/my/discord/presence/unlink", myDiscordPresenceUnlink)
 	http.HandleFunc("/my/account", myAccountHandler)
+	http.HandleFunc("/my/account/api-key", myAPIKeyResetHandler)
+	http.HandleFunc("/my/account/sharing", myPresenceSharingHandler)
+	http.HandleFunc("/my/mcp", myMCPHandler)
+	http.HandleFunc("/my/ai-tools", myAIToolsHandler)
 	http.HandleFunc("/my/patreon", myPatreonHandler)
 	http.HandleFunc("/my/patreon/start", myPatreonStart)
 	http.HandleFunc("/my/patreon/callback", myPatreonCallback)
@@ -586,6 +613,8 @@ func main() {
 	http.HandleFunc("/admin/spotpass-3ds/detail/", requireClientCert(adminSwapdoodleNoteDetail))
 	http.HandleFunc("/admin/spotpass-3ds/note/", requireClientCert(adminSwapdoodleNotePage))
 	http.HandleFunc("/admin/spotpass-3ds/thumbnail/", requireClientCert(adminSwapdoodleThumbnail))
+	http.HandleFunc("/admin/spotpass-3ds/lookup", requireClientCert(adminSwapdoodleLookup))
+	http.HandleFunc("/admin/spotpass-3ds/raw", requireClientCert(adminSwapdoodleRaw))
 	http.HandleFunc("/admin/spotpass-3ds-sysmsg/", requireClientCert(adminSpotpass3DSSysMsg))
 	http.HandleFunc("/admin/spotpass-3ds-sysmsg/add", requireClientCert(adminSpotpass3DSSysMsgAdd))
 	http.HandleFunc("/admin/spotpass-3ds-sysmsg/toggle", requireClientCert(adminSpotpass3DSSysMsgToggle))
@@ -622,6 +651,9 @@ func main() {
 	http.HandleFunc("/wsc-public/nat/", wscNATInfo)
 	http.HandleFunc("/wsc-public/api/players", apiWSCPlayers)
 	http.HandleFunc("/wsc-public/overlay", apiWSCOverlay)
+	http.HandleFunc("/wsc-public/api/online", apiWSCOverlayOnline)
+	http.HandleFunc("/online/", publicOnlineHandler)
+	http.HandleFunc("/online/api", apiPublicOnline)
 
 	addr := "127.0.0.1:9004"
 	log.Printf("relay-admin listening on %s", addr)
@@ -838,6 +870,7 @@ type WSCGatheringRow struct {
 	MaxPlayers  int64
 	Players     []WSCPlayerRow
 	Open        bool
+	InMatch     bool   // the host closed participation: the match is running
 	Kind        string // "friend", "club" or "public" (wsc-secure's gatheringKind)
 	ClubName    string // host's club, when wsc-secure knows its name
 	Connection  string // "tunnel", "direct" or "" (host still alone)
@@ -951,6 +984,7 @@ func fetchWSCStatus() WSCDashData {
 			PlayerCount int64   `json:"player_count"`
 			Players     []int64 `json:"players"`
 			Open        bool    `json:"open"`
+			InMatch     bool    `json:"in_match"`
 			Kind        string  `json:"kind"`
 			ClubName    string  `json:"club_name"`
 			Connection  string  `json:"connection"`
@@ -1044,6 +1078,7 @@ func fetchWSCStatus() WSCDashData {
 			PlayerCount: g.PlayerCount,
 			MaxPlayers:  g.MaxPlayers,
 			Open:        g.Open,
+			InMatch:     g.InMatch,
 			Kind:        g.Kind,
 			ClubName:    g.ClubName,
 			Connection:  g.Connection,
@@ -1110,7 +1145,7 @@ th{text-align:left;border-bottom:2px solid #e4e4e7;padding:.5rem .75rem;color:#6
 td{padding:.5rem .75rem;border-bottom:1px solid #f0f0f0;vertical-align:middle}
 tr:last-child td{border-bottom:none}
 .badge{display:inline-block;padding:.2rem .5rem;border-radius:4px;font-size:.75rem;font-weight:600}
-.on{background:#dcfce7;color:#166534}.off{background:#fee2e2;color:#991b1b}
+.on{background:#dcfce7;color:#166534}.off{background:#fee2e2;color:#991b1b}.badge.match{background:#dbeafe;color:#1e40af}
 .tag{display:inline-block;padding:.15rem .4rem;border-radius:4px;font-size:.75rem;background:#e0e7ff;color:#3730a3}
 .conn{display:inline-block;padding:.15rem .4rem;border-radius:4px;font-size:.75rem;background:#f4f4f5;color:#3f3f46}.conn.tunnel{background:#dbeafe;color:#1e40af}
 .kind{display:inline-block;padding:.15rem .4rem;border-radius:4px;font-size:.75rem;background:#f4f4f5;color:#3f3f46}.kind.friend{background:#f3e8ff;color:#6b21a8}.kind.club{background:#fef3c7;color:#92400e}
@@ -1165,7 +1200,7 @@ tr:last-child td{border-bottom:none}
     {{range .Players}}{{if .PNID}}@{{.PNID}}{{else}}<span class="mono">{{.PID}}</span>{{end}} {{end}}
   </td>
   <td class="mono">{{.PlayerCount}}/{{.MaxPlayers}}</td>
-  <td><span class="badge {{if .Open}}on{{else}}off{{end}}">{{if .Open}}<span data-i18n="wsc.open">open</span>{{else}}<span data-i18n="wsc.full">full</span>{{end}}</span></td>
+  <td>{{if .InMatch}}<span class="badge match" data-i18n="wsc.in_match">in match</span>{{else if .Open}}<span class="badge on" data-i18n="wsc.open">open</span>{{else}}<span class="badge off" data-i18n="wsc.full">full</span>{{end}}</td>
   <td>{{if eq .Connection "tunnel"}}<span class="conn tunnel"><span data-i18n="conn.tunnel">Tunnel</span> · {{wscTunnelRegion .TunnelVia}}</span>{{else if eq .Connection "direct"}}<span class="conn" data-i18n="conn.direct">Direct</span>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
 </tr>
 {{end}}
@@ -1388,6 +1423,7 @@ func apiWSCPlayers(w http.ResponseWriter, r *http.Request) {
 		PlayerCount int64        `json:"player_count"`
 		MaxPlayers  int64        `json:"max_players"`
 		Open        bool         `json:"open"`
+		InMatch     bool         `json:"in_match"`
 		Kind        string       `json:"kind"`
 		KindLabel   string       `json:"kind_label"`
 		ClubName    string       `json:"club_name,omitempty"`
@@ -1429,6 +1465,7 @@ func apiWSCPlayers(w http.ResponseWriter, r *http.Request) {
 			PlayerCount: g.PlayerCount,
 			MaxPlayers:  g.MaxPlayers,
 			Open:        g.Open,
+			InMatch:     g.InMatch,
 			Kind:        g.Kind,
 			KindLabel:   wscKindLabel(g.Kind),
 			ClubName:    g.ClubName,
@@ -1467,7 +1504,7 @@ body{background:transparent;font-family:'Segoe UI',Arial,sans-serif;padding:14px
 .card{background:rgba(0,0,0,0.72);border-radius:10px;padding:10px 14px;color:#fff;backdrop-filter:blur(4px)}
 .sport{font-size:12px;font-weight:bold;letter-spacing:.5px;color:#7ecfff;margin-bottom:8px;display:flex;align-items:center;gap:6px}
 .badge{font-size:10px;border-radius:3px;padding:1px 6px;font-weight:normal}
-.open{background:#4caf50}.match{background:#e53935}
+.open{background:#4caf50}.full{background:#fb8c00}.match{background:#e53935}
 .kind{background:rgba(255,255,255,.18)}.kind.friend{background:#8e44ad}.kind.club{background:#f39c12}
 .player{display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.08)}
 .player:last-child{border-bottom:none}
@@ -1481,10 +1518,16 @@ body{background:transparent;font-family:'Segoe UI',Arial,sans-serif;padding:14px
 .setup h2{font-size:15px;margin-bottom:8px;color:#7ecfff}
 .setup code{background:rgba(255,255,255,.15);border-radius:4px;padding:2px 6px;font-family:monospace;font-size:12px;word-break:break-all}
 .setup p{margin-top:8px}
+#log{display:block;width:fit-content;min-width:200px;max-width:340px;margin-top:8px;transition:opacity .6s}
+#log.hide{opacity:0}
+#log:empty{display:none}
+.ev{display:flex;gap:8px;font-size:12px;line-height:1.5}
+.ev .t{color:rgba(255,255,255,.45);font-variant-numeric:tabular-nums}
 </style>
 </head>
 <body data-no-lang-select>
 <div id="overlay"></div>
+<div id="log" class="card"></div>
 <script>
 var params=new URLSearchParams(location.search);
 var PNID=(params.get('pnid')||'').trim();
@@ -1494,6 +1537,114 @@ if(!PNID){
     document.getElementById('overlay').innerHTML='<div class="setup"><h2>'+I18N.t('ov.h2','WSC Stream Overlay')+'</h2><p>'+I18N.t('ov.add_pnid','Add your PNID to the URL to use this overlay:')+'</p><p><code>'+location.href+(location.search?'&':'?')+'pnid=YourPNID</code></p><p>'+I18N.t('ov.obs','Then add this URL as a Browser Source in OBS with <strong>transparent background</strong>.')+'</p></div>';
   });
 }else{
+  // Sounds, synthesized with WebAudio so there are no files to host. ?sound=0 turns them
+  // off, ?volume=0-100 sets the level. OBS browser sources may autoplay; a normal browser
+  // tab only gets sound after a click on the page.
+  var SOUND=params.get('sound')!=='0';
+  var VOLUME=Math.max(0,Math.min(100,parseInt(params.get('volume')||'60',10)||0))/100;
+  var actx=null,nextFree=0;
+  function audio(){
+    if(!actx){try{actx=new (window.AudioContext||window.webkitAudioContext)();}catch(e){return null;}}
+    if(actx.state==='suspended')actx.resume();
+    return actx;
+  }
+  document.addEventListener('click',audio);
+  // Each sound is a list of notes: [frequency Hz, start offset s, length s, waveform].
+  var SOUNDS={
+    you_join:  [[523.25,0,.12,'triangle'],[783.99,.1,.22,'triangle']],
+    you_leave: [[783.99,0,.12,'triangle'],[523.25,.1,.22,'triangle']],
+    other_join:[[880,0,.08,'sine'],[1174.66,.07,.14,'sine']],
+    other_leave:[[587.33,0,.08,'sine'],[440,.07,.14,'sine']],
+    match_start:[[523.25,0,.1,'square'],[659.25,.1,.1,'square'],[783.99,.2,.1,'square'],[1046.5,.3,.35,'square']]
+  };
+  function play(name){
+    if(!SOUND||!VOLUME)return;
+    var ctx=audio();if(!ctx)return;
+    var notes=SOUNDS[name],t0=Math.max(ctx.currentTime+.02,nextFree),end=t0;
+    notes.forEach(function(n){
+      var o=ctx.createOscillator(),g=ctx.createGain(),t=t0+n[1],peak=(n[3]==='square'?.12:.3)*VOLUME;
+      o.type=n[3];o.frequency.value=n[0];
+      g.gain.setValueAtTime(0,t);
+      g.gain.linearRampToValueAtTime(peak,t+.01);
+      g.gain.exponentialRampToValueAtTime(.0001,t+n[2]);
+      o.connect(g);g.connect(ctx.destination);
+      o.start(t);o.stop(t+n[2]+.02);
+      end=Math.max(end,t+n[2]);
+    });
+    nextFree=end+.15; // queue sounds from the same poll one after another
+  }
+
+  function esc(v){var d=document.createElement('div');d.textContent=String(v);return d.innerHTML;}
+
+  // Event log below the card: the last 5 events. It fades out 15s after the latest event,
+  // but not before 45s after the overlay started.
+  var LOG_MAX=5,LOG_IDLE=15000,LOG_STARTUP=45000;
+  var started=Date.now(),lastEvent=0,events=[];
+  function two(n){return (n<10?'0':'')+n;}
+  function logEvent(key,fallback,args){
+    var d=new Date();
+    events.push({key:key,fallback:fallback,args:args,time:two(d.getHours())+':'+two(d.getMinutes())+':'+two(d.getSeconds())});
+    if(events.length>LOG_MAX)events.shift();
+    lastEvent=Date.now();
+    renderLog();
+  }
+  function renderLog(){
+    document.getElementById('log').innerHTML=events.map(function(e){
+      return '<div class="ev"><span class="t">'+e.time+'</span><span>'+I18N.fill(I18N.t(e.key,e.fallback),e.args)+'</span></div>';
+    }).join('');
+    showLog();
+  }
+  function showLog(){
+    var now=Date.now();
+    document.getElementById('log').classList.toggle('hide',now>started+LOG_STARTUP&&now>lastEvent+LOG_IDLE);
+  }
+  setInterval(showLog,1000);
+
+  // What we saw last poll: null when not in a gathering. There is no game-end sound: a match
+  // ends by its players leaving, which looks the same as someone disconnecting mid-match.
+  var last,lastConnected,first=true;
+  function track(connected,g){
+    var cur=null;
+    if(g){
+      var others={};
+      (g.players||[]).forEach(function(p){
+        if((p.pnid||'').toLowerCase()!==PNID.toLowerCase())others[p.pid]=p.mii_name||p.pnid||('PID:'+p.pid);
+      });
+      cur={gid:g.gid,inMatch:!!g.in_match,others:others};
+    }
+    // Nothing is logged or played for whatever was going on at page load.
+    if(first){first=false;last=cur;lastConnected=connected;return;}
+    var prev=last,wasConnected=lastConnected;last=cur;lastConnected=connected;
+    if(prev&&(!cur||cur.gid!==prev.gid)){
+      play('you_leave');
+      logEvent('ov.ev_leave','Session left');
+      prev=null;
+    }
+    if(wasConnected&&!connected)logEvent('ov.ev_wsc_off','WSC disconnected');
+    if(!wasConnected&&connected)logEvent('ov.ev_wsc_on','WSC started');
+    if(!cur)return;
+    if(!prev){play('you_join');logEvent('ov.ev_join','Session joined');return;}
+    var joined=Object.keys(cur.others).filter(function(p){return !(p in prev.others);});
+    var left=Object.keys(prev.others).filter(function(p){return !(p in cur.others);});
+    if(left.length)play('other_leave');
+    left.forEach(function(p){logEvent('ov.ev_p_leave','{name} left',{name:prev.others[p]});});
+    if(joined.length)play('other_join');
+    joined.forEach(function(p){logEvent('ov.ev_p_join','{name} joined',{name:cur.others[p]});});
+    if(!prev.inMatch&&cur.inMatch){play('match_start');logEvent('ov.ev_match','Match started');}
+  }
+
+  // Wii U online/offline, only for accounts that turned it on on My Account (the endpoint
+  // says shared:false otherwise). Like above, the first answer is just the starting point.
+  var lastOnline=null;
+  function pollOnline(){
+    fetch('/wsc-public/api/online?pnid='+encodeURIComponent(PNID)).then(function(r){return r.json();}).then(function(d){
+      if(!d.shared){lastOnline=null;return;}
+      var on=!!d.online;
+      if(lastOnline!==null&&on!==lastOnline)logEvent(on?'ov.ev_online':'ov.ev_offline',on?'Wii U online':'Wii U offline');
+      lastOnline=on;
+    }).catch(function(){});
+  }
+
   function render(data){
     var el=document.getElementById('overlay');
     // Not connected to the WSC server (or the server itself is down): show nothing at
@@ -1502,25 +1653,28 @@ if(!PNID){
     if(data&&data.server_up){
       (data.players||[]).forEach(function(p){if((p.pnid||'').toLowerCase()===PNID.toLowerCase())connected=true;});
     }
-    if(!connected){el.innerHTML='';return;}
     var g=null;
-    (data.gatherings||[]).forEach(function(gg){
+    if(connected)(data.gatherings||[]).forEach(function(gg){
       (gg.players||[]).forEach(function(p){if((p.pnid||'').toLowerCase()===PNID.toLowerCase())g=gg;});
     });
+    track(connected,g);
+    if(!connected){el.innerHTML='';return;}
     if(!g){el.innerHTML='<div class="card"><span class="offline">'+I18N.t('ov.no_session','Not in a session')+'</span></div>';return;}
-    var badge=g.open?'<span class="badge open">'+I18N.t('ov.open','Open')+'</span>':'<span class="badge match">'+I18N.t('ov.in_match','In Match')+'</span>';
+    var badge=g.in_match?'<span class="badge match">'+I18N.t('ov.in_match','In Match')+'</span>':
+      g.open?'<span class="badge open">'+I18N.t('ov.open','Open')+'</span>':'<span class="badge full">'+I18N.t('ov.full','Full')+'</span>';
     badge='<span class="badge kind '+(g.kind||'public')+'">'+I18N.t('kind.'+(g.kind||'public'),g.kind_label||'Public')+'</span>'+badge;
     var rows=(g.players||[]).map(function(p){
       var you=(p.pnid||'').toLowerCase()===PNID.toLowerCase();
       var nm=p.mii_name||p.pnid||('PID:'+p.pid);
       var mii='<div class="mii"><img src="https://sos-de-fra-1.exo.io/olv-data/mii/'+p.pid+'/normal_face.png" onerror="this.style.display=\'none\'"></div>';
-      return '<div class="player">'+mii+'<div><div class="name'+(you?' you':'')+'">'+(you?'&#9654; ':'')+nm+'</div>'+(p.pnid?'<div class="pnid">@'+p.pnid+'</div>':'')+'</div></div>';
+      return '<div class="player">'+mii+'<div><div class="name'+(you?' you':'')+'">'+(you?'&#9654; ':'')+esc(nm)+'</div>'+(p.pnid?'<div class="pnid">@'+esc(p.pnid)+'</div>':'')+'</div></div>';
     }).join('');
     el.innerHTML='<div class="card"><div class="sport">'+I18N.t('sport.'+String(g.sport_name).toLowerCase(),g.sport_name)+badge+'</div>'+rows+'</div>';
   }
   function refresh(){fetch('/wsc-public/api/players').then(function(r){return r.json();}).then(render).catch(function(){});}
-  I18N.ready(refresh);
-  setInterval(refresh,5000);
+  I18N.ready(function(){logEvent('ov.ev_started','Overlay started');refresh();pollOnline();});
+  setInterval(refresh,3000);
+  setInterval(pollOnline,3000);
 }
 </script>
 </body>
@@ -1854,9 +2008,17 @@ tr:last-child td{border-bottom:none}
     <h2 data-i18n="land.videos">Revivetendo TV</h2>
     <p data-i18n="land.videos_desc">Upload your own videos for the Nintendo eShop on Wii U and 3DS — staff review them before they go live</p>
   </a>
+  <a class="card" href="/inkay/my/ai-tools">
+    <h2 data-i18n="land.ai">AI Tools (MCP)</h2>
+    <p data-i18n="land.ai_desc">Connect Claude, ChatGPT Codex, Cursor, VS Code, Gemini and other AI assistants to your Revivetendo account</p>
+  </a>
   <a class="card" href="/wsc-public/">
     <h2 data-i18n="land.wsc">WSC Status and Players/Sessions</h2>
     <p data-i18n="land.wsc_desc">Live Wii Sports Club players and active matchmaking sessions</p>
+  </a>
+  <a class="card" href="/inkay/online/">
+    <h2 data-i18n="land.online">Who's Online</h2>
+    <p data-i18n="land.online_desc">Players who share their online status, with the game they are playing right now</p>
   </a>
   <a class="card" href="/inkay/admin/">
     <h2 data-i18n="land.admin">Admin</h2>
@@ -1869,6 +2031,7 @@ tr:last-child td{border-bottom:none}
     <tr><th data-i18n="land.endpoint">Endpoint</th><th data-i18n="land.description">Description</th></tr>
     <tr><td>GET /inkay/api/stats</td><td data-i18n="land.api_stats">Stats as JSON</td></tr>
     <tr><td>GET /inkay/api/redirects</td><td data-i18n="land.api_redirects">Active redirects as JSON</td></tr>
+    <tr><td>GET /inkay/online/api</td><td data-i18n="land.api_online">Who's Online as JSON</td></tr>
   </table>
 </div>
 </body>
@@ -3037,6 +3200,7 @@ td{padding:.4rem .6rem;border-bottom:1px solid #f0f0f0}
 <body>
 <p><a href="/inkay/admin/spotpass-3ds/">← Back to Swapdoodle notes</a></p>
 <h1>Note <span class="mono">{{.DataID}}</span></h1>
+{{if .NoteID}}<p>Note ID <span class="mono">{{.NoteID}}</span> &middot; <a href="/inkay/admin/spotpass-3ds/raw?note_id={{.NoteID}}">Download raw object</a></p>{{end}}
 
 {{if .DetailErr}}<div class="err">Couldn't load note content: {{.DetailErr}}</div>{{end}}
 
@@ -3094,7 +3258,8 @@ func adminSwapdoodleNotePage(w http.ResponseWriter, r *http.Request) {
 		Rows      []SwapdoodleNote
 		Detail    *swapdoodleNoteDetail
 		DetailErr string
-	}{dataID, swapdoodleNoteByDataID(dataID), detail, detailErrMsg}
+		NoteID    string
+	}{dataID, swapdoodleNoteByDataID(dataID), detail, detailErrMsg, swapdoodleNoteIDForDataID(dataID)}
 	w.Header().Set("Content-Type", "text/html")
 	swapdoodleNoteTmpl.Execute(w, data)
 }
@@ -3140,6 +3305,15 @@ tr.note-row:hover{background:#fafafa}
 <h1>Swapdoodle SpotPass Notes</h1>
 {{if .Msg}}<div class="msg">{{.Msg}}</div>{{end}}
 {{if .Err}}<div class="err">{{.Err}}</div>{{end}}
+<form method="get" action="/inkay/admin/spotpass-3ds/lookup" style="margin-bottom:1.5rem">
+<fieldset style="margin-bottom:0">
+<legend>Look up a reported note</legend>
+<div class="row">
+<div class="field"><label for="note_id">Note ID (as shown in-game when reporting)</label><input type="text" id="note_id" name="note_id" autocomplete="off" spellcheck="false" style="font-family:monospace;text-transform:uppercase"></div>
+<button type="submit" class="submit">Open note</button>
+</div>
+</fieldset>
+</form>
 <div class="note">Real Swap Doodle notes, uploaded and delivered entirely through the console's own normal flow. "Received" reflects that specific recipient's own notification row (DataStore's native per-recipient read/read_date tracking) - a note sent to several friends shows one row and one Received status per friend. Sender/recipient avatars reuse the same Mii render pipeline as the rest of the admin panel. Click a row for the full note - per-page thumbnails, stroke-point counts, and the note's own recipient list.</div>
 
 <table>
@@ -3947,6 +4121,10 @@ func myNewSession(pid int64) string {
 }
 
 func mySessionPID(r *http.Request) (int64, bool) {
+	// MCP tools call the /my/ handlers in-process as the API key's account (mcpDispatch).
+	if pid, ok := r.Context().Value(mcpPIDContextKey{}).(int64); ok {
+		return pid, true
+	}
 	c, err := r.Cookie("my_session")
 	if err != nil {
 		return 0, false
@@ -4129,21 +4307,7 @@ func myDiscordHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Clean up expired codes for this PNID, then get or create a fresh one.
-	db.Exec(`DELETE FROM discord_link_codes WHERE pnid = $1 AND expires_at <= now()`, pnid)
-
-	var code string
-	var expiresAt time.Time
-	db.QueryRow(`SELECT code, expires_at FROM discord_link_codes WHERE pnid = $1`, pnid).Scan(&code, &expiresAt)
-
-	if code == "" {
-		b := make([]byte, 8)
-		rand.Read(b)
-		code = strings.ToUpper(hex.EncodeToString(b))
-		expiresAt = time.Now().Add(10 * time.Minute)
-		db.Exec(`INSERT INTO discord_link_codes (code, pnid, expires_at) VALUES ($1, $2, $3)`, code, pnid, expiresAt)
-	}
-
+	code, expiresAt := discordLinkCode(pnid)
 	remaining := time.Until(expiresAt).Round(time.Second)
 	mins := int(remaining.Minutes())
 	secs := int(remaining.Seconds()) % 60
@@ -4158,6 +4322,25 @@ func myDiscordHandler(w http.ResponseWriter, r *http.Request) {
 		PresenceOn:         discordID != "" && discordPresenceEnabled(pid),
 		Msg:                r.URL.Query().Get("msg"),
 	})
+}
+
+// discordLinkCode returns the PNID's pending /link_pnid code, creating a fresh
+// one (valid 10 minutes) when there is none.
+func discordLinkCode(pnid string) (string, time.Time) {
+	db.Exec(`DELETE FROM discord_link_codes WHERE pnid = $1 AND expires_at <= now()`, pnid)
+
+	var code string
+	var expiresAt time.Time
+	db.QueryRow(`SELECT code, expires_at FROM discord_link_codes WHERE pnid = $1`, pnid).Scan(&code, &expiresAt)
+
+	if code == "" {
+		b := make([]byte, 8)
+		rand.Read(b)
+		code = strings.ToUpper(hex.EncodeToString(b))
+		expiresAt = time.Now().Add(10 * time.Minute)
+		db.Exec(`INSERT INTO discord_link_codes (code, pnid, expires_at) VALUES ($1, $2, $3)`, code, pnid, expiresAt)
+	}
+	return code, expiresAt
 }
 
 var myLoginTmpl = template.Must(template.New("my-login").Parse(`<!DOCTYPE html>
@@ -4243,6 +4426,8 @@ button.logout-btn{background:none;border:none;color:#dc2626;font-size:.875rem;cu
   <span style="color:#d1d5db">|</span>
   <a href="/inkay/my/account" data-i18n="nav.account">Account</a>
   <span style="color:#d1d5db">|</span>
+  <a href="/inkay/my/ai-tools" data-i18n="nav.ai">🤖 AI Tools</a>
+  <span style="color:#d1d5db">|</span>
   <a href="/inkay/my/discord">Discord{{if .DiscordLinked}} ✓{{end}}</a>
   <span style="color:#d1d5db">|</span>
   <form class="logout-form" method="post" action="/inkay/my/logout">
@@ -4317,17 +4502,25 @@ func myHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Kick off a fresh Pretendo sync in the background, rate-limited to once per minute.
-	// External friends' online status will be up to date on the next 30-second auto-refresh.
-	// 2026-09-17: moved to runtimeCache - the key's own TTL IS the rate limit
-	// (its mere existence means "synced within the last minute"), so there's
-	// no need to store/compare a timestamp manually. Also now survives
-	// restarts instead of every restart resetting everyone's rate limit.
+	myKickFriendSync(pid)
+	w.Header().Set("Content-Type", "text/html")
+	myStatusTmpl.Execute(w, loadMyStatus(pid))
+}
+
+// myKickFriendSync kicks off a fresh Pretendo sync in the background, rate-limited
+// to once per minute. External friends' online status will be up to date on the
+// next 30-second auto-refresh.
+// 2026-09-17: moved to runtimeCache - the key's own TTL IS the rate limit
+// (its mere existence means "synced within the last minute"), so there's
+// no need to store/compare a timestamp manually. Also now survives
+// restarts instead of every restart resetting everyone's rate limit.
+func myKickFriendSync(pid int64) {
 	const syncInterval = 60 * time.Second
+	if !myCanSyncFriends(pid) {
+		return
+	}
 	syncCtx := context.Background()
-	var canSyncFriends bool
-	db.QueryRow(`SELECT EXISTS(SELECT 1 FROM nex_accounts WHERE pid = $1 AND friends_nex_password IS NOT NULL AND last_auth_host IS NOT NULL)`, pid).Scan(&canSyncFriends)
-	if _, ok := runtimeCacheGet(syncCtx, "mysync:"+strconv.FormatInt(pid, 10)); !ok && canSyncFriends {
+	if _, ok := runtimeCacheGet(syncCtx, "mysync:"+strconv.FormatInt(pid, 10)); !ok {
 		runtimeCacheSet(syncCtx, "mysync:"+strconv.FormatInt(pid, 10), "1", syncInterval)
 		go func() {
 			resp, err := http.Post("http://127.0.0.1:9191/internal/sync/"+strconv.FormatInt(pid, 10), "", nil)
@@ -4337,7 +4530,16 @@ func myHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}()
 	}
+}
 
+func myCanSyncFriends(pid int64) bool {
+	var ok bool
+	db.QueryRow(`SELECT EXISTS(SELECT 1 FROM nex_accounts WHERE pid = $1 AND friends_nex_password IS NOT NULL AND last_auth_host IS NOT NULL)`, pid).Scan(&ok)
+	return ok
+}
+
+// loadMyStatus is the account's My Status data (also served over MCP).
+func loadMyStatus(pid int64) myStatusData {
 	var pnid, miiName, gameServerHex string
 	var isOnline bool
 	var titleID int64
@@ -4354,7 +4556,7 @@ func myHandler(w http.ResponseWriter, r *http.Request) {
 	var hasWiiUCert, has3DS bool
 	db.QueryRow(`SELECT EXISTS(SELECT 1 FROM wii_devices WHERE username = $1 AND device_cert != '')`, pnid).Scan(&hasWiiUCert)
 	db.QueryRow(`SELECT EXISTS(SELECT 1 FROM n3ds_devices WHERE username = $1)`, pnid).Scan(&has3DS)
-	showWiiU := canSyncFriends || hasWiiUCert
+	showWiiU := myCanSyncFriends(pid) || hasWiiUCert
 	var walletBalance int
 	showWallet := false
 	if has3DS {
@@ -4394,8 +4596,7 @@ func myHandler(w http.ResponseWriter, r *http.Request) {
 
 	discordID := discordIDForPNID(pnid)
 
-	w.Header().Set("Content-Type", "text/html")
-	myStatusTmpl.Execute(w, myStatusData{
+	return myStatusData{
 		PID:           pid,
 		PNID:          pnid,
 		MiiName:       miiName,
@@ -4407,7 +4608,7 @@ func myHandler(w http.ResponseWriter, r *http.Request) {
 		ShowWiiU:      showWiiU,
 		ShowWallet:    showWallet,
 		WalletBalance: walletBalance,
-	})
+	}
 }
 
 func myLoginHandler(w http.ResponseWriter, r *http.Request) {
@@ -4499,7 +4700,7 @@ func myLogoutHandler(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/inkay/my/", http.StatusSeeOther)
 }
 
-// --- My Account (change password) ---
+// --- My Account (change password, MCP API key) ---
 
 var myAccountTmpl = template.Must(template.New("my-account").Parse(`<!DOCTYPE html>
 <html lang="en">
@@ -4522,6 +4723,13 @@ input{width:100%;box-sizing:border-box;border:1px solid #d1d5db;border-radius:6p
 input:focus{outline:none;border-color:#6366f1;box-shadow:0 0 0 2px rgba(99,102,241,.15)}
 button.submit{margin-top:1.5rem;width:100%;background:#6366f1;color:#fff;border:none;border-radius:6px;padding:.65rem;font:inherit;cursor:pointer}
 button.submit:hover{background:#4f46e5}
+h2{font-size:1.05rem;margin:2.5rem 0 .4rem;padding-top:1.5rem;border-top:1px solid #e5e7eb}
+p.hint{font-size:.85rem;color:#555;margin:.3rem 0}
+input[readonly]{background:#f9fafb;font-family:ui-monospace,monospace;font-size:.85rem}
+button.secondary{margin-top:1rem;width:100%;background:#fff;color:#dc2626;border:1px solid #fca5a5;border-radius:6px;padding:.6rem;font:inherit;cursor:pointer}
+button.secondary:hover{background:#fef2f2}
+label.check{display:flex;align-items:center;gap:.5rem;font-size:.9rem;font-weight:normal;color:#222}
+label.check input{width:auto}
 </style>
 </head>
 <body data-i18n-page-title="acct.title">
@@ -4544,6 +4752,33 @@ button.submit:hover{background:#4f46e5}
   <input id="confirm_password" type="password" name="confirm_password" autocomplete="new-password" minlength="8" required>
   <button class="submit" type="submit" data-i18n="acct.submit">Change Password</button>
 </form>
+<h2 id="api-key" data-i18n="acct.api_h2">AI Tools (MCP)</h2>
+<p class="hint" data-i18n="acct.api_desc">Connect AI assistants that support MCP to your Revivetendo account: status, friends, Badge Arcade creations, Revivetendo TV uploads and more. Send the key as a Bearer token in the Authorization header.</p>
+<p class="hint"><a href="/inkay/my/ai-tools" data-i18n="acct.api_setup">Setup instructions for Claude, Cursor, VS Code and more →</a></p>
+<label for="mcp_url" data-i18n="acct.api_endpoint">MCP Endpoint</label>
+<input id="mcp_url" type="text" readonly value="/inkay/my/mcp" onfocus="this.select()">
+<script>document.getElementById('mcp_url').value=location.origin+'/inkay/my/mcp'</script>
+<label for="api_key" data-i18n="acct.api_label">API Key</label>
+{{if .NewAPIKey}}<input id="api_key" type="text" readonly value="{{.NewAPIKey}}" onfocus="this.select()">
+<p class="hint" data-i18n="acct.api_copy">Copy this key now, it will not be shown again.</p>
+{{else if .APIKeyPrefix}}<input id="api_key" type="text" readonly value="{{.APIKeyPrefix}}…">
+{{else}}<input id="api_key" type="text" readonly value="" placeholder="No API key yet" data-i18n-placeholder="acct.api_none">
+{{end}}<form method="post" action="/inkay/my/account/api-key"{{if .APIKeyPrefix}} onsubmit="return confirm(I18N.t('acct.api_confirm','Reset your API key? Tools using the old key will stop working.'))"{{end}}>
+  {{if .APIKeyPrefix}}<button class="secondary" type="submit" data-i18n="acct.api_reset">Reset API Key</button>
+  {{else}}<button class="submit" type="submit" data-i18n="acct.api_generate">Generate API Key</button>{{end}}
+</form>
+<h2 id="sharing" data-i18n="acct.ov_h2">Online Status Sharing</h2>
+<p class="hint" data-i18n="acct.ov_desc">The WSC stream overlay shows your Wii Sports Club session and an event log. Add it to OBS as a Browser Source.</p>
+{{if .PNID}}<label for="overlay_url" data-i18n="acct.ov_url">Overlay URL</label>
+<input id="overlay_url" type="text" readonly value="/wsc-public/overlay?pnid={{.PNID}}" onfocus="this.select()">
+<script>(function(e){e.value=location.origin+e.value})(document.getElementById('overlay_url'))</script>
+{{end}}<form method="post" action="/inkay/my/account/sharing">
+  <label class="check"><input type="checkbox" name="overlay_online" value="1"{{if .OverlayOnline}} checked{{end}}> <span data-i18n="acct.ov_online">Show on the stream overlay when my Wii U goes online or offline</span></label>
+  <p class="hint" data-i18n="acct.ov_online_hint">Anyone who knows your PNID can then see whether your Wii U is online.</p>
+  <label class="check"><input type="checkbox" name="public_list" value="1"{{if .PublicList}} checked{{end}}> <span data-i18n="acct.ov_public">List me on the public Who's Online page</span></label>
+  <p class="hint"><span data-i18n="acct.ov_public_hint">Shows your Mii, PNID, whether you are online and which game you are playing to everyone.</span> <a href="/inkay/online/" data-i18n="acct.ov_public_link">Who's Online →</a></p>
+  <button class="submit" type="submit" data-i18n="acct.ov_save">Save Sharing Settings</button>
+</form>
 </body>
 </html>`))
 
@@ -4551,6 +4786,44 @@ type myAccountData struct {
 	Error   string
 	Success string
 	Key     string // i18n key of Error or Success
+
+	APIKeyPrefix string // start of the current MCP key, "" when there is none
+	NewAPIKey    string // the full key, only right after a reset
+
+	PNID          string // for the stream overlay link
+	OverlayOnline bool   // the stream overlay may show the Wii U's online state
+	PublicList    bool   // listed on the public Who's Online page
+}
+
+// renderMyAccount fills in the account's MCP key state and renders the page.
+func renderMyAccount(w http.ResponseWriter, pid int64, d myAccountData) {
+	if d.APIKeyPrefix == "" {
+		d.APIKeyPrefix = mcpKeyPrefix(pid)
+	}
+	d.PNID, _ = pnidForPID(pid)
+	d.OverlayOnline, d.PublicList = presenceSharing(pid)
+	w.Header().Set("Content-Type", "text/html")
+	myAccountTmpl.Execute(w, d)
+}
+
+func myAPIKeyResetHandler(w http.ResponseWriter, r *http.Request) {
+	pid, ok := mySessionPID(r)
+	if !ok {
+		http.Redirect(w, r, "/inkay/my/login", http.StatusFound)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/inkay/my/account", http.StatusSeeOther)
+		return
+	}
+	key, err := resetMCPKey(pid)
+	if err != nil {
+		log.Printf("myAPIKeyResetHandler: pid=%d: %v", pid, err)
+		renderMyAccount(w, pid, myAccountData{Error: "Failed to create an API key, try again later.", Key: "acct.api_err"})
+		return
+	}
+	log.Printf("myAPIKeyResetHandler: MCP API key reset for PID %d", pid)
+	renderMyAccount(w, pid, myAccountData{Success: "New API key created.", Key: "acct.api_ok", NewAPIKey: key})
 }
 
 func myAccountHandler(w http.ResponseWriter, r *http.Request) {
@@ -4560,16 +4833,14 @@ func myAccountHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "text/html")
-
 	if r.Method != http.MethodPost {
-		myAccountTmpl.Execute(w, myAccountData{})
+		renderMyAccount(w, pid, myAccountData{})
 		return
 	}
 
 	pnid, err := pnidForPID(pid)
 	if err != nil || pnid == "" {
-		myAccountTmpl.Execute(w, myAccountData{Error: "Could not resolve your account, try signing in again.", Key: "acct.err_resolve"})
+		renderMyAccount(w, pid, myAccountData{Error: "Could not resolve your account, try signing in again.", Key: "acct.err_resolve"})
 		return
 	}
 
@@ -4579,34 +4850,34 @@ func myAccountHandler(w http.ResponseWriter, r *http.Request) {
 
 	storedHash := webPasswordHash(pnid)
 	if storedHash == "" {
-		myAccountTmpl.Execute(w, myAccountData{Error: "No web password set for this account.", Key: "acct.err_nopw"})
+		renderMyAccount(w, pid, myAccountData{Error: "No web password set for this account.", Key: "acct.err_nopw"})
 		return
 	}
 
 	currentHash := sha256.Sum256([]byte(current))
 	if hex.EncodeToString(currentHash[:]) != storedHash {
-		myAccountTmpl.Execute(w, myAccountData{Error: "Current password is incorrect.", Key: "acct.err_current"})
+		renderMyAccount(w, pid, myAccountData{Error: "Current password is incorrect.", Key: "acct.err_current"})
 		return
 	}
 
 	if len(newPassword) < 8 {
-		myAccountTmpl.Execute(w, myAccountData{Error: "New password must be at least 8 characters.", Key: "acct.err_short"})
+		renderMyAccount(w, pid, myAccountData{Error: "New password must be at least 8 characters.", Key: "acct.err_short"})
 		return
 	}
 	if newPassword != confirm {
-		myAccountTmpl.Execute(w, myAccountData{Error: "New passwords do not match.", Key: "acct.err_match"})
+		renderMyAccount(w, pid, myAccountData{Error: "New passwords do not match.", Key: "acct.err_match"})
 		return
 	}
 
 	newHash := sha256.Sum256([]byte(newPassword))
 	if err := setWebPasswordHash(pnid, hex.EncodeToString(newHash[:])); err != nil {
 		log.Printf("myAccountHandler: db error updating password for %q: %v", pnid, err)
-		myAccountTmpl.Execute(w, myAccountData{Error: "Failed to update password, try again later.", Key: "acct.err_failed"})
+		renderMyAccount(w, pid, myAccountData{Error: "Failed to update password, try again later.", Key: "acct.err_failed"})
 		return
 	}
 
 	log.Printf("myAccountHandler: web password changed for %q (PID %d)", pnid, pid)
-	myAccountTmpl.Execute(w, myAccountData{Success: "Password updated.", Key: "acct.ok"})
+	renderMyAccount(w, pid, myAccountData{Success: "Password updated.", Key: "acct.ok"})
 }
 
 // ──────────────────────────────────────────────

@@ -12,7 +12,7 @@ package badgearcade
 //	       0x1880 fixed object names (20 x 0x30)
 //	0x1C40 placements (0x60 each): machine prizes (20), 0x23C0 collection
 //	       prizes (30), 0x2F00 machine attachments (20), 0x3680 machine fixed
-//	       objects (20); 0x3E00 attachment badges (20 x 0x20)
+//	       objects (20); 0x3E00 joints (20 x 0x20, see Joint)
 
 import (
 	"encoding/binary"
@@ -30,7 +30,7 @@ const (
 	cibFixedNamesOff  = 0x1880
 	cibNameLen        = 0x30
 	cibPlacementSize  = 0x60
-	cibAttachBadgeLen = 0x20
+	cibJointLen       = 0x20
 )
 
 // Crane types (badgetool / 3dbrew naming).
@@ -41,8 +41,30 @@ const (
 	CraneBomb     uint32 = 4
 )
 
-// Placement positions a prize, attachment or fixed object in a machine. The
-// machine area is the 400x240 top screen.
+// Placement positions a prize, attachment or fixed object in a machine; see
+// machine.go for the coordinate system (centre, top-screen pixels, y down,
+// degrees clockwise). The game simulates machines with Box2D. Friction and
+// restitution were confirmed on hardware with test machines (2026-10-18):
+//
+//	Unk18  friction (CONFIRMED): 0.01 slides off slopes, 0.5 sticks; 0.2 on
+//	       nearly every obstacle (Box2D's default)
+//	Unk1C  density? 1.0 on most badges, 0 on most obstacles (static bodies)
+//	Unk20  restitution / bounce (CONFIRMED): 0 = no bounce, 1 = bounces a lot;
+//	       Nintendo's bounciest are the Mario Tennis courts (~0.85)
+//	Unk24, Unk28  "physics strength" on hardware (both changed together):
+//	       0.01 = badges barely move, 2 = violent enough to make the game lag.
+//	       Equal on obstacles, attachments and 98% of badge spots; 157 badge
+//	       spots in 71 machines differ (e.g. 0.1/1.0), so they are two related
+//	       values. 1.0 on obstacles and attachments, 0.01-1.85 on badges
+//	Gravity  1 = the object starts falling (PokeDot_061's badges hang above
+//	       their seesaw), 0 = it starts at rest where placed (DotHard_041's
+//	       badges stand exactly on crates); collection prizes and obstacles: 0
+//	Unk30  12 floats, read as 4 RGB triples; badges mostly (1,1,1) (0,0,0)
+//	       (1,1,1) (1,1,1), obstacles mostly (1,0,0) (0,0,0) (0,1,0) (0,0,1),
+//	       a few machines use tints - a colour transform of some kind
+//
+// An editor keeps these from the template (or the table's usual values for new
+// objects) rather than letting players set them.
 type Placement struct {
 	Index    uint32 // into the matching name list
 	ScaleW   float32
@@ -54,7 +76,7 @@ type Placement struct {
 	Unk20    float32
 	Unk24    float32
 	Unk28    float32
-	Gravity  uint32 // 0 = falls, 1 = fixed in place
+	Gravity  uint32
 	Unk30    [0x30]byte
 }
 
@@ -112,7 +134,38 @@ type CraneInstance struct {
 	CollectionPrizes   []Placement
 	MachineAttachments []Placement
 	MachineFixed       []Placement
-	AttachmentBadges   [][cibAttachBadgeLen]byte
+	Joints             []Joint
+}
+
+// Joint kinds: what a joint's body index refers to.
+const (
+	JointBadge      uint32 = 0 // MachinePrizes
+	JointAttachment uint32 = 1 // MachineAttachments
+)
+
+// Joint pins two bodies together at an anchor point (top-screen pixels): a
+// badge on a hook, a seesaw plank on its stand. Reversed from all 1,033 joints
+// in Nintendo's machines (every index is in range for its kind): 525 pin a
+// badge to an attachment, 444 link attachments, 47 an attachment to a badge,
+// 17 two badges. Unk0 and Unk1C are always 0.
+type Joint struct {
+	Unk0         uint32
+	KindA, KindB uint32 // JointBadge or JointAttachment
+	A, B         uint32 // index into the kind's placement table
+	X, Y         float32
+	Unk1C        uint32
+}
+
+func parseJoint(d []byte) Joint {
+	u := func(o int) uint32 { return binary.LittleEndian.Uint32(d[o:]) }
+	return Joint{Unk0: u(0), KindA: u(4), KindB: u(8), A: u(0xC), B: u(0x10),
+		X: math.Float32frombits(u(0x14)), Y: math.Float32frombits(u(0x18)), Unk1C: u(0x1C)}
+}
+
+func (j Joint) put(d []byte) {
+	for i, v := range []uint32{j.Unk0, j.KindA, j.KindB, j.A, j.B, math.Float32bits(j.X), math.Float32bits(j.Y), j.Unk1C} {
+		binary.LittleEndian.PutUint32(d[i*4:], v)
+	}
 }
 
 // ParseCraneInstance parses a decompressed .cib file.
@@ -173,14 +226,12 @@ func ParseCraneInstance(d []byte) (*CraneInstance, error) {
 			return nil, err
 		}
 	}
-	nb := int(u32(0xFC))
-	if nb > 20 {
-		return nil, errors.New("badgearcade: too many attachment badges")
+	nj := int(u32(0xFC))
+	if nj > 20 {
+		return nil, errors.New("badgearcade: too many joints")
 	}
-	for i := 0; i < nb; i++ {
-		var b [cibAttachBadgeLen]byte
-		copy(b[:], d[0x3E00+i*cibAttachBadgeLen:])
-		c.AttachmentBadges = append(c.AttachmentBadges, b)
+	for i := 0; i < nj; i++ {
+		c.Joints = append(c.Joints, parseJoint(d[0x3E00+i*cibJointLen:]))
 	}
 	return c, nil
 }
@@ -261,14 +312,14 @@ func (c *CraneInstance) Bytes() ([]byte, error) {
 			}
 		}
 	}
-	if len(c.AttachmentBadges) > 20 {
-		return nil, errors.New("badgearcade: too many attachment badges")
+	if len(c.Joints) > 20 {
+		return nil, errors.New("badgearcade: too many joints")
 	}
-	put(0xFC, uint32(len(c.AttachmentBadges)))
+	put(0xFC, uint32(len(c.Joints)))
 	for i := 0; i < 20; i++ {
-		slot := d[0x3E00+i*cibAttachBadgeLen : 0x3E00+(i+1)*cibAttachBadgeLen]
-		if i < len(c.AttachmentBadges) {
-			copy(slot, c.AttachmentBadges[i][:])
+		slot := d[0x3E00+i*cibJointLen : 0x3E00+(i+1)*cibJointLen]
+		if i < len(c.Joints) {
+			c.Joints[i].put(slot)
 		} else {
 			for j := range slot {
 				slot[j] = 0

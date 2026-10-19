@@ -13,6 +13,7 @@
     [10, "Russian"], [11, "Chinese (Traditional)"]
   ];
 
+  var PAGES = { badge: "./", stage: "stage.html", crane: "layout.html" };
   var $ = function (id) { return document.getElementById(id); };
   // T translates through the dashboard's i18n.js (keys in /inkay/i18n/lang/*.js),
   // F fills its {placeholders}; both fall back to the English text.
@@ -89,7 +90,21 @@
     }
     c.restore();
   }
+  // Outline size: its bounding box as a share of the 128x128 badge. Machines
+  // have gaps badges should fall into; about half the square is safe.
+  var SAFE_SIZE = 50;
+  function updateSize(polys) {
+    var el = $("sizeStatus");
+    if (!state.img || !polys || !polys.length) { status(el, ""); return; }
+    var x0 = SIZE, y0 = SIZE, x1 = 0, y1 = 0;
+    polys.forEach(function (p) { p.forEach(function (pt) { x0 = Math.min(x0, pt[0]); y0 = Math.min(y0, pt[1]); x1 = Math.max(x1, pt[0]); y1 = Math.max(y1, pt[1]); }); });
+    var pct = Math.round(100 * Math.max(0, x1 - x0) * Math.max(0, y1 - y0) / (SIZE * SIZE));
+    status(el, F("be.size_now", "Outline size: {pct}% of the badge square.", { pct: pct }) +
+      (pct > SAFE_SIZE ? " " + F("be.size_big", "That's above the safe {safe}% — the badge may not fit the gaps in a machine.", { safe: SAFE_SIZE }) : ""),
+      pct > SAFE_SIZE ? "err" : "ok");
+  }
   function render() {
+    updateSize(state.collision || state.shown);
     ctx.clearRect(0, 0, stage.width, stage.height);
     drawArt(ctx, ZOOM);
     if ($("showOutline").checked || $("editOutline").checked) {
@@ -279,11 +294,11 @@
       if (!list.length) { box.innerHTML = '<p class="hint">' + T("be.nothing", "Nothing saved yet.") + "</p>"; return; }
       box.innerHTML = '<div class="list">' + list.map(function (c) {
         var cur = state.current && state.current.id === c.id ? " current" : "";
-        return '<div class="item' + cur + '"><img src="' + API + "creations/" + c.id + "/art.png?v=" + encodeURIComponent(c.updatedAt) + '" alt="">' +
+        return '<div class="item' + cur + '"><img' + (c.kind === "stage" || c.kind === "crane" ? ' class="wide"' : "") + ' src="' + API + "creations/" + c.id + "/art.png?v=" + encodeURIComponent(c.updatedAt) + '" alt="">' +
           '<div class="t" title="' + esc(c.title) + '">' + esc(c.title) + "</div>" +
-          '<span class="pill ' + c.status + '">' + esc(T("be.st_" + c.status, c.status)) + "</span>" +
+          '<span class="pill">' + esc({ badge: T("st.tab_badge", "Badge"), stage: T("st.tab_stage", "Stage"), crane: T("ly.tab", "Layout") }[c.kind] || c.kind) + '</span> <span class="pill ' + c.status + '">' + esc(T("be.st_" + c.status, c.status)) + "</span>" +
           (c.reviewNote ? '<div class="note">' + esc(c.reviewNote) + "</div>" : "") +
-          '<div class="actions"><button type="button" data-load="' + c.id + '">' + (c.status === "draft" || c.status === "rejected" ? T("be.edit", "Edit") : T("be.view", "View")) + "</button>" +
+          '<div class="actions"><button type="button" data-load="' + c.id + '" data-kind="' + esc(c.kind) + '">' + (c.status === "draft" || c.status === "rejected" ? T("be.edit", "Edit") : T("be.view", "View")) + "</button>" +
           (c.status === "submitted" ? '<button type="button" data-withdraw="' + c.id + '">' + T("be.withdraw", "Withdraw") + "</button>" : "") +
           (c.status !== "approved" ? '<button type="button" data-del="' + c.id + '">' + T("be.delete", "Delete") + "</button>" : "") + "</div></div>";
       }).join("") + "</div>";
@@ -300,6 +315,9 @@
     }
     if (id) {
       if (state.dirty && !confirm(T("be.discard", "Discard your unsaved changes?"))) return;
+      var kind = e.target.getAttribute("data-kind");
+      if (!PAGES[kind]) { alert(T("be.no_editor", "This kind of creation can't be edited any more.")); return; }
+      if (kind !== "badge") { state.dirty = false; location.href = PAGES[kind] + "?id=" + id; return; }
       loadCreation(+id);
     } else if (del && confirm(T("be.confirm_delete", "Delete this creation? This can't be undone."))) {
       api("creations/" + del, { method: "DELETE" }).then(function () {
@@ -312,6 +330,7 @@
   function loadCreation(id) {
     status($("saveStatus"), T("be.loading", "Loading…"));
     api("creations/" + id).then(function (c) {
+      if (c.kind !== "badge") { if (PAGES[c.kind]) location.href = PAGES[c.kind] + "?id=" + id; else status($("saveStatus"), T("be.no_editor", "This kind of creation can't be edited any more."), "err"); return; }
       var spec = c.spec || {};
       var view = spec.view || null;
       var src = c.source || c.art;
@@ -397,7 +416,10 @@
 
   function start() {
     render();
-    refreshAccount().catch(function () { $("account").textContent = ""; });
+    refreshAccount().then(function () {
+      var id = +new URLSearchParams(location.search).get("id");
+      if (id && state.loggedIn) loadCreation(id);
+    }).catch(function () { $("account").textContent = ""; });
   }
   if (window.I18N) I18N.ready(start); else start();
 })();

@@ -12,6 +12,7 @@
   <div>
     <h1 data-i18n="land.badges">Badge Editor</h1>
     <p class="sub" data-i18n="be.sub">Design a badge for Nintendo Badge Arcade on Revivetendo.</p>
+    <nav class="modes"><a href="./" class="on" data-i18n="st.tab_badge">Badge</a><a href="stage.html" data-i18n="st.tab_stage">Stage</a><a href="layout.html" data-i18n="ly.tab">Layout</a></nav>
   </div>
   <div class="account" id="account">…</div>
 </header>
@@ -35,6 +36,9 @@
       <button type="button" id="autoOutline" data-i18n="be.auto_outline">Automatic outline</button>
     </div>
     <p class="hint" id="outlineHint" data-i18n="be.outline_hint">The outline decides how the badge collides in the crane. Drag the image to position it; in “Edit outline”, drag the points.</p>
+    <p class="hint" data-i18n="be.size_note">Don't make the badge too big: machines have gaps a badge is meant to fall into, and an oversized badge gets stuck. A safe size is an outline covering about half of the square (50%) — zoom out if it's more.</p>
+    <p class="status" id="sizeStatus"></p>
+    <p class="hint" data-i18n="be.set_note">Your badges go into your own set in the arcade's collection, named after your Mii and with your Mii's face as its icon.</p>
   </section>
 
   <section class="card preview">

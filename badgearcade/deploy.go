@@ -129,3 +129,19 @@ func DeployMachine(weekly []byte, template, name string, id uint32, badges []*Pr
 	}
 	return nil, fmt.Errorf("badgearcade: template machine %s not in this archive", template)
 }
+
+// DeployLayout is DeployMachine on a custom layout: the template machine with
+// the layout's badge spots and obstacles, filled with the badges in turn.
+func DeployLayout(weekly []byte, l Layout, name string, id uint32, badges []*Prize) (*CraneInstance, error) {
+	c, err := DeployMachine(weekly, l.Template, name, id, badges)
+	if err != nil {
+		return nil, err
+	}
+	if err := ApplyLayout(c, l); err != nil {
+		return nil, err
+	}
+	for i := range c.MachinePrizes {
+		c.MachinePrizes[i].Index = uint32(i % len(badges))
+	}
+	return c, nil
+}

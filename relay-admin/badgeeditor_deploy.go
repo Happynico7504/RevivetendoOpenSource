@@ -1,10 +1,12 @@
 package main
 
 // Admin deployments for Badge Arcade: approved badges placed into a machine
-// cloned from a Nintendo layout, for a date range. account-proxy builds them
+// cloned from a Nintendo layout, on an approved custom stage (required: custom
+// badges never appear on Nintendo's stages), for a date range. account-proxy builds them
 // into the daily SpotPass package (see account-proxy/badgearcade_deploy.go).
 
 import (
+	"encoding/json"
 	"html/template"
 	"io"
 	"log"
@@ -37,6 +39,9 @@ CREATE TABLE IF NOT EXISTS badge_arcade_deployment_badges (
 	position      INT    NOT NULL DEFAULT 0,
 	PRIMARY KEY (deployment_id, creation_id)
 );
+ALTER TABLE badge_arcade_deployments ADD COLUMN IF NOT EXISTS stage_id BIGINT REFERENCES badge_arcade_creations (id) ON DELETE SET NULL;
+ALTER TABLE badge_arcade_deployments ADD COLUMN IF NOT EXISTS physics JSONB;
+ALTER TABLE badge_arcade_deployments ADD COLUMN IF NOT EXISTS layout_id BIGINT REFERENCES badge_arcade_creations (id) ON DELETE SET NULL;
 `
 
 const badgeArcadeDeployBase = "/inkay/admin/badge-arcade/deployments/"
@@ -141,6 +146,19 @@ func badgeArcadeDeployTemplates() ([]badgeArcadeDeployTemplate, error) {
 	return badgeArcadeTemplates, badgeArcadeTemplatesErr
 }
 
+// badgeArcadePhysicsFields are the optional badge physics overrides (see
+// account-proxy's badgeArcadePhysics). Friction, bounciness and physics
+// strength are confirmed on hardware; density is still inferred.
+var badgeArcadePhysicsFields = []struct {
+	Key, Label, Hint string
+	Max              float64
+}{
+	{"friction", "Friction", "0.01 slides, 0.5 sticks; Nintendo usually 0.1–0.2", 2},
+	{"restitution", "Bounciness", "0 none, 1 a lot; Nintendo usually 0.5 (Mario Tennis ≈ 0.85)", 1},
+	{"density", "Density (unconfirmed)", "Nintendo: 0 – 3.5, usually 1", 10},
+	{"unk24", "Physics strength", "0.01 barely moves, 2 lags the game; Nintendo 0.01 – 1.85", 2},
+}
+
 // --- page ---
 
 type adminDeployBadge struct {
@@ -154,6 +172,9 @@ type adminDeployment struct {
 	ID        int64
 	Name      string
 	Template  string
+	StageID   int64              // custom stage creation; 0 only on deployments saved before stages were required
+	LayoutID  int64              // custom layout creation; 0 = the template machine as Nintendo made it
+	Physics   map[string]float64 // badge physics overrides (account-proxy's badgeArcadePhysics), nil = template's
 	Slot      string
 	Status    string
 	Start     time.Time
@@ -163,7 +184,7 @@ type adminDeployment struct {
 }
 
 func badgeArcadeDeploymentsList() []adminDeployment {
-	rows, err := db.Query(`SELECT id, name, template, slot, status, start_date, end_date FROM badge_arcade_deployments ORDER BY id DESC`)
+	rows, err := db.Query(`SELECT id, name, template, COALESCE(stage_id, 0), COALESCE(layout_id, 0), slot, status, start_date, end_date, COALESCE(physics, '{}') FROM badge_arcade_deployments ORDER BY id DESC`)
 	if err != nil {
 		return nil
 	}
@@ -172,7 +193,9 @@ func badgeArcadeDeploymentsList() []adminDeployment {
 	var out []adminDeployment
 	for rows.Next() {
 		var d adminDeployment
-		if rows.Scan(&d.ID, &d.Name, &d.Template, &d.Slot, &d.Status, &d.Start, &d.End) == nil {
+		var physics []byte
+		if rows.Scan(&d.ID, &d.Name, &d.Template, &d.StageID, &d.LayoutID, &d.Slot, &d.Status, &d.Start, &d.End, &physics) == nil {
+			json.Unmarshal(physics, &d.Physics)
 			d.ActiveNow = d.Status != "off" && !today.Before(d.Start) && !today.After(d.End)
 			out = append(out, d)
 		}
@@ -224,8 +247,34 @@ func adminBadgeArcadeDeployments(w http.ResponseWriter, r *http.Request) {
 		}
 		rows.Close()
 	}
+	var layouts []adminDeployBadge
+	if rows, err := db.Query(`SELECT id, pid, title FROM badge_arcade_creations WHERE status = 'approved' AND kind = 'crane' ORDER BY id DESC`); err == nil {
+		for rows.Next() {
+			var b adminDeployBadge
+			var pid int64
+			if rows.Scan(&b.ID, &pid, &b.Title) == nil {
+				b.PNID, _ = pnidForPID(pid)
+				b.Selected = b.ID == form.LayoutID
+				layouts = append(layouts, b)
+			}
+		}
+		rows.Close()
+	}
+	var stages []adminDeployBadge
+	if rows, err := db.Query(`SELECT id, pid, title FROM badge_arcade_creations WHERE status = 'approved' AND kind = 'stage' ORDER BY id DESC`); err == nil {
+		for rows.Next() {
+			var b adminDeployBadge
+			var pid int64
+			if rows.Scan(&b.ID, &pid, &b.Title) == nil {
+				b.PNID, _ = pnidForPID(pid)
+				b.Selected = b.ID == form.StageID
+				stages = append(stages, b)
+			}
+		}
+		rows.Close()
+	}
 	data := map[string]any{
-		"Deployments": deps, "Templates": templates, "Badges": badges, "Form": form,
+		"Deployments": deps, "Templates": templates, "Badges": badges, "Stages": stages, "Layouts": layouts, "Form": form, "PhysicsFields": badgeArcadePhysicsFields,
 		"Msg": r.URL.Query().Get("msg"), "Today": today.Format("2006-01-02"),
 	}
 	if terr != nil {
@@ -279,6 +328,22 @@ func adminBadgeArcadeDeploySave(w http.ResponseWriter, r *http.Request) {
 		fail("unknown template machine")
 		return
 	}
+	// An approved custom layout replaces the template choice with its own
+	// template and badge spots.
+	var layoutID any // NULL = the template as Nintendo made it
+	if lid, err := strconv.ParseInt(r.FormValue("layout"), 10, 64); err == nil && lid > 0 {
+		var raw []byte
+		if db.QueryRow(`SELECT spec FROM badge_arcade_creations WHERE id = $1 AND status = 'approved' AND kind = 'crane'`, lid).Scan(&raw) != nil {
+			fail("the layout isn't an approved layout")
+			return
+		}
+		spec, err := parseLayoutSpec(raw)
+		if err != nil {
+			fail("layout #" + strconv.FormatInt(lid, 10) + ": " + err.Error())
+			return
+		}
+		layoutID, tmpl, slots = lid, spec.Layout.Template, layoutSpotCount(spec)
+	}
 	var badgeIDs []int64
 	for _, v := range r.Form["badge"] {
 		if bid, err := strconv.ParseInt(v, 10, 64); err == nil {
@@ -294,7 +359,32 @@ func adminBadgeArcadeDeploySave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(badgeIDs) > slots {
-		fail(strconv.Itoa(len(badgeIDs)) + " badges but " + tmpl + " only has " + strconv.Itoa(slots) + " prize spots")
+		fail(strconv.Itoa(len(badgeIDs)) + " badges but the machine only has " + strconv.Itoa(slots) + " badge spots")
+		return
+	}
+	physics := map[string]float64{}
+	for _, f := range badgeArcadePhysicsFields {
+		v := strings.TrimSpace(r.FormValue("physics_" + f.Key))
+		if v == "" {
+			continue
+		}
+		x, err := strconv.ParseFloat(v, 64)
+		if err != nil || x < 0 || x > f.Max {
+			fail(f.Label + " must be a number from 0 to " + strconv.FormatFloat(f.Max, 'f', -1, 64))
+			return
+		}
+		physics[f.Key] = x
+	}
+	var physicsJSON any // NULL = the template's values
+	if len(physics) > 0 {
+		b, _ := json.Marshal(physics)
+		physicsJSON = string(b)
+	}
+	stageID, _ := strconv.ParseInt(r.FormValue("stage"), 10, 64)
+	var stageOK bool
+	db.QueryRow(`SELECT EXISTS(SELECT 1 FROM badge_arcade_creations WHERE id = $1 AND status = 'approved' AND kind = 'stage')`, stageID).Scan(&stageOK)
+	if !stageOK {
+		fail("pick an approved custom stage (custom badges can't use Nintendo's stages)")
 		return
 	}
 	tx, err := db.Begin()
@@ -304,11 +394,11 @@ func adminBadgeArcadeDeploySave(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 	if id == 0 {
-		err = tx.QueryRow(`INSERT INTO badge_arcade_deployments (name, template, slot, status, start_date, end_date)
-			VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`, name, tmpl, slot, status, start, end).Scan(&id)
+		err = tx.QueryRow(`INSERT INTO badge_arcade_deployments (name, template, slot, status, start_date, end_date, stage_id, physics, layout_id)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`, name, tmpl, slot, status, start, end, stageID, physicsJSON, layoutID).Scan(&id)
 	} else {
 		_, err = tx.Exec(`UPDATE badge_arcade_deployments SET name = $1, template = $2, slot = $3, status = $4,
-			start_date = $5, end_date = $6, updated_at = NOW() WHERE id = $7`, name, tmpl, slot, status, start, end, id)
+			start_date = $5, end_date = $6, stage_id = $7, physics = $8, layout_id = $9, updated_at = NOW() WHERE id = $10`, name, tmpl, slot, status, start, end, stageID, physicsJSON, layoutID, id)
 	}
 	if err == nil {
 		_, err = tx.Exec(`DELETE FROM badge_arcade_deployment_badges WHERE deployment_id = $1`, id)
@@ -378,6 +468,13 @@ var adminDeployTmpl = template.Must(template.New("admin-deploy").Funcs(template.
 	"date":     func(t time.Time) string { return t.Format("2006-01-02") },
 	"badgeid":  func(id int64) uint32 { return BadgeArcadeBadgeID(id) },
 	"statuses": func() []string { return []string{"test", "live", "off"} },
+	// physval shows a physics override, keeping 0 apart from "not set".
+	"physval": func(m map[string]float64, k string) string {
+		if v, ok := m[k]; ok {
+			return strconv.FormatFloat(v, 'f', -1, 64)
+		}
+		return ""
+	},
 }).Parse(`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -410,6 +507,8 @@ input[type=text],input[type=date],select{font:inherit;font-size:.9rem;border:1px
 .badges{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:.5rem;margin:.4rem 0 1rem}
 .badges label{display:flex;flex-direction:column;align-items:center;gap:.2rem;border:1px solid #e4e4e7;border-radius:8px;padding:.5rem;font-size:.78rem;cursor:pointer;text-align:center}
 .badges label:has(input:checked){border-color:#2563eb;box-shadow:0 0 0 2px rgba(37,99,235,.2)}
+.stages img{width:150px;height:90px;border-radius:4px;background:#f3f4f6}
+.thumbs img.stage{width:67px;height:40px}
 .badges img{width:64px;height:64px;border-radius:4px;background:repeating-conic-gradient(#e5e7eb 0 25%,#fff 0 50%) 0 0/8px 8px}
 .muted{color:#666;font-size:.8rem}
 </style>
@@ -434,9 +533,9 @@ The weekly lineup is the same in every region: <strong>Monday–Thursday</strong
 <tr><th>#</th><th>Name</th><th>Where</th><th>Template</th><th>Dates (UTC)</th><th>Badges</th><th>Status</th><th></th></tr>
 {{range .Deployments}}
 <tr>
-<td>{{.ID}}</td><td>{{.Name}}</td><td>{{.Slot}}</td><td>{{.Template}}</td>
+<td>{{.ID}}</td><td>{{.Name}}</td><td>{{.Slot}}</td><td>{{.Template}}{{if .LayoutID}}<br><span class="muted">custom layout #{{.LayoutID}}</span>{{end}}{{if .Physics}}<br><span class="muted">physics {{range $k, $v := .Physics}}{{$k}}={{$v}} {{end}}</span>{{end}}<br>{{if .StageID}}<span class="muted">on stage #{{.StageID}}</span>{{else}}<span style="color:#991b1b;font-size:.75rem;font-weight:600">no stage — not built, edit to pick one</span>{{end}}</td>
 <td>{{date .Start}} – {{date .End}}{{if .ActiveNow}}<br><span class="now">active today</span>{{end}}</td>
-<td class="thumbs">{{range .BadgeIDs}}<img src="/inkay/admin/badge-arcade/img/{{.}}/home.png" alt="" title="#{{.}}">{{end}}</td>
+<td class="thumbs">{{if .StageID}}<img class="stage" src="/inkay/admin/badge-arcade/img/{{.StageID}}/home.png" alt="" title="stage #{{.StageID}}">{{end}}{{range .BadgeIDs}}<img src="/inkay/admin/badge-arcade/img/{{.}}/home.png" alt="" title="#{{.}}">{{end}}</td>
 <td><span class="pill {{.Status}}">{{.Status}}</span></td>
 <td>
   <a href="?edit={{.ID}}">edit</a>
@@ -466,6 +565,22 @@ The weekly lineup is the same in every region: <strong>Monday–Thursday</strong
 {{range .Badges}}<label><input type="checkbox" name="badge" value="{{.ID}}" {{if .Selected}}checked{{end}}><img src="/inkay/admin/badge-arcade/img/{{.ID}}/home.png" alt="">#{{.ID}} {{.Title}}<span class="muted">by {{if .PNID}}{{.PNID}}{{else}}?{{end}} · badge ID {{badgeid .ID}}</span></label>
 {{else}}<p class="muted">No approved badges yet — approve some in <a href="/inkay/admin/badge-arcade/">Badge Arcade creations</a>.</p>{{end}}
 </div>
+<div class="muted">Layout — Nintendo's machine as it was (the template above), or an approved custom layout built on a template (its own template is used):</div>
+<div class="badges stages">
+<label><input type="radio" name="layout" value="0" {{if not .Form.LayoutID}}checked{{end}}><span style="width:150px;height:90px;display:flex;align-items:center;justify-content:center;background:#f3f4f6;border-radius:4px">template as is</span>Nintendo's layout</label>
+{{range .Layouts}}<label><input type="radio" name="layout" value="{{.ID}}" {{if .Selected}}checked{{end}}><img src="/inkay/admin/badge-arcade/img/{{.ID}}/home.png" alt="">#{{.ID}} {{.Title}}<span class="muted">by {{if .PNID}}{{.PNID}}{{else}}?{{end}}</span></label>
+{{end}}
+</div>
+<div class="muted">Stage — the machine's background, required (custom badges never appear on Nintendo's stages; the template only provides the layout):</div>
+<div class="badges stages">
+{{range .Stages}}<label><input type="radio" name="stage" value="{{.ID}}" required {{if .Selected}}checked{{end}}><img src="/inkay/admin/badge-arcade/img/{{.ID}}/home.png" alt="">#{{.ID}} {{.Title}}<span class="muted">by {{if .PNID}}{{.PNID}}{{else}}?{{end}}</span></label>
+{{else}}<p class="muted">No approved stages yet — players make them in the <a href="/inkay/my/badge-arcade/stage.html" target="_blank">stage editor</a>; approve some in <a href="/inkay/admin/badge-arcade/">Badge Arcade creations</a>.</p>{{end}}
+</div>
+<details {{if .Form.Physics}}open{{end}}><summary class="muted">Badge physics overrides (empty = the template's values)</summary>
+<div class="row" style="margin-top:.5rem">{{$ph := .Form.Physics}}{{range .PhysicsFields}}
+  <label>{{.Label}}<input type="text" name="physics_{{.Key}}" value="{{physval $ph .Key}}" size="8" placeholder="template"><span class="muted" style="font-weight:400">{{.Hint}}</span></label>
+{{end}}</div>
+</details>
 <button class="primary">{{if .Form.ID}}Save changes{{else}}Create deployment{{end}}</button>
 </fieldset>
 </form>

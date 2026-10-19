@@ -122,8 +122,11 @@ type Polygon [][2]float32
 // CollisionPolygons decodes the collision section: a polygon count, then per
 // polygon a point count and 8 float32 (x, y) pairs. There is one list for the
 // whole badge, also for multi-tile badges; some badges have none.
-func (p *Prize) CollisionPolygons() ([]Polygon, error) {
-	d := p.Collision
+func (p *Prize) CollisionPolygons() ([]Polygon, error) { return decodeCollision(p.Collision) }
+
+// decodeCollision decodes a collision section (badges, obstacles and
+// attachments share the format).
+func decodeCollision(d []byte) ([]Polygon, error) {
 	if len(d) == 0 {
 		return nil, nil
 	}

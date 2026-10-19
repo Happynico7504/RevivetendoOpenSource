@@ -20,7 +20,10 @@ package main
 //
 // The API only accepts requests carrying X-Requested-With, which a browser
 // will not send cross-site without a CORS preflight we never answer, so other
-// sites cannot submit with a player's my_session cookie.
+// sites cannot submit with a player's my_session cookie. Requests with an MCP
+// API key ("Authorization: Bearer rvt_...", see mcp.go) need no such header:
+// browsers never attach one on their own. That lets AI tools PUT large files
+// to /api/chunk directly after tv_start_video_upload.
 
 import (
 	"bytes"
@@ -166,6 +169,13 @@ func videoError(w http.ResponseWriter, status int, key, msg string) {
 func videoAPIAuth(w http.ResponseWriter, r *http.Request, method string) (int64, bool) {
 	if r.Method != method {
 		videoError(w, http.StatusMethodNotAllowed, "vid.err_generic", method+" only")
+		return 0, false
+	}
+	if r.Header.Get("Authorization") != "" {
+		if pid, ok := mcpKeyPID(r); ok {
+			return pid, true
+		}
+		videoError(w, http.StatusUnauthorized, "vid.err_login", "Invalid API key.")
 		return 0, false
 	}
 	if r.Header.Get("X-Requested-With") == "" {

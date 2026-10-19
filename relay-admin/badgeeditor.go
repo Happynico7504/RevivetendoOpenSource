@@ -1,7 +1,7 @@
 package main
 
-// Badge Arcade editor: a public web editor for custom badges (and later crane
-// machines). Anyone can use it; saving needs the /my/ login and stores the
+// Badge Arcade editor: a public web editor for custom badges and crane stages
+// (machine backgrounds, see badgearcade/crb.go). Anyone can use it; saving needs the /my/ login and stores the
 // creation under the player's PID. Admins review and deploy creations later
 // (account-proxy builds them into the daily SpotPass package).
 //
@@ -9,9 +9,10 @@ package main
 // on the public site) reaches them; all URLs in the app are relative because
 // the public site sits behind the /inkay/ prefix:
 //
-//	/my/badge-arcade/                  static editor app (badgeeditor/)
 //	/my/badge-arcade/api/me            login state
+//	/my/badge-arcade/                  badge editor; stage.html is the stage editor
 //	/my/badge-arcade/api/preview       render a badge exactly as the 3DS will
+//	/my/badge-arcade/api/preview-stage render a stage exactly as the 3DS will
 //	/my/badge-arcade/api/creations     list (GET) / create (POST) own creations
 //	/my/badge-arcade/api/creations/{id} load (GET) / update (PUT) / delete (DELETE)
 //	/my/badge-arcade/api/creations/{id}/art.png
@@ -66,13 +67,16 @@ CREATE INDEX IF NOT EXISTS badge_arcade_creations_pid ON badge_arcade_creations 
 ALTER TABLE badge_arcade_creations ADD COLUMN IF NOT EXISTS submitted_at TIMESTAMPTZ;
 ALTER TABLE badge_arcade_creations ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS badge_arcade_creations_status ON badge_arcade_creations (status, submitted_at);
+ALTER TABLE badge_arcade_creations DROP CONSTRAINT IF EXISTS badge_arcade_creations_kind_check;
+-- 'set' stays allowed for sets saved before sets became automatic (2026-10-18).
+ALTER TABLE badge_arcade_creations ADD CONSTRAINT badge_arcade_creations_kind_check CHECK (kind IN ('badge', 'crane', 'stage', 'set'));
 `
 
 const badgeEditorBase = "/my/badge-arcade/"
 
 const (
 	badgeEditorMaxCreations = 100
-	badgeEditorMaxArt       = 512 << 10 // composed 128x128 art, PNG
+	badgeEditorMaxArt       = 512 << 10 // composed 128x128 badge or 400x240 stage art, PNG
 	badgeEditorMaxSource    = 3 << 20   // original upload, kept for re-editing
 	badgeEditorMaxBody      = 6 << 20
 	badgeEditorMaxTitle     = 60
@@ -94,8 +98,10 @@ func registerBadgeEditor() {
 	})
 	http.HandleFunc(badgeEditorBase+"api/me", badgeEditorMe)
 	http.HandleFunc(badgeEditorBase+"api/preview", badgeEditorPreview)
+	http.HandleFunc(badgeEditorBase+"api/preview-stage", badgeEditorStagePreview)
 	http.HandleFunc(badgeEditorBase+"api/creations", badgeEditorCreations)
 	http.HandleFunc(badgeEditorBase+"api/creations/", badgeEditorCreation)
+	registerBadgeEditorLayout()
 	registerBadgeEditorAdmin()
 	registerBadgeArcadeDeploy()
 }
@@ -127,7 +133,8 @@ func badgeEditorReadJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 	return true
 }
 
-// badgeEditorSpec is what the editor stores for a badge (the art is separate).
+// badgeEditorSpec is what the editor stores for a badge or stage (the art is
+// separate). Stages only use Tint and View.
 type badgeEditorSpec struct {
 	// Names per 3DS language slot: 0 Japanese, 1 English, 2 French, 3 German,
 	// 4 Italian, 5 Spanish, 6 Chinese, 7 Korean, 8 Dutch, 9 Portuguese,
@@ -135,8 +142,46 @@ type badgeEditorSpec struct {
 	Names [badgearcade.DisplayNameLanguages]string `json:"names"`
 	// Collision polygons in 128x128 art pixels; nil = automatic.
 	Collision []badgearcade.Polygon `json:"collision"`
+	// Stage rail strip colour, "#rrggbb".
+	Tint string `json:"tint,omitempty"`
 	// Editor view state (image placement), opaque to the server.
 	View json.RawMessage `json:"view,omitempty"`
+}
+
+// parseHexColor parses "#rrggbb".
+func parseHexColor(s string) (color.NRGBA, error) {
+	var c color.NRGBA
+	if len(s) != 7 || s[0] != '#' {
+		return c, errors.New("colours must look like #rrggbb")
+	}
+	v, err := strconv.ParseUint(s[1:], 16, 32)
+	if err != nil {
+		return c, errors.New("colours must look like #rrggbb")
+	}
+	return color.NRGBA{uint8(v >> 16), uint8(v >> 8), uint8(v), 255}, nil
+}
+
+// normalizeStage validates a stage spec; stages have no names or outline.
+func (s *badgeEditorSpec) normalizeStage() error {
+	s.Names = [badgearcade.DisplayNameLanguages]string{}
+	s.Collision = nil
+	s.Tint = strings.ToLower(strings.TrimSpace(s.Tint))
+	if _, err := parseHexColor(s.Tint); err != nil {
+		return err
+	}
+	if len(s.View) > 4096 {
+		return errors.New("view state too large")
+	}
+	return nil
+}
+
+// tint is a stage spec's strip colour (grey when unset).
+func (s *badgeEditorSpec) tint() color.NRGBA {
+	c, err := parseHexColor(s.Tint)
+	if err != nil {
+		return color.NRGBA{0x9c, 0xa3, 0xaf, 255}
+	}
+	return c
 }
 
 // normalizeBadgeName trims a name, keeps at most two lines (the game breaks
@@ -231,6 +276,33 @@ func badgeEditorArt(s string) (*image.NRGBA, []byte, error) {
 	return art, pngBytes(art), nil
 }
 
+// badgeEditorStageArt decodes an uploaded stage backdrop and normalises it to
+// a 400x240 PNG (scaled to cover, centred, flattened onto white).
+func badgeEditorStageArt(s string) (*image.NRGBA, []byte, error) {
+	raw, err := decodeDataURL(s, badgeEditorMaxArt)
+	if err != nil {
+		return nil, nil, err
+	}
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(raw))
+	if err != nil {
+		return nil, nil, errors.New("art is not a PNG, JPEG or GIF image")
+	}
+	if cfg.Width > 1600 || cfg.Height > 1600 {
+		return nil, nil, errors.New("art must be at most 1600x1600")
+	}
+	img, _, err := image.Decode(bytes.NewReader(raw))
+	if err != nil {
+		return nil, nil, err
+	}
+	art := badgearcade.CoverImage(img, badgearcade.StageScreenW, badgearcade.StageScreenH)
+	return art, pngBytes(art), nil
+}
+
+// badgeEditorBuildStage builds the stage the 3DS will get from saved art.
+func badgeEditorBuildStage(name string, art image.Image, spec badgeEditorSpec) (*badgearcade.CraneStage, error) {
+	return badgearcade.BuildCraneStage(name, art, spec.tint())
+}
+
 // badgeEditorMe reports the login state for the editor.
 func badgeEditorMe(w http.ResponseWriter, r *http.Request) {
 	pid, ok := mySessionPID(r)
@@ -319,6 +391,45 @@ func badgeEditorPreview(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// badgeEditorStagePreview renders a stage through the real encoder: the top
+// screen after ETC1 compression and the rail strip.
+func badgeEditorStagePreview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		badgeEditorError(w, http.StatusMethodNotAllowed, "POST only")
+		return
+	}
+	if badgeEditorRateLimited("preview:"+badgeEditorClientIP(r), 60, time.Minute) {
+		badgeEditorError(w, http.StatusTooManyRequests, "too many previews, slow down a little")
+		return
+	}
+	var req struct {
+		Art  string `json:"art"`
+		Tint string `json:"tint"`
+	}
+	if !badgeEditorReadJSON(w, r, &req) {
+		return
+	}
+	art, _, err := badgeEditorStageArt(req.Art)
+	if err != nil {
+		badgeEditorError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	spec := badgeEditorSpec{Tint: req.Tint}
+	if err := spec.normalizeStage(); err != nil {
+		badgeEditorError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	st, err := badgeEditorBuildStage("CrSt_Preview", art, spec)
+	if err != nil {
+		badgeEditorError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	badgeEditorJSON(w, http.StatusOK, map[string]any{
+		"screen": dataURL(pngBytes(st.Screen())),
+		"strip":  dataURL(pngBytes(st.Strip())),
+	})
+}
+
 type badgeEditorSummary struct {
 	ID         int64     `json:"id"`
 	Kind       string    `json:"kind"`
@@ -337,31 +448,74 @@ func badgeEditorAuth(w http.ResponseWriter, r *http.Request) (int64, bool) {
 	return pid, true
 }
 
-// badgeEditorSaveRequest is a create/update body.
+// badgeEditorSaveRequest is a create/update body. Spec depends on the kind:
+// badgeEditorSpec (badge, stage) or badgeEditorLayoutSpec (crane). Sets aren't
+// made by players: every creator gets one automatically (account-proxy).
 type badgeEditorSaveRequest struct {
 	Kind   string          `json:"kind"`
 	Title  string          `json:"title"`
-	Spec   badgeEditorSpec `json:"spec"`
+	Spec   json.RawMessage `json:"spec"`
 	Art    string          `json:"art"`
 	Source string          `json:"source"` // optional original upload
 }
 
-func (req *badgeEditorSaveRequest) validate() (art, source []byte, specJSON []byte, err error) {
-	if req.Kind != "badge" {
-		return nil, nil, nil, errors.New("only badges can be saved for now")
-	}
+// validate checks a save for the player pid; self is the creation being
+// updated (0 when creating).
+func (req *badgeEditorSaveRequest) validate(pid, self int64) (art, source []byte, specJSON []byte, err error) {
 	req.Title = strings.TrimSpace(req.Title)
-	if req.Title == "" {
-		req.Title = strings.SplitN(normalizeBadgeName(req.Spec.Names[1]), "\r\n", 2)[0]
-	}
 	if r := []rune(req.Title); len(r) > badgeEditorMaxTitle {
 		req.Title = string(r[:badgeEditorMaxTitle])
 	}
-	if err := req.Spec.normalize(); err != nil {
-		return nil, nil, nil, err
-	}
-	if _, art, err = badgeEditorArt(req.Art); err != nil {
-		return nil, nil, nil, err
+	switch req.Kind {
+	case "badge", "stage":
+		var spec badgeEditorSpec
+		if err := json.Unmarshal(req.Spec, &spec); err != nil {
+			return nil, nil, nil, errors.New("invalid spec")
+		}
+		if req.Kind == "stage" {
+			if req.Title == "" {
+				return nil, nil, nil, errors.New("give the stage a title")
+			}
+			if err := spec.normalizeStage(); err != nil {
+				return nil, nil, nil, err
+			}
+			if _, art, err = badgeEditorStageArt(req.Art); err != nil {
+				return nil, nil, nil, err
+			}
+		} else {
+			if req.Title == "" {
+				req.Title = strings.SplitN(normalizeBadgeName(spec.Names[1]), "\r\n", 2)[0]
+			}
+			if err := spec.normalize(); err != nil {
+				return nil, nil, nil, err
+			}
+			if _, art, err = badgeEditorArt(req.Art); err != nil {
+				return nil, nil, nil, err
+			}
+		}
+		if specJSON, err = json.Marshal(spec); err != nil {
+			return nil, nil, nil, err
+		}
+	case "crane":
+		if req.Title == "" {
+			return nil, nil, nil, errors.New("give the layout a title")
+		}
+		spec, err := parseLayoutSpec(req.Spec)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		// The art is the server's render, so reviewers see what gets built.
+		img, err := renderLayoutSpec(pid, spec)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		art = pngBytes(img)
+		if specJSON, err = json.Marshal(spec); err != nil {
+			return nil, nil, nil, err
+		}
+		return art, nil, specJSON, nil
+	default:
+		return nil, nil, nil, errors.New("unknown creation kind")
 	}
 	if req.Source != "" {
 		if source, err = decodeDataURL(req.Source, badgeEditorMaxSource); err != nil {
@@ -371,8 +525,7 @@ func (req *badgeEditorSaveRequest) validate() (art, source []byte, specJSON []by
 			return nil, nil, nil, errors.New("source is not a PNG, JPEG or GIF image")
 		}
 	}
-	specJSON, err = json.Marshal(req.Spec)
-	return art, source, specJSON, err
+	return art, source, specJSON, nil
 }
 
 // badgeEditorCreations lists (GET) or creates (POST) the player's creations.
@@ -411,7 +564,7 @@ func badgeEditorCreations(w http.ResponseWriter, r *http.Request) {
 		if !badgeEditorReadJSON(w, r, &req) {
 			return
 		}
-		art, source, spec, err := req.validate()
+		art, source, spec, err := req.validate(pid, 0)
 		if err != nil {
 			badgeEditorError(w, http.StatusBadRequest, err.Error())
 			return
@@ -523,7 +676,7 @@ func badgeEditorCreation(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		req.Kind = kind
-		art, src, spec, err := req.validate()
+		art, src, spec, err := req.validate(pid, id)
 		if err != nil {
 			badgeEditorError(w, http.StatusBadRequest, err.Error())
 			return
