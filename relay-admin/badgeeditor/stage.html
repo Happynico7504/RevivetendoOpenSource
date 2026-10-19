@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Stage Editor — Badge Arcade</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="editor.css">
+<script src="/inkay/i18n/i18n.js"></script>
+</head>
+<body data-i18n-page-title="st.title">
+<header>
+  <div>
+    <h1 data-i18n="st.h1">Stage Editor</h1>
+    <p class="sub" data-i18n="st.sub">Design the background of a Badge Arcade crane machine on Revivetendo.</p>
+    <nav class="modes"><a href="./" data-i18n="st.tab_badge">Badge</a><a href="stage.html" class="on" data-i18n="st.tab_stage">Stage</a><a href="layout.html" data-i18n="ly.tab">Layout</a></nav>
+  </div>
+  <div class="account" id="account">…</div>
+</header>
+
+<main class="stage-main">
+  <section class="card art">
+    <h2 data-i18n="st.backdrop">Backdrop</h2>
+    <div class="dropzone wide" id="dropzone">
+      <canvas id="stage" width="800" height="480" aria-label="Stage backdrop editor"></canvas>
+      <div class="drophint" id="drophint"><span data-i18n="be.drop">Drop an image here or</span> <label class="link"><span data-i18n="be.choose">choose a file</span><input type="file" id="file" accept="image/png,image/jpeg,image/gif" hidden></label><br><small data-i18n="st.size_hint">It fills the 3DS top screen (400×240). Wider or taller images are cropped — drag to choose the part.</small></div>
+    </div>
+    <div class="controls">
+      <label><span data-i18n="be.zoom">Zoom</span> <input type="range" id="zoom" min="100" max="400" value="100"></label>
+      <button type="button" id="fit" data-i18n="be.fit">Fit</button>
+      <label class="link small"><span data-i18n="be.replace">Replace image</span><input type="file" id="file2" accept="image/png,image/jpeg,image/gif" hidden></label>
+    </div>
+    <div class="controls">
+      <label><span data-i18n="st.rail">Rail colour</span> <input type="color" id="tint" value="#9ca3af"></label>
+      <button type="button" id="autoTint" data-i18n="st.auto_tint">Match the image</button>
+    </div>
+    <p class="hint" data-i18n="st.rail_hint">Each stage also carries a narrow rail in a matching colour, like Nintendo's.</p>
+  </section>
+
+  <section class="card preview">
+    <h2 data-i18n="be.preview">Preview</h2>
+    <p class="hint" data-i18n="st.preview_hint">Rendered with the same encoder as the real stage (the 3DS compresses it).</p>
+    <div class="previews">
+      <figure><div class="screen"><img id="pscreen" alt=""></div><figcaption data-i18n="st.top_screen">3DS top screen</figcaption></figure>
+      <figure><div class="rail"><img id="pstrip" alt=""></div><figcaption data-i18n="st.rail_short">Rail</figcaption></figure>
+    </div>
+    <p class="status" id="previewStatus"></p>
+  </section>
+
+  <section class="card save">
+    <h2 data-i18n="be.save_h">Save</h2>
+    <label for="title" data-i18n="st.title_label">Title <small>(shown to you and the reviewers)</small></label>
+    <input id="title" maxlength="60" placeholder="e.g. Sunset beach" data-i18n-placeholder="st.title_ph">
+    <div class="controls">
+      <button type="button" class="primary" id="save" data-i18n="be.save">Save</button>
+      <button type="button" id="saveCopy" data-i18n="be.save_copy">Save as copy</button>
+      <button type="button" id="new" data-i18n="st.new">New stage</button>
+    </div>
+    <div class="controls">
+      <button type="button" class="submit" id="submit" data-i18n="be.submit_review">Submit for review…</button>
+    </div>
+    <div class="rules" id="rules" hidden>
+      <p><strong data-i18n="be.before">Before you submit</strong></p>
+      <ul>
+        <li data-i18n="be.rule1">Only use artwork you made yourself or are allowed to share.</li>
+        <li data-i18n="be.rule2">Nothing offensive, hateful, sexual, or personal information.</li>
+        <li data-i18n="st.rule3">An admin reviews every stage before it can appear in the arcade; they may reject it with a note.</li>
+        <li data-i18n="be.rule4">While it waits for review (and once approved) it can't be edited — “Save as copy” to make changes.</li>
+      </ul>
+      <div class="controls"><button type="button" class="primary" id="submitConfirm" data-i18n="be.submit">Submit</button><button type="button" id="submitCancel" data-i18n="be.cancel">Cancel</button></div>
+    </div>
+    <p class="status" id="saveStatus"></p>
+  </section>
+
+  <section class="card creations" id="creationsCard">
+    <h2 data-i18n="be.creations">My creations</h2>
+    <div id="creations"><p class="hint" data-i18n="be.login_to_see">Log in to see your saved creations.</p></div>
+  </section>
+</main>
+
+<script src="stage.js"></script>
+</body>
+</html>

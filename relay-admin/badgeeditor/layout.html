@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Layout Editor — Badge Arcade</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="editor.css">
+<script src="/inkay/i18n/i18n.js"></script>
+</head>
+<body data-i18n-page-title="ly.title">
+<header>
+  <div>
+    <h1 data-i18n="ly.h1">Layout Editor</h1>
+    <p class="sub" data-i18n="ly.sub">Arrange the badges and obstacles of a Badge Arcade crane machine.</p>
+    <nav class="modes"><a href="./" data-i18n="st.tab_badge">Badge</a><a href="stage.html" data-i18n="st.tab_stage">Stage</a><a href="layout.html" class="on" data-i18n="ly.tab">Layout</a></nav>
+  </div>
+  <div class="account" id="account">…</div>
+</header>
+
+<main class="layout-main">
+  <section class="card templates" id="templateCard">
+    <h2 data-i18n="ly.blank">Start with an empty machine</h2>
+    <p class="hint" data-i18n="ly.blank_hint">Only the crane comes along; add badge spots, obstacles and attachments yourself.</p>
+    <div class="controls" id="blank"></div>
+    <h2 style="margin-top:1rem" data-i18n="ly.start">Start from a Nintendo machine</h2>
+    <input type="text" id="templateFilter" placeholder="Search, e.g. Kirby" data-i18n-placeholder="ly.search">
+    <div class="tplgrid" id="templates"><p class="hint" data-i18n="be.loading">Loading…</p></div>
+  </section>
+
+  <section class="card art" id="editorCard" hidden>
+    <h2><span data-i18n="ly.machine">Machine</span> <small id="templateName" class="muted"></small> <button type="button" id="changeTemplate" class="small" data-i18n="ly.change">Change</button></h2>
+    <div class="lycanvas"><canvas id="canvas" width="960" height="640" aria-label="Machine layout editor"></canvas></div>
+    <div class="controls">
+      <button type="button" id="addSpot" data-i18n="ly.add_spot">+ Badge spot</button>
+      <button type="button" id="dup" data-i18n="ly.duplicate">Duplicate</button>
+      <button type="button" id="del" data-i18n="be.delete">Delete</button>
+      <label><input type="checkbox" id="showCollision"> <span data-i18n="ly.show_collision">Show collision</span></label>
+      <span class="muted small" id="counts"></span>
+    </div>
+    <p class="hint" data-i18n="ly.hint2">Click to select, drag to move. Mouse wheel scales the selection, Shift + wheel rotates it. The frame is the top screen; parts may stick out of it. Yellow pins are joints from the original machine (e.g. a badge hanging on a hook): they move with their part and disappear when you delete either side.</p>
+    <div class="controls">
+      <label><span data-i18n="ly.backdrop">Backdrop</span> <select id="stageSelect"></select></label>
+      <label><span data-i18n="ly.spot_badge">Draw spots with</span> <select id="badgeSelect"></select></label>
+    </div>
+  </section>
+
+  <section class="card props" id="propsCard" hidden>
+    <h2 data-i18n="ly.selected">Selected</h2>
+    <div id="props"><p class="hint" data-i18n="ly.nothing_selected">Nothing selected.</p></div>
+    <div class="modes" style="margin-top:1rem"><a href="#" id="tabObstacles" class="on" data-i18n="ly.obstacles">Obstacles</a><a href="#" id="tabAttachments" data-i18n="ly.attachments">Attachments</a></div>
+    <input type="text" id="obstacleFilter" placeholder="Search" data-i18n-placeholder="ly.search_parts" style="margin-top:.5rem">
+    <div class="palette" id="palette"></div>
+  </section>
+
+  <section class="card preview" id="previewCard" hidden>
+    <h2 data-i18n="be.preview">Preview</h2>
+    <p class="hint" data-i18n="ly.preview_hint">Drawn by the server with the same placement maths the arcade package uses.</p>
+    <div class="screen"><img id="pimage" alt=""></div>
+    <p class="status" id="previewStatus"></p>
+  </section>
+
+  <section class="card save" id="saveCard" hidden>
+    <h2 data-i18n="be.save_h">Save</h2>
+    <label for="title" data-i18n="st.title_label">Title <small>(shown to you and the reviewers)</small></label>
+    <input id="title" maxlength="60" placeholder="e.g. Pinball madness" data-i18n-placeholder="ly.title_ph">
+    <div class="controls">
+      <button type="button" class="primary" id="save" data-i18n="be.save">Save</button>
+      <button type="button" id="saveCopy" data-i18n="be.save_copy">Save as copy</button>
+      <button type="button" id="new" data-i18n="ly.new">New layout</button>
+    </div>
+    <div class="controls">
+      <button type="button" class="submit" id="submit" data-i18n="be.submit_review">Submit for review…</button>
+    </div>
+    <div class="rules" id="rules" hidden>
+      <p><strong data-i18n="be.before">Before you submit</strong></p>
+      <ul>
+        <li data-i18n="ly.rule1">Make sure the badges can actually be won: not sealed in, not stacked inside obstacles.</li>
+        <li data-i18n="ly.rule2">An admin reviews every layout before it can appear in the arcade; they may reject it with a note.</li>
+        <li data-i18n="be.rule4">While it waits for review (and once approved) it can't be edited — “Save as copy” to make changes.</li>
+      </ul>
+      <div class="controls"><button type="button" class="primary" id="submitConfirm" data-i18n="be.submit">Submit</button><button type="button" id="submitCancel" data-i18n="be.cancel">Cancel</button></div>
+    </div>
+    <p class="status" id="saveStatus"></p>
+  </section>
+
+  <section class="card creations" id="creationsCard">
+    <h2 data-i18n="be.creations">My creations</h2>
+    <div id="creations"><p class="hint" data-i18n="be.login_to_see">Log in to see your saved creations.</p></div>
+  </section>
+</main>
+
+<script src="layout.js"></script>
+</body>
+</html>
