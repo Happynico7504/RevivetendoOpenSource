@@ -657,7 +657,7 @@ func main() {
 
 	addr := "127.0.0.1:9004"
 	log.Printf("relay-admin listening on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, nil))
+	log.Fatal(http.ListenAndServe(addr, themeMiddleware(http.DefaultServeMux)))
 }
 
 // --- API ---
@@ -1133,7 +1133,7 @@ var wscTmpl = template.Must(template.New("wsc").Funcs(tmplFuncs).Parse(`<!DOCTYP
 <head>
 ` + i18nScript + `
 <meta charset="utf-8">
-<title>WSC Dashboard — Inkay Relay Admin</title>
+<title>WSC Dashboard — Revivetendo Dashboard Admin</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 body{font-family:system-ui,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem;color:#222}
@@ -1496,6 +1496,7 @@ const wscOverlayHTML = `<!DOCTYPE html>
 <head>
 ` + i18nScript + `
 <meta charset="utf-8">
+<meta name="rvt-theme" content="off">
 <title>WSC Overlay</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -1956,18 +1957,18 @@ var landingTmpl = template.Must(template.New("landing").Parse(`<!DOCTYPE html>
 <head>
 ` + i18nScript + `
 <meta charset="utf-8">
-<title>Pretendo Bridge</title>
+<title>Revivetendo Dashboard</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta property="og:type" content="website">
-<meta property="og:site_name" content="Inkay Relay">
-<meta property="og:title" content="Pretendo Bridge">
+<meta property="og:site_name" content="Revivetendo Dashboard">
+<meta property="og:title" content="Revivetendo Dashboard">
 <meta property="og:description" content="Public Wii U and 3DS revival network — play Mario Kart 8, Wii Sports Club, Badge Arcade, Swapdoodle, Miiverse and more, built on Pretendo.">
 <meta property="og:image" content="` + siteHost + `/inkay/stats/card.svg">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta property="og:url" content="` + siteHost + `/">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="Pretendo Bridge">
+<meta name="twitter:title" content="Revivetendo Dashboard">
 <meta name="twitter:description" content="Public Wii U and 3DS revival network — play Mario Kart 8, Wii Sports Club, Badge Arcade, Swapdoodle, Miiverse and more, built on Pretendo.">
 <meta name="twitter:image" content="` + siteHost + `/inkay/stats/card.svg">
 <style>
@@ -1989,8 +1990,8 @@ tr:last-child td{border-bottom:none}
 </style>
 </head>
 <body>
-<h1>Pretendo Bridge</h1>
-<p class="sub">netcup-server.nicochristmann.net</p>
+<h1>Revivetendo Dashboard</h1>
+<p class="sub">revivetendo-dashboard.nicochristmann.net</p>
 <div class="cards">
   <a class="card" href="/inkay/stats/">
     <h2 data-i18n="land.stats">Stats</h2>
@@ -2022,7 +2023,7 @@ tr:last-child td{border-bottom:none}
   </a>
   <a class="card" href="/inkay/admin/">
     <h2 data-i18n="land.admin">Admin</h2>
-    <p data-i18n="land.admin_desc">Manage redirects — requires client certificate</p>
+    <p data-i18n="land.admin_desc">Staff tools for the network — requires client certificate</p>
   </a>
 </div>
 <div class="api-list">
@@ -2048,25 +2049,25 @@ func landingUI(w http.ResponseWriter, r *http.Request) {
 
 // --- Stats UI ---
 
-const siteHost = "https://netcup-server.nicochristmann.net"
+const siteHost = "https://revivetendo-dashboard.nicochristmann.net"
 
 var statsTmpl = template.Must(template.New("stats").Funcs(tmplFuncs).Parse(`<!DOCTYPE html>
 <html lang="en">
 <head>
 ` + i18nScript + `
 <meta charset="utf-8">
-<title>Inkay Relay — Stats</title>
+<title>Revivetendo Dashboard — Stats</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta property="og:type" content="website">
-<meta property="og:site_name" content="Inkay Relay">
-<meta property="og:title" content="Pretendo Bridge — Live Stats">
+<meta property="og:site_name" content="Revivetendo Dashboard">
+<meta property="og:title" content="Revivetendo Dashboard — Live Stats">
 <meta property="og:description" content="{{.Stats.TotalPIDs}} players · {{.Stats.Requests24h}} requests today · {{.Stats.ActiveRedirects}} active servers">
 <meta property="og:image" content="{{.Host}}/inkay/stats/card.svg">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta property="og:url" content="{{.Host}}/inkay/stats/">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="Pretendo Bridge — Live Stats">
+<meta name="twitter:title" content="Revivetendo Dashboard — Live Stats">
 <meta name="twitter:description" content="{{.Stats.TotalPIDs}} players · {{.Stats.Requests24h}} requests today">
 <meta name="twitter:image" content="{{.Host}}/inkay/stats/card.svg">
 <style>
@@ -2085,7 +2086,7 @@ h2{font-size:1rem;margin-bottom:.75rem;margin-top:2rem}
 </style>
 </head>
 <body data-i18n-page-title="stats.title">
-<h1>Inkay Relay</h1>
+<h1>Revivetendo Dashboard</h1>
 <div class="cards">
   <div class="card"><div class="num">{{.Stats.TotalPIDs}}</div><div class="label" data-i18n="stats.players">Unique players</div></div>
   <div class="card"><div class="num">{{.Stats.TotalRequests}}</div><div class="label" data-i18n="stats.total">Total requests</div></div>
@@ -2152,7 +2153,7 @@ var cardTmpl = template.Must(template.New("card").Parse(`<svg xmlns="http://www.
   <rect x="0" y="0" width="1200" height="6" fill="url(#accent)"/>
 
   <!-- logo / title -->
-  <text x="80" y="120" font-family="system-ui,sans-serif" font-size="52" font-weight="700" fill="#f8fafc">Pretendo Bridge</text>
+  <text x="80" y="120" font-family="system-ui,sans-serif" font-size="52" font-weight="700" fill="#f8fafc">Revivetendo Dashboard</text>
   <text x="80" y="168" font-family="system-ui,sans-serif" font-size="24" fill="#94a3b8">Wii U and 3DS revival network — live stats</text>
 
   <!-- divider -->
@@ -2180,7 +2181,7 @@ var cardTmpl = template.Must(template.New("card").Parse(`<svg xmlns="http://www.
   <text x="945" y="368" font-family="system-ui,sans-serif" font-size="20" fill="#94a3b8" text-anchor="middle">active servers</text>
 
   <!-- footer -->
-  <text x="80" y="560" font-family="system-ui,sans-serif" font-size="18" fill="#475569">netcup-server.nicochristmann.net</text>
+  <text x="80" y="560" font-family="system-ui,sans-serif" font-size="18" fill="#475569">revivetendo-dashboard.nicochristmann.net</text>
   <text x="1120" y="560" font-family="system-ui,sans-serif" font-size="18" fill="#475569" text-anchor="end">{{.UpdatedAt}}</text>
 </svg>`))
 
@@ -2210,7 +2211,7 @@ var adminTmpl = template.Must(template.New("admin").Funcs(tmplFuncs).Parse(`<!DO
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Inkay Relay — Admin</title>
+<title>Revivetendo Dashboard — Admin</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 body{font-family:system-ui,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem;color:#222}
@@ -2242,7 +2243,7 @@ input[type=text],select{border:1px solid #d1d5db;border-radius:4px;padding:.4rem
 </style>
 </head>
 <body>
-<h1>Inkay Relay Admin</h1>
+<h1>Revivetendo Dashboard Admin</h1>
 {{if .Msg}}<div class="msg">{{.Msg}}</div>{{end}}
 <p style="margin-bottom:1.5rem">
   <a href="/inkay/stats/" target="_blank">← Public stats</a> &nbsp;|&nbsp;
@@ -2253,7 +2254,7 @@ input[type=text],select{border:1px solid #d1d5db;border-radius:4px;padding:.4rem
   <a href="/inkay/admin/access/">🔑 Access levels</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/spotpass-wiiu/">📢 Wii U SpotPass</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/spotpass-3ds/">📮 3DS Swapdoodle</a> &nbsp;|&nbsp;
-  <a href="/inkay/admin/spotpass-3ds-sysmsg/">📢 3DS SpotPass</a> &nbsp;|&nbsp;
+  <a href="/inkay/admin/spotpass-3ds-sysmsg/">📢 3DS notifications</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/badge-arcade/">🏅 Badge Arcade</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/videos/">📺 Revivetendo TV</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/rvta/">🔋 RvtA diagnostics</a> &nbsp;|&nbsp;
@@ -2494,7 +2495,7 @@ input[type=text]{border:1px solid #d1d5db;border-radius:4px;padding:.4rem .6rem;
 <p><a href="/inkay/admin/">← Back to admin</a></p>
 <h1>Banned Users</h1>
 {{if .Msg}}<div class="msg">{{.Msg}}</div>{{end}}
-<div class="note">Banned users are always proxied to Pretendo, regardless of game server access mode. The ban applies globally across all game servers.</div>
+<div class="note">Banned users are proxied to Pretendo's own servers instead of ours. The ban applies globally across all game servers.</div>
 
 <table>
 <tr><th>PNID</th><th>Reason</th><th>Banned at</th><th></th></tr>
@@ -2894,7 +2895,7 @@ var sysmsg3dsTmpl = template.Must(template.New("sysmsg3ds").Funcs(tmplFuncs).Par
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>3DS SpotPass System Messages</title>
+<title>3DS HOME Menu Notifications</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 body{font-family:system-ui,sans-serif;max-width:820px;margin:2rem auto;padding:0 1rem;color:#222}
@@ -2925,9 +2926,9 @@ textarea{min-height:5rem;resize:vertical}
 </head>
 <body>
 <p><a href="/inkay/admin/">← Back to admin</a></p>
-<h1>3DS SpotPass System Messages</h1>
+<h1>3DS HOME Menu Notifications</h1>
 {{if .Msg}}<div class="msg">{{.Msg}}</div>{{end}}
-<div class="note">Served via the console's own always-polled <code>sysmsg1</code>/<code>sysmsg2</code>/<code>sysmsg3</code> BOSS tasks (bossAppIds confirmed live against Pretendo's real server, TitleId 000400300000a102/b102). <strong>Unlike the Wii U version, the inner message format itself is unverified for 3DS</strong> - it reuses the genuine Wii U schema as a best guess, not a confirmed 3DS sample, so a message may not render correctly even if delivery succeeds.</div>
+<div class="note">Shown as a HOME Menu notification. The format comes from Nintendo's own notifications in Swapdoodle's SpotPass files: each active message rides along in Swapdoodle's <code>RNG_NT1</code> file and in <code>NZOffPg</code>, which every 3DS polls. Consoles pick it up on their next SpotPass check and show each message once; no rebuild or restart needed. The subject is cut to 31 characters.</div>
 
 <table>
 <tr><th>Subject / Body</th><th>Title ID</th><th>Region</th><th>Status</th><th>Created</th><th></th></tr>
@@ -2958,14 +2959,14 @@ textarea{min-height:5rem;resize:vertical}
 <form method="post" action="/inkay/admin/spotpass-3ds-sysmsg/add">
   <div class="field">
     <label>Subject</label>
-    <input type="text" name="subject" placeholder="Nintendo eShop" required>
+    <input type="text" name="subject" placeholder="Nintendo eShop" maxlength="31" required>
   </div>
   <div class="field">
     <label>Body</label>
     <textarea name="body" required></textarea>
   </div>
   <div class="field" style="max-width:280px">
-    <label>Region (blank = all regions - not yet enforced for 3DS, no confirmed region-detection scheme)</label>
+    <label>Region (not enforced on 3DS yet: every message goes to all regions)</label>
     <select name="region">
       <option value="">All regions</option>
       <option value="USA">USA</option>
@@ -4209,6 +4210,7 @@ var myDiscordTmpl = template.Must(template.New("my-discord").Funcs(tmplFuncs).Pa
 ` + i18nScript + `
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="rvt-theme" content="off">
 <title>Discord Link — Revivetendo</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -4348,7 +4350,7 @@ var myLoginTmpl = template.Must(template.New("my-login").Parse(`<!DOCTYPE html>
 <head>
 ` + i18nScript + `
 <meta charset="utf-8">
-<title>My Status — Pretendo Bridge</title>
+<title>My Status — Revivetendo Dashboard</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 body{font-family:system-ui,sans-serif;max-width:400px;margin:4rem auto;padding:0 1rem;color:#222}
@@ -4384,7 +4386,7 @@ var myStatusTmpl = template.Must(template.New("my-status").Funcs(tmplFuncs).Pars
 <head>
 ` + i18nScript + `
 <meta charset="utf-8">
-<title>My Status — Pretendo Bridge</title>
+<title>My Status — Revivetendo Dashboard</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 body{font-family:system-ui,sans-serif;max-width:620px;margin:2rem auto;padding:0 1rem;color:#222}
@@ -4707,7 +4709,7 @@ var myAccountTmpl = template.Must(template.New("my-account").Parse(`<!DOCTYPE ht
 <head>
 ` + i18nScript + `
 <meta charset="utf-8">
-<title>My Account — Pretendo Bridge</title>
+<title>My Account — Revivetendo Dashboard</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 body{font-family:system-ui,sans-serif;max-width:400px;margin:2rem auto;padding:0 1rem;color:#222}
@@ -4973,7 +4975,7 @@ const activityBGMPath = "/nico-pretendo-bridge/miitvbgm.mp3"
 const activityLogoPath = "/nico-pretendo-bridge/miitv_logo.png"
 
 var activityTmpl = template.Must(template.New("activity").Parse(`<!DOCTYPE html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Mii TV</title>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Mii TV</title><meta name="rvt-theme" content="off">
 <style>
   html,body{margin:0;height:100%;background:#cdeeff;color:#1b2a3a;font-family:system-ui,sans-serif;overflow:hidden}
   #logo{position:absolute;top:2vh;left:50%;transform:translateX(-50%);max-width:60vmin;max-height:22vmin}

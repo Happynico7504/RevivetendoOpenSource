@@ -124,12 +124,6 @@ pre button{position:absolute;top:.5rem;right:.5rem;background:#334155;color:#e2e
 pre button:hover{background:#475569}
 ul{padding-left:1.2rem;line-height:1.6}
 .warn{background:#fffbeb;border:1px solid #fcd34d;color:#78350f;border-radius:8px;padding:.7rem 1rem;font-size:.875rem;margin-top:1.5rem}
-@media (prefers-color-scheme: dark){
-body{background:#0f0f11;color:#e4e4e7}.sub,.hint,label{color:#a1a1aa}.nav a{color:#93c5fd}
-.box{background:#18181b;border-color:#27272a}input{background:#09090b;color:#e4e4e7;border-color:#3f3f46}
-.tabs button{background:#18181b;color:#e4e4e7;border-color:#3f3f46}
-.warn{background:#292524;border-color:#a16207;color:#fde68a}
-}
 </style>
 </head>
 <body data-i18n-page-title="ai.title">

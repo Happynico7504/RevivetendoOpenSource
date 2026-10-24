@@ -350,7 +350,7 @@ var myPatreonTmpl = template.Must(template.New("my-patreon").Funcs(tmplFuncs).Pa
 <head>
 ` + i18nScript + `
 <meta charset="utf-8">
-<title>Coins &amp; Patreon — Pretendo Bridge</title>
+<title>Coins &amp; Patreon — Revivetendo Dashboard</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 body{font-family:system-ui,sans-serif;max-width:620px;margin:2rem auto;padding:0 1rem;color:#222}
