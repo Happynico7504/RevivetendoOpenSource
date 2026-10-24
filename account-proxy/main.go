@@ -6511,6 +6511,11 @@ func startOLVProxy() {
 	if err != nil {
 		log.Fatalf("npdl cdn cert: %v", err)
 	}
+	// Larimar's Wii U portal (larimar.go), signed by the NN CA like olvCert.
+	larimarCert, err := tls.LoadX509KeyPair(baseCerts+"/larimar-nicochristmann-net.crt", baseCerts+"/larimar-nicochristmann-net.key")
+	if err != nil {
+		log.Fatalf("larimar cert: %v", err)
+	}
 	// Fallback for any *.pretendo.cc host we haven't explicitly cased above - see
 	// handleGenericPretendoProxy's doc comment. Cert trust doesn't matter (ssl:C
 	// verification is disabled system-wide), this just needs the handshake to complete.
@@ -6562,6 +6567,9 @@ func startOLVProxy() {
 			// validates the cert. Keep this explicit so it can never regress
 			// the same way again regardless of what's added to default.
 			return &olvCert, nil
+		case larimarPortalHost:
+			// Explicit for the same reason: the Wii U validates it.
+			return &larimarCert, nil
 		default:
 			if strings.HasSuffix(chi.ServerName, ".pretendo.cc") {
 				return &wildcardPretendoCert, nil
@@ -6635,7 +6643,7 @@ func startOLVProxy() {
 		}
 		switch serverName {
 		case "olv3ds.nicochristmann.net", "ctr.olv.nicochristmann.net", "npdl.cdn.pretendo.cc", "nasc.nicochristmann.net",
-			"olv.nicochristmann.net", "portal.olv.nicochristmann.net":
+			"olv.nicochristmann.net", "portal.olv.nicochristmann.net", larimarPortalHost:
 			return true
 		}
 		return serverName == "hpp-"+swapdoodleGameServerID+"-l1.n.app.nicoch.net"
@@ -6792,6 +6800,8 @@ func startOLVProxy() {
 			handleSamurai(w, r)
 		case "samurai.wup.shop.nicoch.net":
 			handleWiiUShop(w, r)
+		case larimarPortalHost:
+			handleLarimar(w, r)
 		case "ccif.nicoch.net":
 			handleShopStub(w, r)
 		case "ias.c.shop.nicoch.net":

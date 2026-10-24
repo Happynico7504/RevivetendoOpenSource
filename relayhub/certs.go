@@ -169,6 +169,7 @@ func DefaultCertRoutes() []relaylink.CertRoute {
 		exact("npdl.cdn.pretendo.cc", "npdl-cdn-pretendo-cc"),
 		exact("olv.nicochristmann.net", "olv-nicochristmann-net"),
 		exact("portal.olv.nicochristmann.net", "olv-nicochristmann-net"),
+		exact("portal.larimar.nicochristmann.net", "larimar-nicochristmann-net"),
 		suffix(".pretendo.cc", "wildcard-pretendo-cc"),
 		suffix(".nicoch.net", "wildcard-nicoch-net"),
 		suffix(".nicochristmann.net", "wildcard-nicochristmann-net"),
