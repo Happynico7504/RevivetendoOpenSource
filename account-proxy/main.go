@@ -922,6 +922,8 @@ func handleAccount(w http.ResponseWriter, r *http.Request) {
 			switch strings.ToUpper(gameServerID) {
 			case "1005A000":
 				handleNexToken(w, r, rd.ToHost, rd.Port, rd.AccessMode)
+			case "101AC900":
+				handleNexToken(w, r, rd.ToHost, rd.Port, rd.AccessMode)
 			case "1010EB00":
 				handleMK8NexToken(w, r, rd.ToHost, rd.Port, rd.AccessMode)
 			case "1012F100":

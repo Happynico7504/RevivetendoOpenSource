@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+
+sleep 45
+
 set -e
 
 export PATH=$PATH:/usr/local/go/bin
