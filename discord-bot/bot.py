@@ -71,6 +71,7 @@ MEMBER_ROLE_ID  = int(os.environ["DISCORD_MEMBER_ROLE_ID"])
 MODERATOR_ROLE_ID = int(os.environ["DISCORD_MODERATOR_ROLE_ID"])
 MOD_LOG_ID          = int(os.environ.get("DISCORD_MOD_LOG_CHANNEL_ID", "0"))
 ACTIVITY_LOG_ID     = int(os.environ.get("DISCORD_ACTIVITY_LOG_CHANNEL_ID", "0"))
+TTS_LOG_ID          = int(os.environ.get("DISCORD_TTS_LOG_CHANNEL_ID", "0"))
 RING_FALLBACK_CH_ID = int(os.environ.get("DISCORD_RING_FALLBACK_CHANNEL_ID", "0"))
 MII_OF_DAY_CHANNEL_ID = int(os.environ.get("DISCORD_MII_OF_THE_DAY_CHANNEL_ID", "0"))
 DB_URL          = os.environ.get("DATABASE_URL", "postgres://postgres:wiiu@localhost:5432/wiiuchat?sslmode=disable")
@@ -151,6 +152,11 @@ def _now():
 
 async def _mod_log(embed: discord.Embed):
     if MOD_LOG_ID and (ch := bot.get_channel(MOD_LOG_ID)):
+        await ch.send(embed=embed)
+
+async def _tts_log(embed: discord.Embed):
+    # Dedicated tts-log channel; falls back to mod-log when not configured.
+    if (cid := TTS_LOG_ID or MOD_LOG_ID) and (ch := bot.get_channel(cid)):
         await ch.send(embed=embed)
 
 async def _activity_log(embed: discord.Embed):
@@ -663,6 +669,15 @@ async def revivetendo_tts(interaction: discord.Interaction, text: app_commands.R
         return
 
     await interaction.response.defer(ephemeral=True)
+
+    embed = discord.Embed(title="TTS Prompt", color=0x5865F2, timestamp=_now())
+    embed.add_field(name="User",    value=f"{interaction.user.mention} ({interaction.user} / {interaction.user.id})")
+    embed.add_field(name="Channel", value=vc.channel.mention)
+    embed.add_field(name="Text",    value=text, inline=False)
+    try:
+        await _tts_log(embed)
+    except discord.HTTPException as e:
+        print(f"[bot] revivetendo_tts: tts-log failed: {e}", flush=True)
 
     try:
         wav_path = await asyncio.to_thread(_synthesize_tts_wav, text)
