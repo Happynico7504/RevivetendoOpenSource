@@ -17,6 +17,3 @@
 [submodule "mk8-secure"]
 	path = mk8-secure
 	url = git@github.com:Happynico7504/mario-kart-8-secure.git
-[submodule "disney-infinity-3-wiiu-nex-server"]
-	path = disney-infinity-3-wiiu-nex-server
-	url = https://github.com/Happynico7504/disney-infinity-3-wiiu-nex-server.git

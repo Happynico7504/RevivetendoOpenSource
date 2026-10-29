@@ -67,3 +67,6 @@ tools/mobipeg/ffmpeg-paired
 .sentry-native/
 **/.sentry-native/
 rvta-dumps/
+
+# Disney Infinity 3.0 server: the owner does not want it hosted on GitHub
+disney-infinity-3/
