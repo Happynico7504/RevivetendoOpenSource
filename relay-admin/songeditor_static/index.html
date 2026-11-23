@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Wii Karaoke U song editor</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="editor.css">
+</head>
+<body>
+<header>
+  <h1>Wii Karaoke U — Song Editor</h1>
+  <div id="who">checking login…</div>
+</header>
+
+<main id="app">
+  <section id="loggedOut" class="hidden">
+    <p>Log in on the main site first, then come back to this page.</p>
+  </section>
+
+  <section id="loggedIn" class="hidden">
+    <section id="listView">
+      <div class="row between">
+        <h2>Your songs</h2>
+        <button id="newSongBtn">+ New song</button>
+      </div>
+      <p class="muted">Drafts are private to you. Submit a song once it builds cleanly to send it for staff review — there's no live deployment yet, so an approved song still needs to be added to the server by hand before anyone can play it.</p>
+      <ul id="songList"></ul>
+    </section>
+
+    <section id="editView" class="hidden">
+      <div class="row between">
+        <button id="backBtn">&larr; Back to list</button>
+        <span id="editStatus" class="status"></span>
+      </div>
+
+      <label>Title
+        <input id="titleInput" maxlength="60" placeholder="My song">
+      </label>
+
+      <div class="card">
+        <h3>Title card (optional)</h3>
+        <p class="muted">Shown on the song's title screen in-game. Leave artist blank to borrow the
+          backing template's own title card instead of generating one.</p>
+        <label>Artist
+          <input id="artistInput" maxlength="60" placeholder="Your name">
+        </label>
+        <label>Writer
+          <input id="writerInput" maxlength="60" placeholder="(optional)">
+        </label>
+        <label>Composer
+          <input id="composerInput" maxlength="60" placeholder="(optional)">
+        </label>
+      </div>
+
+      <div class="card">
+        <h3>1. Backing track</h3>
+        <p class="muted">The audio that plays in-game. Any format ffmpeg can read.</p>
+        <input type="file" id="audioFile" accept="audio/*,video/*">
+        <span id="audioName" class="muted"></span>
+        <audio id="audioPreview" controls class="hidden"></audio>
+      </div>
+
+      <div class="card">
+        <h3>2. Notes</h3>
+        <div class="row">
+          <label><input type="radio" name="notesMode" value="manual" checked> Manual</label>
+          <label><input type="radio" name="notesMode" value="midi"> MIDI file</label>
+          <label><input type="radio" name="notesMode" value="acapella"> A cappella (automatic)</label>
+          <label><input type="radio" name="notesMode" value="acapella_ml"> A cappella (ML, slower/more accurate)</label>
+        </div>
+
+        <div id="manualBlock">
+          <p class="muted">One note per line: <code>duration_ms, pitch</code>. Pitch can be a MIDI number, a note name
+            like <code>C#4</code>, or blank for a rest. Example: <code>500, C4</code></p>
+          <textarea id="manualNotes" rows="10" placeholder="500, C4&#10;250,&#10;250, E4&#10;250, G4"></textarea>
+        </div>
+
+        <div id="auxBlock" class="hidden">
+          <p class="muted" id="auxHint"></p>
+          <input type="file" id="auxFile">
+          <span id="auxName" class="muted"></span>
+        </div>
+
+        <div id="notesSyncBlock" class="hidden">
+          <p class="muted">Uses a local speech-recognition-grade pitch model - more accurate than the automatic
+            mode above, but runs in a background queue (one song at a time, lowest CPU priority), so it can take
+            a minute or so.</p>
+          <div class="row">
+            <button id="notesSyncBtn">Sync notes</button>
+            <span id="notesSyncStatus" class="muted"></span>
+          </div>
+        </div>
+      </div>
+
+      <label>Lead-in before the first note (ms)
+        <input id="event3Input" type="number" min="0" step="50" value="1000">
+      </label>
+
+      <label>Lead-in before singing starts (ms)
+        <input id="leadInInput" type="number" min="0" step="50" placeholder="auto-detected from the recording">
+      </label>
+      <p class="muted">Leave blank to auto-detect from the uploaded recording (notes or lyrics, whichever runs
+        first) after a Sync or Build. Only touch this up if the game freezes right as singing starts, or notes/
+        lyrics begin noticeably too early or late.</p>
+
+      <div class="card">
+        <h3>3. Lyrics (optional)</h3>
+        <div class="row">
+          <label><input type="radio" name="lyricsMode" value="none" checked> No lyrics</label>
+          <label><input type="radio" name="lyricsMode" value="manual"> Manual</label>
+          <label><input type="radio" name="lyricsMode" value="lrc"> Upload .lrc file</label>
+          <label><input type="radio" name="lyricsMode" value="acapella"> A cappella (automatic)</label>
+        </div>
+
+        <div id="lyricsManualBlock" class="hidden">
+          <p class="muted">One lyric line per line: <code>start_ms, end_ms, text</code>. Example:
+            <code>1000, 4000, Hello world</code></p>
+          <textarea id="lyricsManual" rows="8" placeholder="1000, 4000, Hello world&#10;4000, 7000, Second line"></textarea>
+        </div>
+
+        <div id="lyricsLrcBlock" class="hidden">
+          <p class="muted">Upload a standard synced-lyrics .lrc file.</p>
+          <input type="file" id="lyricsLrcFile" accept=".lrc,text/plain">
+          <span id="lyricsLrcName" class="muted"></span>
+        </div>
+
+        <div id="lyricsAcapellaBlock" class="hidden">
+          <p class="muted">Upload an isolated vocal recording (its own file, separate from Notes).</p>
+          <input type="file" id="lyricsAuxFile">
+          <span id="lyricsAuxName" class="muted"></span>
+          <p class="muted">Paste the plain lyric lines below, one per line, no timestamps — a local
+            speech-recognition model syncs them against the recording. This runs in a background queue
+            (one song at a time, lowest CPU priority), so it can take a little while. Best-effort: check
+            the result, touch up in Manual lyrics mode if needed.</p>
+          <textarea id="lyricsRawLines" rows="8" placeholder="First line&#10;Second line&#10;Third line"></textarea>
+          <div class="row">
+            <button id="lyricsSyncBtn">Sync lyrics</button>
+            <span id="lyricsSyncStatus" class="muted"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="row">
+        <button id="saveBtn">Save</button>
+        <button id="buildBtn">Build</button>
+        <button id="submitBtn">Submit for review</button>
+        <button id="withdrawBtn" class="hidden">Withdraw</button>
+        <a id="downloadLink" class="hidden" download>Download .ujk</a>
+        <button id="deleteBtn" class="danger">Delete</button>
+      </div>
+
+      <div id="buildResult"></div>
+    </section>
+  </section>
+</main>
+
+<script src="editor.js"></script>
+</body>
+</html>
