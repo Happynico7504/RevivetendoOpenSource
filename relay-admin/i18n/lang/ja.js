@@ -1,6 +1,19 @@
 // Hand-written ja translations of the dashboard; keys are the data-i18n
 // attributes and I18N.t() calls. Missing keys fall back to English.
 I18N.register("ja", {
+ "land.mk8": "MK8 ステータスとプレイヤー/部屋",
+ "land.mk8_desc": "マリオカート8のプレイヤーとアクティブなマッチメイキング部屋をライブ表示",
+ "mk8.title": "MK8 ダッシュボード — Revivetendo Dashboard",
+ "mk8.h1": "マリオカート8 ダッシュボード",
+ "mk8.rooms": "、{n} 部屋",
+ "mk8.room1": "、1 部屋",
+ "mk8.clear_inactive": "非アクティブな部屋を削除",
+ "mk8.rooms_h": "アクティブな部屋",
+ "mk8.mode": "モード",
+ "mk8.count": "人数",
+ "mk8.no_rooms": "アクティブな部屋はありません。",
+ "mk8.history": "部屋の履歴（過去24時間）",
+ "mk8.no_history": "まだ記録された部屋がありません。",
  "acct.api_confirm": "APIキーをリセットしますか？古いキーを使っているツールは動作しなくなります。",
  "acct.api_copy": "このキーを今すぐコピーしてください。再表示されません。",
  "acct.api_desc": "MCP対応のAIアシスタントをRevivetendoアカウントに接続できます：ステータス、フレンド、Badge Arcadeの作品、Revivetendo TVの動画など。キーはAuthorizationヘッダーのBearerトークンとして送信してください。",
@@ -500,7 +513,7 @@ I18N.register("ja", {
  "wsc.shame_desc": "試合の準備に失敗したため、一時的にマッチメイキングから外されているプレイヤーです。",
  "wsc.shame_reason": "理由",
  "wsc.sport": "スポーツ",
- "wsc.title": "WSCダッシュボード — Revivetendo Dashboard Admin",
+ "wsc.title": "WSCダッシュボード — Revivetendo Dashboard",
  "wsc.tunnel_quota": "トンネル残り",
  "wsc.type": "種類",
  "wsc.up": "サーバー稼働中"

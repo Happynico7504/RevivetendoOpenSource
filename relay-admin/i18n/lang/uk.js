@@ -1,6 +1,19 @@
 // Hand-written uk translations of the dashboard; keys are the data-i18n
 // attributes and I18N.t() calls. Missing keys fall back to English.
 I18N.register("uk", {
+ "land.mk8": "Статус MK8 і гравці/кімнати",
+ "land.mk8_desc": "Гравці Mario Kart 8 і активні кімнати підбору матчів у реальному часі",
+ "mk8.title": "Панель MK8 — Revivetendo Dashboard",
+ "mk8.h1": "Панель Mario Kart 8",
+ "mk8.rooms": ", {n} кімнат",
+ "mk8.room1": ", 1 кімната",
+ "mk8.clear_inactive": "Очистити неактивні кімнати",
+ "mk8.rooms_h": "Активні кімнати",
+ "mk8.mode": "Режим",
+ "mk8.count": "Кількість",
+ "mk8.no_rooms": "Немає активних кімнат.",
+ "mk8.history": "Історія кімнат (24 год)",
+ "mk8.no_history": "Поки немає записаних кімнат.",
  "acct.api_confirm": "Скинути API-ключ? Інструменти зі старим ключем перестануть працювати.",
  "acct.api_copy": "Скопіюйте ключ зараз, його більше не буде показано.",
  "acct.api_desc": "Підключіть ШІ-асистентів із підтримкою MCP до свого акаунта Revivetendo: статус, друзі, творіння Badge Arcade, відео Revivetendo TV та інше. Передавайте ключ як Bearer-токен у заголовку Authorization.",
@@ -500,7 +513,7 @@ I18N.register("uk", {
  "wsc.shame_desc": "Гравці, тимчасово виключені з підбору після невдалої підготовки матчу.",
  "wsc.shame_reason": "Причина",
  "wsc.sport": "Спорт",
- "wsc.title": "Панель WSC — Revivetendo Dashboard Admin",
+ "wsc.title": "Панель WSC — Revivetendo Dashboard",
  "wsc.tunnel_quota": "Ліміт тунелю",
  "wsc.type": "Тип",
  "wsc.up": "Сервер у мережі"

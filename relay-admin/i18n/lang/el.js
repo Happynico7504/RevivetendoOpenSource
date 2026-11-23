@@ -1,6 +1,19 @@
 // Hand-written el translations of the dashboard; keys are the data-i18n
 // attributes and I18N.t() calls. Missing keys fall back to English.
 I18N.register("el", {
+ "land.mk8": "Κατάσταση MK8 και παίκτες/δωμάτια",
+ "land.mk8_desc": "Ζωντανοί παίκτες Mario Kart 8 και ενεργά δωμάτια αντιστοίχισης",
+ "mk8.title": "Πίνακας MK8 — Revivetendo Dashboard",
+ "mk8.h1": "Πίνακας Mario Kart 8",
+ "mk8.rooms": ", {n} δωμάτια",
+ "mk8.room1": ", 1 δωμάτιο",
+ "mk8.clear_inactive": "Εκκαθάριση ανενεργών δωματίων",
+ "mk8.rooms_h": "Ενεργά δωμάτια",
+ "mk8.mode": "Λειτουργία",
+ "mk8.count": "Πλήθος",
+ "mk8.no_rooms": "Δεν υπάρχουν ενεργά δωμάτια.",
+ "mk8.history": "Ιστορικό δωματίων (24 ώρες)",
+ "mk8.no_history": "Δεν έχουν καταγραφεί δωμάτια ακόμα.",
  "acct.api_confirm": "Επαναφορά του κλειδιού API; Τα εργαλεία που χρησιμοποιούν το παλιό κλειδί θα σταματήσουν να λειτουργούν.",
  "acct.api_copy": "Αντιγράψτε το κλειδί τώρα, δεν θα εμφανιστεί ξανά.",
  "acct.api_desc": "Συνδέστε βοηθούς AI με υποστήριξη MCP στον λογαριασμό σας Revivetendo: κατάσταση, φίλοι, δημιουργίες Badge Arcade, βίντεο Revivetendo TV και άλλα. Στείλτε το κλειδί ως Bearer token στην κεφαλίδα Authorization.",
@@ -500,7 +513,7 @@ I18N.register("el", {
  "wsc.shame_desc": "Παίκτες που αποκλείστηκαν προσωρινά από το matchmaking μετά από αποτυχημένη προετοιμασία αγώνα.",
  "wsc.shame_reason": "Αιτία",
  "wsc.sport": "Άθλημα",
- "wsc.title": "Πίνακας WSC — Revivetendo Dashboard Admin",
+ "wsc.title": "Πίνακας WSC — Revivetendo Dashboard",
  "wsc.tunnel_quota": "Όριο σήραγγας",
  "wsc.type": "Τύπος",
  "wsc.up": "Ο διακομιστής είναι online"

@@ -1,6 +1,19 @@
 // Hand-written vi translations of the dashboard; keys are the data-i18n
 // attributes and I18N.t() calls. Missing keys fall back to English.
 I18N.register("vi", {
+ "land.mk8": "Trạng thái MK8 và người chơi/phòng",
+ "land.mk8_desc": "Người chơi Mario Kart 8 trực tiếp và phòng ghép trận đang hoạt động",
+ "mk8.title": "Bảng điều khiển MK8 — Revivetendo Dashboard",
+ "mk8.h1": "Bảng điều khiển Mario Kart 8",
+ "mk8.rooms": ", {n} phòng",
+ "mk8.room1": ", 1 phòng",
+ "mk8.clear_inactive": "Xóa phòng không hoạt động",
+ "mk8.rooms_h": "Phòng đang hoạt động",
+ "mk8.mode": "Chế độ",
+ "mk8.count": "Số lượng",
+ "mk8.no_rooms": "Không có phòng nào đang hoạt động.",
+ "mk8.history": "Lịch sử phòng (24 giờ qua)",
+ "mk8.no_history": "Chưa có phòng nào được ghi lại.",
  "acct.api_confirm": "Đặt lại khóa API? Các công cụ dùng khóa cũ sẽ ngừng hoạt động.",
  "acct.api_copy": "Hãy sao chép khóa này ngay, nó sẽ không được hiển thị lại.",
  "acct.api_desc": "Kết nối trợ lý AI hỗ trợ MCP với tài khoản Revivetendo của bạn: trạng thái, bạn bè, tác phẩm Badge Arcade, video Revivetendo TV và hơn thế nữa. Gửi khóa dưới dạng Bearer token trong header Authorization.",
@@ -500,7 +513,7 @@ I18N.register("vi", {
  "wsc.shame_desc": "Người chơi tạm thời bị loại khỏi ghép trận sau khi thiết lập trận đấu thất bại.",
  "wsc.shame_reason": "Lý do",
  "wsc.sport": "Môn",
- "wsc.title": "Bảng điều khiển WSC — Revivetendo Dashboard Admin",
+ "wsc.title": "Bảng điều khiển WSC — Revivetendo Dashboard",
  "wsc.tunnel_quota": "Hạn mức đường hầm",
  "wsc.type": "Loại",
  "wsc.up": "Máy chủ trực tuyến"

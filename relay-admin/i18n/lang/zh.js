@@ -1,6 +1,19 @@
 // Hand-written zh translations of the dashboard; keys are the data-i18n
 // attributes and I18N.t() calls. Missing keys fall back to English.
 I18N.register("zh", {
+ "land.mk8": "MK8 状态与玩家/房间",
+ "land.mk8_desc": "实时马里奥赛车8玩家与活跃的匹配房间",
+ "mk8.title": "MK8 控制面板 — Revivetendo Dashboard",
+ "mk8.h1": "马里奥赛车8 控制面板",
+ "mk8.rooms": "，{n} 个房间",
+ "mk8.room1": "，1 个房间",
+ "mk8.clear_inactive": "清除不活跃的房间",
+ "mk8.rooms_h": "活跃房间",
+ "mk8.mode": "模式",
+ "mk8.count": "数量",
+ "mk8.no_rooms": "没有活跃的房间。",
+ "mk8.history": "房间历史记录（过去24小时）",
+ "mk8.no_history": "尚无记录的房间。",
  "acct.api_confirm": "重置 API 密钥？使用旧密钥的工具将无法继续使用。",
  "acct.api_copy": "请立即复制此密钥，它不会再次显示。",
  "acct.api_desc": "将支持 MCP 的 AI 助手连接到你的 Revivetendo 账户：状态、好友、Badge Arcade 作品、Revivetendo TV 视频等。请在 Authorization 请求头中以 Bearer 令牌发送密钥。",
@@ -500,7 +513,7 @@ I18N.register("zh", {
  "wsc.shame_desc": "因比赛建立失败而被暂时排除在匹配之外的玩家。",
  "wsc.shame_reason": "原因",
  "wsc.sport": "运动",
- "wsc.title": "WSC 面板 — Revivetendo Dashboard Admin",
+ "wsc.title": "WSC 面板 — Revivetendo Dashboard",
  "wsc.tunnel_quota": "隧道配额",
  "wsc.type": "类型",
  "wsc.up": "服务器在线"

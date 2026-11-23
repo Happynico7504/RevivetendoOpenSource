@@ -1,6 +1,19 @@
 // Hand-written fa translations of the dashboard; keys are the data-i18n
 // attributes and I18N.t() calls. Missing keys fall back to English.
 I18N.register("fa", {
+ "land.mk8": "وضعیت MK8 و بازیکنان/اتاق‌ها",
+ "land.mk8_desc": "بازیکنان زنده ماریو کارت ۸ و اتاق‌های جستجوی فعال",
+ "mk8.title": "داشبورد MK8 — Revivetendo Dashboard",
+ "mk8.h1": "داشبورد ماریو کارت ۸",
+ "mk8.rooms": "، {n} اتاق",
+ "mk8.room1": "، ۱ اتاق",
+ "mk8.clear_inactive": "حذف اتاق‌های غیرفعال",
+ "mk8.rooms_h": "اتاق‌های فعال",
+ "mk8.mode": "حالت",
+ "mk8.count": "تعداد",
+ "mk8.no_rooms": "هیچ اتاق فعالی وجود ندارد.",
+ "mk8.history": "تاریخچه اتاق‌ها (۲۴ ساعت گذشته)",
+ "mk8.no_history": "هنوز هیچ اتاقی ثبت نشده است.",
  "acct.api_confirm": "کلید API بازنشانی شود؟ ابزارهایی که از کلید قدیمی استفاده می‌کنند دیگر کار نخواهند کرد.",
  "acct.api_copy": "این کلید را همین حالا کپی کنید، دوباره نمایش داده نمی‌شود.",
  "acct.api_desc": "دستیارهای هوش مصنوعی سازگار با MCP را به حساب Revivetendo خود متصل کنید: وضعیت، دوستان، ساخته‌های Badge Arcade، ویدیوهای Revivetendo TV و موارد دیگر. کلید را به‌صورت توکن Bearer در هدر Authorization بفرستید.",
@@ -500,7 +513,7 @@ I18N.register("fa", {
  "wsc.shame_desc": "بازیکنانی که پس از ناموفق بودن راه‌اندازی یک مسابقه موقتاً از مسابقه‌یابی کنار گذاشته شده‌اند.",
  "wsc.shame_reason": "دلیل",
  "wsc.sport": "ورزش",
- "wsc.title": "داشبورد WSC — Revivetendo Dashboard Admin",
+ "wsc.title": "داشبورد WSC — Revivetendo Dashboard",
  "wsc.tunnel_quota": "سهمیهٔ تونل",
  "wsc.type": "نوع",
  "wsc.up": "سرور آنلاین است"

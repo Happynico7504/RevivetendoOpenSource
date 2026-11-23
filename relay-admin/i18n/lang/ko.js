@@ -1,6 +1,19 @@
 // Hand-written ko translations of the dashboard; keys are the data-i18n
 // attributes and I18N.t() calls. Missing keys fall back to English.
 I18N.register("ko", {
+ "land.mk8": "MK8 상태 및 플레이어/방",
+ "land.mk8_desc": "실시간 마리오 카트 8 플레이어 및 활성 매치메이킹 방",
+ "mk8.title": "MK8 대시보드 — Revivetendo Dashboard",
+ "mk8.h1": "마리오 카트 8 대시보드",
+ "mk8.rooms": ", 방 {n}개",
+ "mk8.room1": ", 방 1개",
+ "mk8.clear_inactive": "비활성 방 정리",
+ "mk8.rooms_h": "활성 방",
+ "mk8.mode": "모드",
+ "mk8.count": "인원",
+ "mk8.no_rooms": "활성화된 방이 없습니다.",
+ "mk8.history": "방 기록(최근 24시간)",
+ "mk8.no_history": "아직 기록된 방이 없습니다.",
  "acct.api_confirm": "API 키를 재설정할까요? 이전 키를 사용하는 도구는 더 이상 작동하지 않습니다.",
  "acct.api_copy": "지금 이 키를 복사하세요. 다시 표시되지 않습니다.",
  "acct.api_desc": "MCP를 지원하는 AI 도우미를 Revivetendo 계정에 연결하세요: 상태, 친구, Badge Arcade 작품, Revivetendo TV 업로드 등. 키는 Authorization 헤더에 Bearer 토큰으로 보내세요.",
@@ -500,7 +513,7 @@ I18N.register("ko", {
  "wsc.shame_desc": "경기 준비에 실패해 일시적으로 매치메이킹에서 제외된 플레이어입니다.",
  "wsc.shame_reason": "사유",
  "wsc.sport": "종목",
- "wsc.title": "WSC 대시보드 — Revivetendo Dashboard Admin",
+ "wsc.title": "WSC 대시보드 — Revivetendo Dashboard",
  "wsc.tunnel_quota": "터널 한도",
  "wsc.type": "유형",
  "wsc.up": "서버 온라인"

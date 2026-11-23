@@ -1,6 +1,19 @@
 // Hand-written de translations of the dashboard; keys are the data-i18n
 // attributes and I18N.t() calls. Missing keys fall back to English.
 I18N.register("de", {
+ "land.mk8": "MK8-Status und Spieler/Räume",
+ "land.mk8_desc": "Mario-Kart-8-Spieler und aktive Matchmaking-Räume live",
+ "mk8.title": "MK8-Übersicht — Revivetendo Dashboard",
+ "mk8.h1": "Mario-Kart-8-Übersicht",
+ "mk8.rooms": ", {n} Räume",
+ "mk8.room1": ", 1 Raum",
+ "mk8.clear_inactive": "Inaktive Räume entfernen",
+ "mk8.rooms_h": "Aktive Räume",
+ "mk8.mode": "Modus",
+ "mk8.count": "Anzahl",
+ "mk8.no_rooms": "Keine aktiven Räume.",
+ "mk8.history": "Raumverlauf (letzte 24 Std.)",
+ "mk8.no_history": "Noch keine Räume aufgezeichnet.",
  "acct.api_confirm": "API-Schlüssel zurücksetzen? Tools mit dem alten Schlüssel funktionieren dann nicht mehr.",
  "acct.api_copy": "Kopiere diesen Schlüssel jetzt, er wird nicht noch einmal angezeigt.",
  "acct.api_desc": "Verbinde KI-Assistenten mit MCP-Unterstützung mit deinem Revivetendo-Konto: Status, Freunde, Badge-Arcade-Kreationen, Revivetendo-TV-Uploads und mehr. Sende den Schlüssel als Bearer-Token im Authorization-Header.",
@@ -500,7 +513,7 @@ I18N.register("de", {
  "wsc.shame_desc": "Spieler, die nach einem gescheiterten Spielaufbau vorübergehend vom Matchmaking ausgeschlossen sind.",
  "wsc.shame_reason": "Grund",
  "wsc.sport": "Sportart",
- "wsc.title": "WSC-Übersicht — Revivetendo Dashboard Admin",
+ "wsc.title": "WSC-Übersicht — Revivetendo Dashboard",
  "wsc.tunnel_quota": "Tunnel-Kontingent",
  "wsc.type": "Art",
  "wsc.up": "Server online"

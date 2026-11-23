@@ -1,6 +1,19 @@
 // Hand-written nl translations of the dashboard; keys are the data-i18n
 // attributes and I18N.t() calls. Missing keys fall back to English.
 I18N.register("nl", {
+ "land.mk8": "MK8-status en spelers/kamers",
+ "land.mk8_desc": "Live Mario Kart 8-spelers en actieve matchmaking-kamers",
+ "mk8.title": "MK8-dashboard — Revivetendo Dashboard",
+ "mk8.h1": "Mario Kart 8-dashboard",
+ "mk8.rooms": ", {n} kamers",
+ "mk8.room1": ", 1 kamer",
+ "mk8.clear_inactive": "Inactieve kamers opschonen",
+ "mk8.rooms_h": "Actieve kamers",
+ "mk8.mode": "Modus",
+ "mk8.count": "Aantal",
+ "mk8.no_rooms": "Geen actieve kamers.",
+ "mk8.history": "Kamergeschiedenis (laatste 24 u)",
+ "mk8.no_history": "Nog geen kamers vastgelegd.",
  "acct.api_confirm": "Je API-sleutel opnieuw instellen? Tools met de oude sleutel werken dan niet meer.",
  "acct.api_copy": "Kopieer deze sleutel nu, hij wordt niet opnieuw getoond.",
  "acct.api_desc": "Koppel AI-assistenten met MCP-ondersteuning aan je Revivetendo-account: status, vrienden, Badge Arcade-creaties, Revivetendo TV-uploads en meer. Stuur de sleutel als Bearer-token in de Authorization-header.",
@@ -500,7 +513,7 @@ I18N.register("nl", {
  "wsc.shame_desc": "Spelers die na een mislukte wedstrijdopzet tijdelijk zijn uitgesloten van matchmaking.",
  "wsc.shame_reason": "Reden",
  "wsc.sport": "Sport",
- "wsc.title": "WSC-dashboard — Revivetendo Dashboard Admin",
+ "wsc.title": "WSC-dashboard — Revivetendo Dashboard",
  "wsc.tunnel_quota": "Tunnelquotum",
  "wsc.type": "Type",
  "wsc.up": "Server online"

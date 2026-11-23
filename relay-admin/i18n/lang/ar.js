@@ -1,6 +1,19 @@
 // Hand-written ar translations of the dashboard; keys are the data-i18n
 // attributes and I18N.t() calls. Missing keys fall back to English.
 I18N.register("ar", {
+ "land.mk8": "حالة MK8 واللاعبون/الغرف",
+ "land.mk8_desc": "لاعبو ماريو كارت 8 وغرف المطابقة النشطة مباشرة",
+ "mk8.title": "لوحة تحكم MK8 — Revivetendo Dashboard",
+ "mk8.h1": "لوحة تحكم ماريو كارت 8",
+ "mk8.rooms": "، {n} غرف",
+ "mk8.room1": "، غرفة واحدة",
+ "mk8.clear_inactive": "إزالة الغرف غير النشطة",
+ "mk8.rooms_h": "الغرف النشطة",
+ "mk8.mode": "النمط",
+ "mk8.count": "العدد",
+ "mk8.no_rooms": "لا توجد غرف نشطة.",
+ "mk8.history": "سجل الغرف (آخر 24 ساعة)",
+ "mk8.no_history": "لم يتم تسجيل أي غرف حتى الآن.",
  "acct.api_confirm": "هل تريد إعادة تعيين مفتاح API؟ ستتوقف الأدوات التي تستخدم المفتاح القديم عن العمل.",
  "acct.api_copy": "انسخ هذا المفتاح الآن، فلن يُعرض مرة أخرى.",
  "acct.api_desc": "اربط مساعدي الذكاء الاصطناعي الذين يدعمون MCP بحسابك في Revivetendo: الحالة والأصدقاء وإبداعات Badge Arcade ومقاطع Revivetendo TV والمزيد. أرسل المفتاح كرمز Bearer في ترويسة Authorization.",
@@ -500,7 +513,7 @@ I18N.register("ar", {
  "wsc.shame_desc": "لاعبون مستبعدون مؤقتًا من المطابقة بعد فشل إعداد مباراة.",
  "wsc.shame_reason": "السبب",
  "wsc.sport": "الرياضة",
- "wsc.title": "لوحة WSC — Revivetendo Dashboard Admin",
+ "wsc.title": "لوحة WSC — Revivetendo Dashboard",
  "wsc.tunnel_quota": "حصة النفق",
  "wsc.type": "النوع",
  "wsc.up": "الخادم متصل"

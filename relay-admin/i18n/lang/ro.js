@@ -1,6 +1,19 @@
 // Hand-written ro translations of the dashboard; keys are the data-i18n
 // attributes and I18N.t() calls. Missing keys fall back to English.
 I18N.register("ro", {
+ "land.mk8": "Stare MK8 și jucători/camere",
+ "land.mk8_desc": "Jucători Mario Kart 8 live și camere de matchmaking active",
+ "mk8.title": "Tablou de bord MK8 — Revivetendo Dashboard",
+ "mk8.h1": "Tabloul de bord Mario Kart 8",
+ "mk8.rooms": ", {n} camere",
+ "mk8.room1": ", 1 cameră",
+ "mk8.clear_inactive": "Elimină camerele inactive",
+ "mk8.rooms_h": "Camere active",
+ "mk8.mode": "Mod",
+ "mk8.count": "Număr",
+ "mk8.no_rooms": "Nicio cameră activă.",
+ "mk8.history": "Istoric camere (24 h)",
+ "mk8.no_history": "Nicio cameră înregistrată încă.",
  "acct.api_confirm": "Resetezi cheia API? Instrumentele care folosesc cheia veche nu vor mai funcționa.",
  "acct.api_copy": "Copiază cheia acum, nu va mai fi afișată.",
  "acct.api_desc": "Conectează asistenți AI compatibili cu MCP la contul tău Revivetendo: status, prieteni, creații Badge Arcade, videoclipuri Revivetendo TV și altele. Trimite cheia ca token Bearer în antetul Authorization.",
@@ -500,7 +513,7 @@ I18N.register("ro", {
  "wsc.shame_desc": "Jucători excluși temporar din matchmaking după o pregătire de meci eșuată.",
  "wsc.shame_reason": "Motiv",
  "wsc.sport": "Sport",
- "wsc.title": "Panoul WSC — Revivetendo Dashboard Admin",
+ "wsc.title": "Panoul WSC — Revivetendo Dashboard",
  "wsc.tunnel_quota": "Cotă tunel",
  "wsc.type": "Tip",
  "wsc.up": "Server online"

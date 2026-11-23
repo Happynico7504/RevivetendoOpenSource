@@ -136,6 +136,7 @@ var gameServerTitles = map[string]string{
 	"1010EB00": "Mario Kart 8",
 	"1012F100": "Wii Sports Club",
 	"10145E00": "Angry Birds Star Wars",
+	"10100D01": "Wii Karaoke U by JOYSOUND",
 	"100E4B00": "Super Smash Bros.",
 	"1014B700": "Minecraft: WiiU Edition",
 	"10138B00": "Pokemon Art Academy",
@@ -413,6 +414,10 @@ WHERE NOT EXISTS (SELECT 1 FROM redirects WHERE game_server_id = '101D9D00');
 INSERT INTO redirects (type, from_host, to_host, game_server_id, port, access_mode)
 SELECT 'dns', 'account.pretendo.cc', '45.157.178.35', '00134600', 60018, 'open'
 WHERE NOT EXISTS (SELECT 1 FROM redirects WHERE game_server_id = '00134600');
+
+INSERT INTO redirects (type, from_host, to_host, game_server_id, port, access_mode)
+SELECT 'dns', 'account.pretendo.cc', '45.157.178.35', '10100D01', 60022, 'open'
+WHERE NOT EXISTS (SELECT 1 FROM redirects WHERE game_server_id = '10100D01');
 `
 
 type Redirect struct {
@@ -580,6 +585,7 @@ func main() {
 	http.HandleFunc("/patreon/webhook", patreonWebhook)
 	http.HandleFunc("/my/", myHandler)
 	registerBadgeEditor()
+	registerSongEditor()
 	registerVideos()
 	http.HandleFunc("/activity/random-mii", activityRandomMiiHandler)
 	http.HandleFunc("/activity/bgm.mp3", activityBGMHandler)
@@ -602,6 +608,10 @@ func main() {
 	http.HandleFunc("/admin/bans/", requireClientCert(adminBans))
 	http.HandleFunc("/admin/bans/add", requireClientCert(adminBanAdd))
 	http.HandleFunc("/admin/bans/remove", requireClientCert(adminBanRemove))
+	http.HandleFunc("/admin/mk8-whitelist/", requireClientCert(adminMK8Whitelist))
+	http.HandleFunc("/admin/mk8-whitelist/add", requireClientCert(adminMK8WhitelistAdd))
+	http.HandleFunc("/admin/mk8-whitelist/remove", requireClientCert(adminMK8WhitelistRemove))
+	http.HandleFunc("/admin/mk8-whitelist/mode", requireClientCert(adminMK8WhitelistSetMode))
 	http.HandleFunc("/admin/access/", requireClientCert(adminAccess))
 	http.HandleFunc("/admin/access/set", requireClientCert(adminAccessSet))
 	http.HandleFunc("/admin/access/remove", requireClientCert(adminAccessRemove))
@@ -634,6 +644,9 @@ func main() {
 	http.HandleFunc("/admin/api/v1/bans", requireClientCert(apiV1Bans))
 	http.HandleFunc("/admin/api/v1/bans/add", requireClientCert(apiV1BansAdd))
 	http.HandleFunc("/admin/api/v1/bans/remove", requireClientCert(apiV1BansRemove))
+	http.HandleFunc("/admin/api/v1/mk8-whitelist", requireClientCert(apiV1MK8Whitelist))
+	http.HandleFunc("/admin/api/v1/mk8-whitelist/add", requireClientCert(apiV1MK8WhitelistAdd))
+	http.HandleFunc("/admin/api/v1/mk8-whitelist/remove", requireClientCert(apiV1MK8WhitelistRemove))
 	http.HandleFunc("/admin/api/v1/access", requireClientCert(apiV1Access))
 	http.HandleFunc("/admin/api/v1/access/set", requireClientCert(apiV1AccessSet))
 	http.HandleFunc("/admin/api/v1/access/remove", requireClientCert(apiV1AccessRemove))
@@ -652,6 +665,9 @@ func main() {
 	http.HandleFunc("/wsc-public/api/players", apiWSCPlayers)
 	http.HandleFunc("/wsc-public/overlay", apiWSCOverlay)
 	http.HandleFunc("/wsc-public/api/online", apiWSCOverlayOnline)
+	http.HandleFunc("/mk8-public/", adminMK8)
+	http.HandleFunc("/mk8-public/api/players", apiMK8Players)
+	http.HandleFunc("/mk8-public/clear-inactive", adminMK8ClearInactive)
 	http.HandleFunc("/online/", publicOnlineHandler)
 	http.HandleFunc("/online/api", apiPublicOnline)
 
@@ -912,6 +928,371 @@ func wscTunnelRegion(via string) string {
 	return strings.ToUpper(via)
 }
 
+// --- MK8 dashboard ---
+//
+// mk8-secure's /status endpoint (nex/status_server.go) deliberately mirrors wsc-secure's
+// shape (session/room/shame field names), so this reuses lookupPNIDs, formatHMS, and the
+// shared tmplFuncs/localTimeScript/i18nScript straight from the WSC dashboard above. Left out
+// for now, unlike WSC's: Mii name lookups, a match-history table (mk8-secure doesn't record
+// one yet), a stream overlay, and i18n strings (plain English only - adding 25-language
+// entries for a second dashboard wasn't worth doing in the same pass as building it).
+
+const mk8StatusURL = "http://127.0.0.1:9016/status"
+
+var mk8GameModeNames = map[int64]string{0: "VS Race", 1: "Battle"}
+var mk8RegionNames = map[int64]string{0: "Worldwide", 1: "Japan", 2: "United States", 3: "Europe", 4: "Korea", 5: "China", 6: "Taiwan"}
+
+type MK8PlayerRow struct {
+	PID         int64
+	PNID        string
+	NATm        int64
+	ConnectedAt int64
+}
+
+type MK8RoomRow struct {
+	GID          int64
+	Host         int64
+	HostPNID     string
+	GameModeName string
+	RegionName   string
+	PlayerCount  int64
+	Players      []MK8PlayerRow
+	Connection   string // "tunnel", "direct" or "" (host still alone)
+	TunnelVia    string
+}
+
+type MK8ShameRow struct {
+	PID          int64
+	PNID         string
+	BlockedUntil time.Time
+	Reason       string
+}
+
+// MK8HistoryRow is a past room, archived by mk8-secure's RecordRoomHistory right before it
+// would otherwise just be deleted as inactive - mirrors WSCMatchRow/the "Matches (last 24h)"
+// section, except the archive trigger is "went inactive" rather than WSC's CloseParticipation
+// (MK8 has no equivalent "the race really started" RMC signal to hook - see its own comment
+// in mk8-secure/database/record_room_history.go).
+type MK8HistoryRow struct {
+	GID          int64
+	HostPNID     string
+	GameModeName string
+	RegionName   string
+	Players      []string // PNIDs (or "PID:xxx" fallback), mirrors WSCMatchRow.Players
+	PlayerCount  int64
+	EndedAt      time.Time
+}
+
+type MK8DashData struct {
+	ServerUp bool
+	Players  []MK8PlayerRow
+	Rooms    []MK8RoomRow
+	History  []MK8HistoryRow
+	Shame    []MK8ShameRow
+	Msg      string
+}
+
+func fetchMK8Status() MK8DashData {
+	var data MK8DashData
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(mk8StatusURL)
+	if err != nil {
+		return data
+	}
+	defer resp.Body.Close()
+	data.ServerUp = true
+
+	var raw struct {
+		Sessions []struct {
+			PID         int64 `json:"pid"`
+			NATm        int64 `json:"natm"`
+			ConnectedAt int64 `json:"connected_at"`
+		} `json:"sessions"`
+		Rooms []struct {
+			GID         int64   `json:"gid"`
+			Host        int64   `json:"host"`
+			GameMode    int64   `json:"game_mode"`
+			Region      int64   `json:"region"`
+			PlayerCount int64   `json:"player_count"`
+			Players     []int64 `json:"players"`
+			Closed      bool    `json:"closed"`
+			Connection  string  `json:"connection"`
+			TunnelVia   string  `json:"tunnel_via"`
+		} `json:"rooms"`
+		Shame []struct {
+			PID          int64  `json:"pid"`
+			BlockedUntil int64  `json:"blocked_until"`
+			Reason       string `json:"reason"`
+		} `json:"connection_hall_of_shame"`
+		RoomHistory []struct {
+			GID         int64   `json:"gid"`
+			Host        int64   `json:"host"`
+			GameMode    int64   `json:"game_mode"`
+			Region      int64   `json:"region"`
+			PlayerCount int64   `json:"player_count"`
+			Players     []int64 `json:"players"`
+			EndedAt     int64   `json:"ended_at"`
+		} `json:"room_history"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&raw) != nil {
+		return data
+	}
+
+	pidSet := map[int64]struct{}{}
+	for _, s := range raw.Sessions {
+		pidSet[s.PID] = struct{}{}
+	}
+	for _, g := range raw.Rooms {
+		pidSet[g.Host] = struct{}{}
+		for _, p := range g.Players {
+			pidSet[p] = struct{}{}
+		}
+	}
+	for _, sh := range raw.Shame {
+		pidSet[sh.PID] = struct{}{}
+	}
+	for _, h := range raw.RoomHistory {
+		pidSet[h.Host] = struct{}{}
+		for _, p := range h.Players {
+			pidSet[p] = struct{}{}
+		}
+	}
+	pids := make([]int64, 0, len(pidSet))
+	for pid := range pidSet {
+		pids = append(pids, pid)
+	}
+	pnids := lookupPNIDs(pids)
+
+	for _, s := range raw.Sessions {
+		data.Players = append(data.Players, MK8PlayerRow{PID: s.PID, PNID: pnids[s.PID], NATm: s.NATm, ConnectedAt: s.ConnectedAt})
+	}
+	for _, g := range raw.Rooms {
+		if g.Closed {
+			continue
+		}
+		row := MK8RoomRow{
+			GID:          g.GID,
+			Host:         g.Host,
+			HostPNID:     pnids[g.Host],
+			GameModeName: mk8GameModeNames[g.GameMode],
+			RegionName:   mk8RegionNames[g.Region],
+			PlayerCount:  g.PlayerCount,
+			Connection:   g.Connection,
+			TunnelVia:    g.TunnelVia,
+		}
+		if row.GameModeName == "" {
+			row.GameModeName = fmt.Sprintf("Mode %d", g.GameMode)
+		}
+		if row.RegionName == "" {
+			row.RegionName = fmt.Sprintf("Region %d", g.Region)
+		}
+		for _, p := range g.Players {
+			row.Players = append(row.Players, MK8PlayerRow{PID: p, PNID: pnids[p]})
+		}
+		data.Rooms = append(data.Rooms, row)
+	}
+	for _, sh := range raw.Shame {
+		data.Shame = append(data.Shame, MK8ShameRow{PID: sh.PID, PNID: pnids[sh.PID], BlockedUntil: time.Unix(sh.BlockedUntil, 0), Reason: sh.Reason})
+	}
+	for _, h := range raw.RoomHistory {
+		row := MK8HistoryRow{
+			GID:          h.GID,
+			HostPNID:     pnids[h.Host],
+			GameModeName: mk8GameModeNames[h.GameMode],
+			RegionName:   mk8RegionNames[h.Region],
+			PlayerCount:  h.PlayerCount,
+			EndedAt:      time.Unix(h.EndedAt, 0),
+		}
+		if row.GameModeName == "" {
+			row.GameModeName = fmt.Sprintf("Mode %d", h.GameMode)
+		}
+		if row.RegionName == "" {
+			row.RegionName = fmt.Sprintf("Region %d", h.Region)
+		}
+		for _, p := range h.Players {
+			if pnid := pnids[p]; pnid != "" {
+				row.Players = append(row.Players, "@"+pnid)
+			} else {
+				row.Players = append(row.Players, fmt.Sprintf("PID:%d", p))
+			}
+		}
+		data.History = append(data.History, row)
+	}
+	return data
+}
+
+var mk8Tmpl = template.Must(template.New("mk8").Funcs(tmplFuncs).Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+` + i18nScript + `
+<meta charset="utf-8">
+<title>MK8 Dashboard — Revivetendo Dashboard</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{font-family:system-ui,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem;color:#222}
+h1{font-size:1.4rem}
+h2{font-size:1.1rem;margin-top:2rem}
+a{color:#2563eb}
+table{width:100%;border-collapse:collapse;font-size:.9rem;margin-bottom:2rem}
+th{text-align:left;border-bottom:2px solid #e4e4e7;padding:.5rem .75rem;color:#666;font-weight:600}
+td{padding:.5rem .75rem;border-bottom:1px solid #f0f0f0;vertical-align:middle}
+tr:last-child td{border-bottom:none}
+.badge{display:inline-block;padding:.2rem .5rem;border-radius:4px;font-size:.75rem;font-weight:600}
+.on{background:#dcfce7;color:#166534}.off{background:#fee2e2;color:#991b1b}
+.tag{display:inline-block;padding:.15rem .4rem;border-radius:4px;font-size:.75rem;background:#e0e7ff;color:#3730a3}
+.conn{display:inline-block;padding:.15rem .4rem;border-radius:4px;font-size:.75rem;background:#f4f4f5;color:#3f3f46}.conn.tunnel{background:#dbeafe;color:#1e40af}
+.mono{font-family:monospace;font-size:.85rem}
+.msg{background:#eff6ff;border:1px solid #bfdbfe;color:#1e40af;padding:.5rem .9rem;border-radius:6px;margin-bottom:1rem;font-size:.875rem}
+button.clear{padding:.3rem .8rem;border:1px solid #d4d4d8;border-radius:4px;background:#f4f4f5;cursor:pointer;font-size:.8rem}
+</style>
+</head>
+<body data-i18n-page-title="mk8.title">
+<h1 data-i18n="mk8.h1">Mario Kart 8 Dashboard</h1>
+{{if .Msg}}<div class="msg">{{.Msg}}</div>{{end}}
+
+<div style="display:flex;align-items:center;gap:.6rem;margin-bottom:1.5rem;font-size:.9rem">
+  <span class="badge {{if .ServerUp}}on{{else}}off{{end}}">{{if .ServerUp}}<span data-i18n="wsc.up">Server online</span>{{else}}<span data-i18n="wsc.down">Server unreachable</span>{{end}}</span>
+  {{if .ServerUp}}<span style="color:#666"><span data-i18n="wsc.connected" data-i18n-args='{"n":{{len .Players}}}'>{{len .Players}} connected</span>{{if .Rooms}}{{if gt (len .Rooms) 1}}<span data-i18n="mk8.rooms" data-i18n-args='{"n":{{len .Rooms}}}'>, {{len .Rooms}} rooms</span>{{else}}<span data-i18n="mk8.room1">, 1 room</span>{{end}}{{end}}</span>{{end}}
+  <form method="post" action="/mk8-public/clear-inactive" style="margin:0"><button type="submit" class="clear" data-i18n="mk8.clear_inactive">Clear inactive rooms</button></form>
+  <span style="margin-left:auto;font-size:.8rem;color:#aaa" id="refresh-label" data-i18n="my.refresh" data-i18n-args='{"n":15}'>refreshes in 15s</span>
+</div>
+
+<h2><span data-i18n="wsc.players">Connected Players</span>{{if .Players}} <span style="background:#dcfce7;color:#166534;border-radius:999px;padding:.1rem .5rem;font-size:.75rem;font-weight:700;vertical-align:middle">{{len .Players}}</span>{{end}}</h2>
+{{if .Players}}
+<table>
+<tr><th>PNID</th><th>PID</th><th data-i18n="wsc.connected_for">Connected</th><th>NAT</th></tr>
+{{range .Players}}
+<tr>
+  <td>{{if .PNID}}<strong>@{{.PNID}}</strong>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
+  <td class="mono">{{.PID}}</td>
+  <td class="mono"><span class="conn-time"{{if .ConnectedAt}} data-since="{{.ConnectedAt}}"{{end}}>{{connectedFor .ConnectedAt}}</span></td>
+  <td>{{if eq .NATm 1}}<span class="badge on" data-i18n="nat.open">Open</span>{{else if eq .NATm 2}}<span class="badge" style="background:#fef9c3;color:#854d0e" data-i18n="nat.moderate">Moderate</span>{{else if eq .NATm 3}}<span class="badge off" data-i18n="nat.strict">Strict</span>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
+</tr>
+{{end}}
+</table>
+{{else}}
+<p style="color:#aaa;font-size:.9rem;margin-top:0" data-i18n="wsc.no_players">No players connected.</p>
+{{end}}
+
+<h2><span data-i18n="mk8.rooms_h">Active Rooms</span>{{if .Rooms}} <span style="background:#dcfce7;color:#166534;border-radius:999px;padding:.1rem .5rem;font-size:.75rem;font-weight:700;vertical-align:middle">{{len .Rooms}}</span>{{end}}</h2>
+{{if .Rooms}}
+<table>
+<tr><th>GID</th><th data-i18n="mk8.mode">Mode</th><th data-i18n="wsc.region">Region</th><th data-i18n="wsc.host">Host</th><th data-i18n="wsc.col_players">Players</th><th data-i18n="mk8.count">Count</th><th data-i18n="wsc.connection">Connection</th></tr>
+{{range .Rooms}}
+<tr>
+  <td class="mono">{{.GID}}</td>
+  <td><span class="tag">{{.GameModeName}}</span></td>
+  <td>{{.RegionName}}</td>
+  <td>{{if .HostPNID}}<strong>@{{.HostPNID}}</strong>{{else}}<span class="mono">{{.Host}}</span>{{end}}</td>
+  <td>{{range .Players}}{{if .PNID}}@{{.PNID}}{{else}}<span class="mono">{{.PID}}</span>{{end}} {{end}}</td>
+  <td class="mono">{{.PlayerCount}}</td>
+  <td>{{if eq .Connection "tunnel"}}<span class="conn tunnel"><span data-i18n="conn.tunnel">Tunnel</span> · {{wscTunnelRegion .TunnelVia}}</span>{{else if eq .Connection "direct"}}<span class="conn" data-i18n="conn.direct">Direct</span>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
+</tr>
+{{end}}
+</table>
+{{else}}
+<p style="color:#aaa;font-size:.9rem;margin-top:0" data-i18n="mk8.no_rooms">No active rooms.</p>
+{{end}}
+
+<h2><span data-i18n="mk8.history">Room History (last 24h)</span>{{if .History}} <span style="background:#dcfce7;color:#166534;border-radius:999px;padding:.1rem .5rem;font-size:.75rem;font-weight:700;vertical-align:middle">{{len .History}}</span>{{end}}</h2>
+{{if .History}}
+<table>
+<tr><th data-i18n="stats.time">Time</th><th data-i18n="mk8.mode">Mode</th><th data-i18n="wsc.region">Region</th><th data-i18n="wsc.host">Host</th><th data-i18n="wsc.col_players">Players</th></tr>
+{{range .History}}
+<tr>
+  <td class="mono" style="white-space:nowrap">{{localTime .EndedAt "match"}}</td>
+  <td><span class="tag">{{.GameModeName}}</span></td>
+  <td>{{.RegionName}}</td>
+  <td>{{if .HostPNID}}<strong>@{{.HostPNID}}</strong>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
+  <td>{{range .Players}}{{.}} {{end}}</td>
+</tr>
+{{end}}
+</table>
+{{else}}
+<p style="color:#aaa;font-size:.9rem;margin-top:0" data-i18n="mk8.no_history">No rooms recorded yet.</p>
+{{end}}
+
+<h2><span data-i18n="wsc.shame">Connection Hall of Shame</span>{{if .Shame}} <span style="background:#fee2e2;color:#991b1b;border-radius:999px;padding:.1rem .5rem;font-size:.75rem;font-weight:700;vertical-align:middle">{{len .Shame}}</span>{{end}}</h2>
+{{if .Shame}}
+<p style="color:#aaa;font-size:.85rem;margin-top:0" data-i18n="wsc.shame_desc">Players temporarily excluded from matchmaking after a failed match setup.</p>
+<table>
+<tr><th>PNID</th><th>PID</th><th data-i18n="wsc.shame_reason">Reason</th><th data-i18n="wsc.blocked_until">Blocked Until</th></tr>
+{{range .Shame}}
+<tr>
+  <td>{{if .PNID}}<strong>@{{.PNID}}</strong>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
+  <td class="mono">{{.PID}}</td>
+  <td>{{.Reason}}</td>
+  <td class="mono" style="white-space:nowrap">{{localTime .BlockedUntil "datetime-sec"}}</td>
+</tr>
+{{end}}
+</table>
+{{else}}
+<p style="color:#aaa;font-size:.9rem;margin-top:0" data-i18n="wsc.no_shame">Nobody currently in the penalty box.</p>
+{{end}}
+
+<script>
+var countdown = 15;
+function tick() {
+  countdown--;
+  if (countdown <= 0) { location.reload(); return; }
+  document.getElementById('refresh-label').textContent = I18N.fill(I18N.t('my.refresh', 'refreshes in {n}s'), {n: countdown});
+}
+setInterval(tick, 1000);
+// Keep the per-player connection timers running between the 15s reloads.
+function pad2(n) { return (n < 10 ? '0' : '') + n; }
+function tickConn() {
+  var now = Math.floor(Date.now() / 1000);
+  document.querySelectorAll('.conn-time[data-since]').forEach(function(el) {
+    var s = Math.max(0, now - parseInt(el.getAttribute('data-since'), 10));
+    el.textContent = pad2(Math.floor(s / 3600)) + ':' + pad2(Math.floor((s % 3600) / 60)) + ':' + pad2(s % 60);
+  });
+}
+setInterval(tickConn, 1000);
+</script>
+` + localTimeScript + `
+</body>
+</html>`))
+
+func adminMK8(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/mk8-public/" {
+		http.NotFound(w, r)
+		return
+	}
+	data := fetchMK8Status()
+	data.Msg = r.URL.Query().Get("msg")
+	w.Header().Set("Content-Type", "text/html")
+	mk8Tmpl.Execute(w, data)
+}
+
+// adminMK8ClearInactive forwards to mk8-secure's /status/clear-inactive-rooms (a room whose
+// host has disconnected, has no players left, or is simply old - see roomInactive in
+// nex/status_server.go) and redirects back to the dashboard with a result message. On the
+// public page by request (2026-11-09) - same exposure level as the rest of /mk8-public/.
+func adminMK8ClearInactive(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/mk8-public/", http.StatusSeeOther)
+		return
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Post(mk8StatusURL+"/clear-inactive-rooms", "application/json", nil)
+	if err != nil {
+		http.Redirect(w, r, "/mk8-public/?msg="+url.QueryEscape("mk8-secure unreachable"), http.StatusSeeOther)
+		return
+	}
+	defer resp.Body.Close()
+	var result struct {
+		Count int `json:"count"`
+	}
+	json.NewDecoder(resp.Body).Decode(&result)
+	http.Redirect(w, r, fmt.Sprintf("/mk8-public/?msg=Cleared+%d+inactive+room(s)", result.Count), http.StatusSeeOther)
+}
+
+func apiMK8Players(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	json.NewEncoder(w).Encode(fetchMK8Status())
+}
+
 type WSCShameRow struct {
 	PID          int64
 	PNID         string
@@ -1133,7 +1514,7 @@ var wscTmpl = template.Must(template.New("wsc").Funcs(tmplFuncs).Parse(`<!DOCTYP
 <head>
 ` + i18nScript + `
 <meta charset="utf-8">
-<title>WSC Dashboard — Revivetendo Dashboard Admin</title>
+<title>WSC Dashboard — Revivetendo Dashboard</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 body{font-family:system-ui,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem;color:#222}
@@ -2017,6 +2398,10 @@ tr:last-child td{border-bottom:none}
     <h2 data-i18n="land.wsc">WSC Status and Players/Sessions</h2>
     <p data-i18n="land.wsc_desc">Live Wii Sports Club players and active matchmaking sessions</p>
   </a>
+  <a class="card" href="/mk8-public/">
+    <h2 data-i18n="land.mk8">MK8 Status and Players/Rooms</h2>
+    <p data-i18n="land.mk8_desc">Live Mario Kart 8 players and active matchmaking rooms</p>
+  </a>
   <a class="card" href="/inkay/online/">
     <h2 data-i18n="land.online">Who's Online</h2>
     <p data-i18n="land.online_desc">Players who share their online status, with the game they are playing right now</p>
@@ -2249,6 +2634,7 @@ input[type=text],select{border:1px solid #d1d5db;border-radius:4px;padding:.4rem
   <a href="/inkay/stats/" target="_blank">← Public stats</a> &nbsp;|&nbsp;
   <a class="dl" href="/inkay/admin/client-cert.p12" download="inkay-admin.p12">⬇ Download client cert</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/bans/">🚫 Banned users</a> &nbsp;|&nbsp;
+  <a href="/inkay/admin/mk8-whitelist/">🏎️ MK8 whitelist</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/coins/">🪙 Coins</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/relays/">🌍 Relays</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/access/">🔑 Access levels</a> &nbsp;|&nbsp;
@@ -2259,7 +2645,8 @@ input[type=text],select{border:1px solid #d1d5db;border-radius:4px;padding:.4rem
   <a href="/inkay/admin/videos/">📺 Revivetendo TV</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/rvta/">🔋 RvtA diagnostics</a> &nbsp;|&nbsp;
   <a href="/inkay/admin/api-docs/">📖 API docs</a> &nbsp;|&nbsp;
-  <a href="/wsc-public/">🎳 WSC</a>
+  <a href="/wsc-public/">🎳 WSC</a> &nbsp;|&nbsp;
+  <a href="/mk8-public/">🏎️ MK8</a>
 </p>
 <div style="display:flex;align-items:center;gap:1rem;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:.6rem 1rem;margin-bottom:1.5rem;font-size:.875rem">
   <span>🔑 Client cert: <strong>{{.CertAge}}</strong>
@@ -3920,6 +4307,251 @@ func apiV1BansRemove(w http.ResponseWriter, r *http.Request) {
 	}
 	db.Exec(`DELETE FROM banned_users WHERE pid = $1`, body.PID)
 	announceInvalidation("bans")
+	writeJSONOKNoData(w)
+}
+
+// --- MK8 whitelist ---
+//
+// mk8-secure's redirect can be put in access_mode = "whitelist" (see
+// setMK8AccessMode below): only PIDs in this list get redirected to our own
+// instance, everyone else's nex_token request falls through to real Pretendo
+// servers. Built for streamers who want a cheater-free MK8 lobby - rebuilt from
+// scratch and scoped to MK8 only, not a revival of the shared whitelist system
+// removed network-wide 2026-09-15 (see feedback_open_access_policy).
+
+type MK8WhitelistEntry struct {
+	PID     int64     `json:"pid"`
+	PNID    string    `json:"pnid,omitempty"`
+	Note    string    `json:"note,omitempty"`
+	AddedAt time.Time `json:"added_at"`
+}
+
+func allMK8Whitelist() []MK8WhitelistEntry {
+	rows, err := db.Query(`
+		SELECT m.pid, COALESCE(p.pnid, ''), m.note, m.added_at
+		FROM mk8_whitelist m
+		LEFT JOIN pnid_cache p ON p.pid = m.pid
+		ORDER BY m.added_at DESC`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var list []MK8WhitelistEntry
+	for rows.Next() {
+		var e MK8WhitelistEntry
+		rows.Scan(&e.PID, &e.PNID, &e.Note, &e.AddedAt)
+		list = append(list, e)
+	}
+	if list == nil {
+		list = []MK8WhitelistEntry{}
+	}
+	return list
+}
+
+// mk8AccessMode reads MK8's redirect row's current access_mode ("open" or
+// "whitelist"), or "" if the row doesn't exist yet.
+func mk8AccessMode() string {
+	var mode string
+	db.QueryRow(`SELECT access_mode FROM redirects WHERE UPPER(game_server_id) = '1010EB00' LIMIT 1`).Scan(&mode)
+	return mode
+}
+
+func setMK8AccessMode(mode string) error {
+	_, err := db.Exec(`UPDATE redirects SET access_mode = $1 WHERE UPPER(game_server_id) = '1010EB00'`, mode)
+	return err
+}
+
+var mk8WhitelistTmpl = template.Must(template.New("mk8-whitelist").Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MK8 Whitelist — Revivetendo Dashboard Admin</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{font-family:system-ui,sans-serif;max-width:800px;margin:2rem auto;padding:0 1rem;color:#222}
+h1{font-size:1.4rem}
+a{color:#2563eb}
+table{width:100%;border-collapse:collapse;font-size:.9rem;margin:1rem 0 2rem}
+th{text-align:left;border-bottom:2px solid #e4e4e7;padding:.5rem .75rem;color:#666;font-weight:600}
+td{padding:.5rem .75rem;border-bottom:1px solid #f0f0f0}
+.mono{font-family:monospace;font-size:.85rem}
+form.inline{display:inline}
+input[type=text]{padding:.4rem .6rem;border:1px solid #d4d4d8;border-radius:4px;font-size:.9rem}
+button{padding:.4rem .9rem;border:1px solid #d4d4d8;border-radius:4px;background:#f4f4f5;cursor:pointer;font-size:.85rem}
+button.danger{color:#991b1b;border-color:#fca5a5}
+.msg{background:#eff6ff;border:1px solid #bfdbfe;color:#1e40af;padding:.5rem .9rem;border-radius:6px;margin-bottom:1rem;font-size:.875rem}
+.badge{display:inline-block;padding:.2rem .5rem;border-radius:4px;font-size:.75rem;font-weight:600}
+.on{background:#dcfce7;color:#166534}.off{background:#f4f4f5;color:#3f3f46}
+</style>
+</head>
+<body>
+<p><a href="/mk8-public/">← MK8 Dashboard</a></p>
+<h1>MK8 Whitelist</h1>
+<p style="color:#666;font-size:.9rem">
+  Access mode: <span class="badge {{if eq .AccessMode "whitelist"}}on{{else}}off{{end}}">{{.AccessMode}}</span>
+  {{if eq .AccessMode "whitelist"}}
+  <form class="inline" method="post" action="/inkay/admin/mk8-whitelist/mode"><input type="hidden" name="mode" value="open"><button type="submit">Switch to open (anyone redirected)</button></form>
+  {{else}}
+  <form class="inline" method="post" action="/inkay/admin/mk8-whitelist/mode"><input type="hidden" name="mode" value="whitelist"><button type="submit">Switch to whitelist (only listed PIDs)</button></form>
+  {{end}}
+</p>
+{{if .Msg}}<p class="msg">{{.Msg}}</p>{{end}}
+
+<form method="post" action="/inkay/admin/mk8-whitelist/add" style="margin-bottom:1.5rem">
+  <input type="text" name="pid" placeholder="PID or PNID" required>
+  <input type="text" name="note" placeholder="Note (optional, e.g. streamer name)">
+  <button type="submit">Add</button>
+</form>
+
+<table>
+<tr><th>PNID</th><th>PID</th><th>Note</th><th>Added</th><th></th></tr>
+{{range .Entries}}
+<tr>
+  <td>{{if .PNID}}<strong>@{{.PNID}}</strong>{{else}}<span style="color:#aaa">—</span>{{end}}</td>
+  <td class="mono">{{.PID}}</td>
+  <td>{{.Note}}</td>
+  <td class="mono" style="white-space:nowrap">{{.AddedAt.Format "2006-01-02 15:04"}} UTC</td>
+  <td><form method="post" action="/inkay/admin/mk8-whitelist/remove"><input type="hidden" name="pid" value="{{.PID}}"><button type="submit" class="danger">Remove</button></form></td>
+</tr>
+{{end}}
+</table>
+{{if not .Entries}}<p style="color:#aaa;font-size:.9rem">Nobody whitelisted yet.</p>{{end}}
+</body>
+</html>`))
+
+func adminMK8Whitelist(w http.ResponseWriter, r *http.Request) {
+	data := struct {
+		Entries    []MK8WhitelistEntry
+		AccessMode string
+		Msg        string
+	}{allMK8Whitelist(), mk8AccessMode(), r.URL.Query().Get("msg")}
+	w.Header().Set("Content-Type", "text/html")
+	mk8WhitelistTmpl.Execute(w, data)
+}
+
+// resolvePIDOrPNID accepts either a numeric PID or a PNID (stripping a leading "@", and
+// matching case-insensitively since staff will type names from memory) and returns the PID.
+func resolvePIDOrPNID(input string) (int64, error) {
+	input = strings.TrimSpace(input)
+	if pid, err := strconv.ParseInt(input, 10, 64); err == nil && pid > 0 {
+		return pid, nil
+	}
+	pnid := strings.TrimPrefix(input, "@")
+	if pnid == "" {
+		return 0, fmt.Errorf("empty")
+	}
+	var pid int64
+	err := db.QueryRow(`SELECT pid FROM pnid_cache WHERE LOWER(pnid) = LOWER($1)`, pnid).Scan(&pid)
+	if err != nil {
+		return 0, fmt.Errorf("no PID found for PNID %q", pnid)
+	}
+	return pid, nil
+}
+
+func adminMK8WhitelistAdd(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/inkay/admin/mk8-whitelist/", http.StatusSeeOther)
+		return
+	}
+	pid, err := resolvePIDOrPNID(r.FormValue("pid"))
+	if err != nil {
+		http.Redirect(w, r, "/inkay/admin/mk8-whitelist/?msg="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+		return
+	}
+	_, err = db.Exec(`INSERT INTO mk8_whitelist (pid, note) VALUES ($1, $2) ON CONFLICT (pid) DO UPDATE SET note = EXCLUDED.note`,
+		pid, r.FormValue("note"))
+	if err != nil {
+		log.Printf("mk8 whitelist add: %v", err)
+		http.Redirect(w, r, "/inkay/admin/mk8-whitelist/?msg=DB+error", http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/inkay/admin/mk8-whitelist/?msg=Added", http.StatusSeeOther)
+}
+
+func adminMK8WhitelistRemove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/inkay/admin/mk8-whitelist/", http.StatusSeeOther)
+		return
+	}
+	pid, err := strconv.ParseInt(r.FormValue("pid"), 10, 64)
+	if err != nil {
+		http.Redirect(w, r, "/inkay/admin/mk8-whitelist/?msg=Invalid+PID", http.StatusSeeOther)
+		return
+	}
+	db.Exec(`DELETE FROM mk8_whitelist WHERE pid = $1`, pid)
+	http.Redirect(w, r, "/inkay/admin/mk8-whitelist/?msg=Removed", http.StatusSeeOther)
+}
+
+func adminMK8WhitelistSetMode(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/inkay/admin/mk8-whitelist/", http.StatusSeeOther)
+		return
+	}
+	mode := r.FormValue("mode")
+	if mode != "open" && mode != "whitelist" {
+		http.Redirect(w, r, "/inkay/admin/mk8-whitelist/?msg=Invalid+mode", http.StatusSeeOther)
+		return
+	}
+	if err := setMK8AccessMode(mode); err != nil {
+		log.Printf("mk8 access mode: %v", err)
+		http.Redirect(w, r, "/inkay/admin/mk8-whitelist/?msg=DB+error", http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/inkay/admin/mk8-whitelist/?msg=Access+mode+set+to+"+mode, http.StatusSeeOther)
+}
+
+func apiV1MK8Whitelist(w http.ResponseWriter, r *http.Request) {
+	writeJSONOK(w, allMK8Whitelist())
+}
+
+func apiV1MK8WhitelistAdd(w http.ResponseWriter, r *http.Request) {
+	if !requirePOST(w, r) {
+		return
+	}
+	var body struct {
+		PID  int64  `json:"pid"`
+		PNID string `json:"pnid"`
+		Note string `json:"note"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	pid := body.PID
+	if pid <= 0 && body.PNID != "" {
+		var err error
+		pid, err = resolvePIDOrPNID(body.PNID)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if pid <= 0 {
+		writeJSONError(w, http.StatusBadRequest, "invalid pid")
+		return
+	}
+	_, err := db.Exec(`INSERT INTO mk8_whitelist (pid, note) VALUES ($1, $2) ON CONFLICT (pid) DO UPDATE SET note = EXCLUDED.note`,
+		pid, body.Note)
+	if err != nil {
+		log.Printf("api mk8 whitelist add: %v", err)
+		writeJSONError(w, http.StatusInternalServerError, "database error")
+		return
+	}
+	writeJSONOK(w, allMK8Whitelist())
+}
+
+func apiV1MK8WhitelistRemove(w http.ResponseWriter, r *http.Request) {
+	if !requirePOST(w, r) {
+		return
+	}
+	var body struct {
+		PID int64 `json:"pid"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid pid")
+		return
+	}
+	db.Exec(`DELETE FROM mk8_whitelist WHERE pid = $1`, body.PID)
 	writeJSONOKNoData(w)
 }
 

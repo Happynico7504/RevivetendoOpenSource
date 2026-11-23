@@ -1,6 +1,19 @@
 // Hand-written tr translations of the dashboard; keys are the data-i18n
 // attributes and I18N.t() calls. Missing keys fall back to English.
 I18N.register("tr", {
+ "land.mk8": "MK8 Durumu ve Oyuncular/Odalar",
+ "land.mk8_desc": "Canlı Mario Kart 8 oyuncuları ve etkin eşleştirme odaları",
+ "mk8.title": "MK8 Panosu — Revivetendo Dashboard",
+ "mk8.h1": "Mario Kart 8 Panosu",
+ "mk8.rooms": ", {n} oda",
+ "mk8.room1": ", 1 oda",
+ "mk8.clear_inactive": "Etkin olmayan odaları temizle",
+ "mk8.rooms_h": "Etkin odalar",
+ "mk8.mode": "Mod",
+ "mk8.count": "Sayı",
+ "mk8.no_rooms": "Etkin oda yok.",
+ "mk8.history": "Oda geçmişi (son 24 saat)",
+ "mk8.no_history": "Henüz kayıtlı oda yok.",
  "acct.api_confirm": "API anahtarınız sıfırlansın mı? Eski anahtarı kullanan araçlar çalışmayı durduracak.",
  "acct.api_copy": "Bu anahtarı şimdi kopyalayın, tekrar gösterilmeyecek.",
  "acct.api_desc": "MCP destekli yapay zekâ asistanlarını Revivetendo hesabınıza bağlayın: durum, arkadaşlar, Badge Arcade tasarımları, Revivetendo TV yüklemeleri ve daha fazlası. Anahtarı Authorization başlığında Bearer token olarak gönderin.",
@@ -500,7 +513,7 @@ I18N.register("tr", {
  "wsc.shame_desc": "Maç kurulumu başarısız olduktan sonra eşleştirmeden geçici olarak çıkarılan oyuncular.",
  "wsc.shame_reason": "Neden",
  "wsc.sport": "Spor",
- "wsc.title": "WSC Paneli — Revivetendo Dashboard Admin",
+ "wsc.title": "WSC Paneli — Revivetendo Dashboard",
  "wsc.tunnel_quota": "Tünel kotası",
  "wsc.type": "Tür",
  "wsc.up": "Sunucu çevrim içi"

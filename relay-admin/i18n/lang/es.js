@@ -1,6 +1,19 @@
 // Hand-written es translations of the dashboard; keys are the data-i18n
 // attributes and I18N.t() calls. Missing keys fall back to English.
 I18N.register("es", {
+ "land.mk8": "Estado de MK8 y jugadores/salas",
+ "land.mk8_desc": "Jugadores de Mario Kart 8 y salas de emparejamiento activas en vivo",
+ "mk8.title": "Panel de MK8 — Revivetendo Dashboard",
+ "mk8.h1": "Panel de Mario Kart 8",
+ "mk8.rooms": ", {n} salas",
+ "mk8.room1": ", 1 sala",
+ "mk8.clear_inactive": "Eliminar salas inactivas",
+ "mk8.rooms_h": "Salas activas",
+ "mk8.mode": "Modo",
+ "mk8.count": "Cantidad",
+ "mk8.no_rooms": "No hay salas activas.",
+ "mk8.history": "Historial de salas (últimas 24 h)",
+ "mk8.no_history": "Aún no se han registrado salas.",
  "acct.api_confirm": "¿Restablecer tu clave API? Las herramientas que usen la clave anterior dejarán de funcionar.",
  "acct.api_copy": "Copia esta clave ahora, no se volverá a mostrar.",
  "acct.api_desc": "Conecta asistentes de IA compatibles con MCP a tu cuenta de Revivetendo: estado, amigos, creaciones de Badge Arcade, vídeos de Revivetendo TV y más. Envía la clave como token Bearer en el encabezado Authorization.",
@@ -500,7 +513,7 @@ I18N.register("es", {
  "wsc.shame_desc": "Jugadores excluidos temporalmente del emparejamiento tras fallar la preparación de una partida.",
  "wsc.shame_reason": "Motivo",
  "wsc.sport": "Deporte",
- "wsc.title": "Panel de WSC — Revivetendo Dashboard Admin",
+ "wsc.title": "Panel de WSC — Revivetendo Dashboard",
  "wsc.tunnel_quota": "Cuota de túnel",
  "wsc.type": "Tipo",
  "wsc.up": "Servidor en línea"

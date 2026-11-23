@@ -1,6 +1,19 @@
 // Hand-written cs translations of the dashboard; keys are the data-i18n
 // attributes and I18N.t() calls. Missing keys fall back to English.
 I18N.register("cs", {
+ "land.mk8": "Stav MK8 a hráči/místnosti",
+ "land.mk8_desc": "Živí hráči Mario Kart 8 a aktivní místnosti pro matchmaking",
+ "mk8.title": "Přehled MK8 — Revivetendo Dashboard",
+ "mk8.h1": "Přehled Mario Kart 8",
+ "mk8.rooms": ", {n} místností",
+ "mk8.room1": ", 1 místnost",
+ "mk8.clear_inactive": "Vymazat neaktivní místnosti",
+ "mk8.rooms_h": "Aktivní místnosti",
+ "mk8.mode": "Režim",
+ "mk8.count": "Počet",
+ "mk8.no_rooms": "Žádné aktivní místnosti.",
+ "mk8.history": "Historie místností (24 h)",
+ "mk8.no_history": "Zatím žádné zaznamenané místnosti.",
  "acct.api_confirm": "Obnovit klíč API? Nástroje používající starý klíč přestanou fungovat.",
  "acct.api_copy": "Zkopírujte si tento klíč hned, znovu se nezobrazí.",
  "acct.api_desc": "Připojte AI asistenty s podporou MCP ke svému účtu Revivetendo: stav, přátelé, výtvory Badge Arcade, videa Revivetendo TV a další. Klíč posílejte jako Bearer token v hlavičce Authorization.",
@@ -500,7 +513,7 @@ I18N.register("cs", {
  "wsc.shame_desc": "Hráči dočasně vyřazení z dohazování po neúspěšném navázání zápasu.",
  "wsc.shame_reason": "Důvod",
  "wsc.sport": "Sport",
- "wsc.title": "Přehled WSC — Revivetendo Dashboard Admin",
+ "wsc.title": "Přehled WSC — Revivetendo Dashboard",
  "wsc.tunnel_quota": "Kvóta tunelů",
  "wsc.type": "Typ",
  "wsc.up": "Server online"

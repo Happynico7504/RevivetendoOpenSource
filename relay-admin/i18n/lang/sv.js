@@ -1,6 +1,19 @@
 // Hand-written sv translations of the dashboard; keys are the data-i18n
 // attributes and I18N.t() calls. Missing keys fall back to English.
 I18N.register("sv", {
+ "land.mk8": "MK8-status och spelare/rum",
+ "land.mk8_desc": "Mario Kart 8-spelare och aktiva matchningsrum i realtid",
+ "mk8.title": "MK8-instrumentpanel — Revivetendo Dashboard",
+ "mk8.h1": "Mario Kart 8-instrumentpanel",
+ "mk8.rooms": ", {n} rum",
+ "mk8.room1": ", 1 rum",
+ "mk8.clear_inactive": "Rensa inaktiva rum",
+ "mk8.rooms_h": "Aktiva rum",
+ "mk8.mode": "Läge",
+ "mk8.count": "Antal",
+ "mk8.no_rooms": "Inga aktiva rum.",
+ "mk8.history": "Rumshistorik (senaste 24 tim)",
+ "mk8.no_history": "Inga rum registrerade än.",
  "acct.api_confirm": "Återställa din API-nyckel? Verktyg som använder den gamla nyckeln slutar fungera.",
  "acct.api_copy": "Kopiera nyckeln nu, den visas inte igen.",
  "acct.api_desc": "Anslut AI-assistenter med MCP-stöd till ditt Revivetendo-konto: status, vänner, Badge Arcade-skapelser, Revivetendo TV-uppladdningar med mera. Skicka nyckeln som Bearer-token i Authorization-headern.",
@@ -500,7 +513,7 @@ I18N.register("sv", {
  "wsc.shame_desc": "Spelare som tillfälligt är uteslutna från matchning efter en misslyckad matchuppkoppling.",
  "wsc.shame_reason": "Orsak",
  "wsc.sport": "Sport",
- "wsc.title": "WSC-översikt — Revivetendo Dashboard Admin",
+ "wsc.title": "WSC-översikt — Revivetendo Dashboard",
  "wsc.tunnel_quota": "Tunnelkvot",
  "wsc.type": "Typ",
  "wsc.up": "Servern online"

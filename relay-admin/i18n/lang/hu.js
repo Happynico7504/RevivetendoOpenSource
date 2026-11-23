@@ -1,6 +1,19 @@
 // Hand-written hu translations of the dashboard; keys are the data-i18n
 // attributes and I18N.t() calls. Missing keys fall back to English.
 I18N.register("hu", {
+ "land.mk8": "MK8 állapot és játékosok/szobák",
+ "land.mk8_desc": "Élő Mario Kart 8 játékosok és aktív meccskereső szobák",
+ "mk8.title": "MK8 irányítópult — Revivetendo Dashboard",
+ "mk8.h1": "Mario Kart 8 irányítópult",
+ "mk8.rooms": ", {n} szoba",
+ "mk8.room1": ", 1 szoba",
+ "mk8.clear_inactive": "Inaktív szobák törlése",
+ "mk8.rooms_h": "Aktív szobák",
+ "mk8.mode": "Mód",
+ "mk8.count": "Darab",
+ "mk8.no_rooms": "Nincs aktív szoba.",
+ "mk8.history": "Szobaelőzmények (24 óra)",
+ "mk8.no_history": "Még nincs rögzített szoba.",
  "acct.api_confirm": "Visszaállítod az API-kulcsot? A régi kulcsot használó eszközök nem fognak működni.",
  "acct.api_copy": "Másold ki most a kulcsot, többé nem jelenik meg.",
  "acct.api_desc": "Csatlakoztass MCP-t támogató MI-asszisztenseket a Revivetendo-fiókodhoz: állapot, barátok, Badge Arcade-alkotások, Revivetendo TV-feltöltések és más. A kulcsot Bearer tokenként küldd az Authorization fejlécben.",
@@ -500,7 +513,7 @@ I18N.register("hu", {
  "wsc.shame_desc": "Játékosok, akiket egy sikertelen meccsindítás után ideiglenesen kizártunk a párosításból.",
  "wsc.shame_reason": "Ok",
  "wsc.sport": "Sportág",
- "wsc.title": "WSC-irányítópult — Revivetendo Dashboard Admin",
+ "wsc.title": "WSC-irányítópult — Revivetendo Dashboard",
  "wsc.tunnel_quota": "Alagútkeret",
  "wsc.type": "Típus",
  "wsc.up": "A szerver online"

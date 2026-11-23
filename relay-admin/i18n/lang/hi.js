@@ -1,6 +1,19 @@
 // Hand-written hi translations of the dashboard; keys are the data-i18n
 // attributes and I18N.t() calls. Missing keys fall back to English.
 I18N.register("hi", {
+ "land.mk8": "MK8 स्थिति और खिलाड़ी/कमरे",
+ "land.mk8_desc": "लाइव मारियो कार्ट 8 खिलाड़ी और सक्रिय मैचमेकिंग कमरे",
+ "mk8.title": "MK8 डैशबोर्ड — Revivetendo Dashboard",
+ "mk8.h1": "मारियो कार्ट 8 डैशबोर्ड",
+ "mk8.rooms": ", {n} कमरे",
+ "mk8.room1": ", 1 कमरा",
+ "mk8.clear_inactive": "निष्क्रिय कमरे हटाएं",
+ "mk8.rooms_h": "सक्रिय कमरे",
+ "mk8.mode": "मोड",
+ "mk8.count": "संख्या",
+ "mk8.no_rooms": "कोई सक्रिय कमरा नहीं।",
+ "mk8.history": "कमरा इतिहास (पिछले 24 घंटे)",
+ "mk8.no_history": "अभी तक कोई कमरा दर्ज नहीं हुआ।",
  "acct.api_confirm": "अपनी API कुंजी रीसेट करें? पुरानी कुंजी इस्तेमाल करने वाले टूल काम करना बंद कर देंगे।",
  "acct.api_copy": "यह कुंजी अभी कॉपी करें, यह दोबारा नहीं दिखाई जाएगी।",
  "acct.api_desc": "MCP समर्थित AI सहायकों को अपने Revivetendo खाते से जोड़ें: स्थिति, दोस्त, Badge Arcade रचनाएँ, Revivetendo TV वीडियो और बहुत कुछ। कुंजी को Authorization हेडर में Bearer टोकन के रूप में भेजें।",
@@ -500,7 +513,7 @@ I18N.register("hi", {
  "wsc.shame_desc": "मैच की तैयारी असफल होने के बाद मैचमेकिंग से अस्थायी रूप से हटाए गए खिलाड़ी।",
  "wsc.shame_reason": "कारण",
  "wsc.sport": "खेल",
- "wsc.title": "WSC डैशबोर्ड — Revivetendo Dashboard Admin",
+ "wsc.title": "WSC डैशबोर्ड — Revivetendo Dashboard",
  "wsc.tunnel_quota": "टनल कोटा",
  "wsc.type": "प्रकार",
  "wsc.up": "सर्वर ऑनलाइन"

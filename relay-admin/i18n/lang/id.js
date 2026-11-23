@@ -1,6 +1,19 @@
 // Hand-written id translations of the dashboard; keys are the data-i18n
 // attributes and I18N.t() calls. Missing keys fall back to English.
 I18N.register("id", {
+ "land.mk8": "Status MK8 dan pemain/ruang",
+ "land.mk8_desc": "Pemain Mario Kart 8 langsung dan ruang matchmaking aktif",
+ "mk8.title": "Dasbor MK8 — Revivetendo Dashboard",
+ "mk8.h1": "Dasbor Mario Kart 8",
+ "mk8.rooms": ", {n} ruang",
+ "mk8.room1": ", 1 ruang",
+ "mk8.clear_inactive": "Hapus ruang tidak aktif",
+ "mk8.rooms_h": "Ruang aktif",
+ "mk8.mode": "Mode",
+ "mk8.count": "Jumlah",
+ "mk8.no_rooms": "Tidak ada ruang aktif.",
+ "mk8.history": "Riwayat ruang (24 jam terakhir)",
+ "mk8.no_history": "Belum ada ruang yang tercatat.",
  "acct.api_confirm": "Atur ulang kunci API Anda? Alat yang memakai kunci lama akan berhenti berfungsi.",
  "acct.api_copy": "Salin kunci ini sekarang, kunci tidak akan ditampilkan lagi.",
  "acct.api_desc": "Hubungkan asisten AI yang mendukung MCP ke akun Revivetendo Anda: status, teman, kreasi Badge Arcade, unggahan Revivetendo TV, dan lainnya. Kirim kunci sebagai token Bearer di header Authorization.",
@@ -500,7 +513,7 @@ I18N.register("id", {
  "wsc.shame_desc": "Pemain yang sementara dikeluarkan dari matchmaking setelah persiapan pertandingan gagal.",
  "wsc.shame_reason": "Alasan",
  "wsc.sport": "Olahraga",
- "wsc.title": "Dasbor WSC — Revivetendo Dashboard Admin",
+ "wsc.title": "Dasbor WSC — Revivetendo Dashboard",
  "wsc.tunnel_quota": "Kuota tunnel",
  "wsc.type": "Jenis",
  "wsc.up": "Server online"

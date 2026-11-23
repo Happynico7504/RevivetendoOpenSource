@@ -1,6 +1,19 @@
 // Hand-written th translations of the dashboard; keys are the data-i18n
 // attributes and I18N.t() calls. Missing keys fall back to English.
 I18N.register("th", {
+ "land.mk8": "สถานะ MK8 และผู้เล่น/ห้อง",
+ "land.mk8_desc": "ผู้เล่น Mario Kart 8 สดและห้องจับคู่ที่ใช้งานอยู่",
+ "mk8.title": "แดชบอร์ด MK8 — Revivetendo Dashboard",
+ "mk8.h1": "แดชบอร์ด Mario Kart 8",
+ "mk8.rooms": ", {n} ห้อง",
+ "mk8.room1": ", 1 ห้อง",
+ "mk8.clear_inactive": "ล้างห้องที่ไม่มีการใช้งาน",
+ "mk8.rooms_h": "ห้องที่ใช้งานอยู่",
+ "mk8.mode": "โหมด",
+ "mk8.count": "จำนวน",
+ "mk8.no_rooms": "ไม่มีห้องที่ใช้งานอยู่",
+ "mk8.history": "ประวัติห้อง (24 ชั่วโมงที่ผ่านมา)",
+ "mk8.no_history": "ยังไม่มีห้องที่บันทึกไว้",
  "acct.api_confirm": "รีเซ็ตคีย์ API หรือไม่ เครื่องมือที่ใช้คีย์เก่าจะใช้งานไม่ได้อีก",
  "acct.api_copy": "คัดลอกคีย์นี้ไว้ตอนนี้ คีย์จะไม่แสดงอีก",
  "acct.api_desc": "เชื่อมต่อผู้ช่วย AI ที่รองรับ MCP กับบัญชี Revivetendo ของคุณ: สถานะ เพื่อน ผลงาน Badge Arcade วิดีโอ Revivetendo TV และอื่น ๆ ส่งคีย์เป็นโทเค็น Bearer ในเฮดเดอร์ Authorization",
@@ -500,7 +513,7 @@ I18N.register("th", {
  "wsc.shame_desc": "ผู้เล่นที่ถูกพักจากการจับคู่ชั่วคราวหลังการเตรียมแมตช์ล้มเหลว",
  "wsc.shame_reason": "สาเหตุ",
  "wsc.sport": "กีฬา",
- "wsc.title": "แดชบอร์ด WSC — Revivetendo Dashboard Admin",
+ "wsc.title": "แดชบอร์ด WSC — Revivetendo Dashboard",
  "wsc.tunnel_quota": "โควตาอุโมงค์",
  "wsc.type": "ประเภท",
  "wsc.up": "เซิร์ฟเวอร์ออนไลน์"
