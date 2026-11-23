@@ -74,6 +74,7 @@ ACTIVITY_LOG_ID     = int(os.environ.get("DISCORD_ACTIVITY_LOG_CHANNEL_ID", "0")
 TTS_LOG_ID          = int(os.environ.get("DISCORD_TTS_LOG_CHANNEL_ID", "0"))
 RING_FALLBACK_CH_ID = int(os.environ.get("DISCORD_RING_FALLBACK_CHANNEL_ID", "0"))
 MII_OF_DAY_CHANNEL_ID = int(os.environ.get("DISCORD_MII_OF_THE_DAY_CHANNEL_ID", "0"))
+MESSAGE_REPORTS_CHANNEL_ID = int(os.environ.get("DISCORD_MESSAGE_REPORTS_CHANNEL_ID", "0"))
 DB_URL          = os.environ.get("DATABASE_URL", "postgres://postgres:wiiu@localhost:5432/wiiuchat?sslmode=disable")
 RING_PORT       = int(os.environ.get("RING_HTTP_PORT", "9203"))
 
@@ -161,6 +162,10 @@ async def _tts_log(embed: discord.Embed):
 
 async def _activity_log(embed: discord.Embed):
     if ACTIVITY_LOG_ID and (ch := bot.get_channel(ACTIVITY_LOG_ID)):
+        await ch.send(embed=embed)
+
+async def _message_report_log(embed: discord.Embed):
+    if MESSAGE_REPORTS_CHANNEL_ID and (ch := bot.get_channel(MESSAGE_REPORTS_CHANNEL_ID)):
         await ch.send(embed=embed)
 
 def is_moderator():
@@ -1115,6 +1120,30 @@ async def whois(interaction: discord.Interaction, user: discord.Member):
 # ──────────────────────────────────────────────
 # Slash commands — moderation
 # ──────────────────────────────────────────────
+
+@bot.tree.context_menu(name="Report Message", guild=_guild)
+async def report_message(interaction: discord.Interaction, message: discord.Message):
+    content = message.content or "*(no text content)*"
+    if len(content) > 1024:
+        content = content[:1021] + "..."
+    embed = discord.Embed(title="Message Reported", color=0xED4245, timestamp=_now())
+    embed.add_field(name="Reported by", value=f"{interaction.user.mention} ({interaction.user} / {interaction.user.id})", inline=False)
+    embed.add_field(name="Author",      value=f"{message.author.mention} ({message.author} / {message.author.id})", inline=False)
+    embed.add_field(name="Channel",     value=f"{message.channel.mention} — [jump]({message.jump_url})", inline=False)
+    embed.add_field(name="Content",     value=content, inline=False)
+    if message.attachments:
+        embed.add_field(name="Attachments", value="\n".join(a.url for a in message.attachments), inline=False)
+
+    if not MESSAGE_REPORTS_CHANNEL_ID:
+        await interaction.response.send_message("❌ Message reports channel isn't configured.", ephemeral=True)
+        return
+    try:
+        await _message_report_log(embed)
+    except discord.HTTPException as e:
+        print(f"[bot] report_message: report log failed: {e}", flush=True)
+        await interaction.response.send_message("❌ Failed to send report.", ephemeral=True)
+        return
+    await interaction.response.send_message("✅ Thanks, this message has been reported to the moderators.", ephemeral=True)
 
 @bot.tree.command(guild=_guild, name="ban", description="Ban a member from the server")
 @app_commands.describe(user="Member to ban", reason="Reason for the ban", delete_days="Days of messages to delete (0–7)")
