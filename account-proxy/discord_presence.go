@@ -52,6 +52,7 @@ var discordPresenceServers = map[uint32]string{
 	0x1010EB00: "Mario Kart 8",
 	0x1012F100: "Wii Sports Club",
 	0x10145E00: "Angry Birds Star Wars",
+	0x10100D01: "Wii Karaoke U by JOYSOUND",
 	0x10162B00: "Splatoon",
 	0x101D9D00: "Minecraft: Wii U Edition",
 	0x10110E00: "Super Smash Bros. for Wii U",

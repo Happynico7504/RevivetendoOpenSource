@@ -451,6 +451,7 @@ wood(window.wiiuBrowser,'endStartUp',[true]);
 wood(window.wiiuCurtain,'close',[]);
 wood(window.wiiuDialog,'hideLoading',[]);
 wood(window.wiiuBrowser,'showLoadingIcon',[false]);
+wiiuSound.playSoundByName('BGM_WAVE_BOOT_0', 3);
 function closeApp(){if(window.wiiuBrowser&&wiiuBrowser.closeApplication){wiiuBrowser.closeApplication()}else{history.back()}}
 function vidErr(){document.getElementById('verr').style.display='block'}
 function $(i){return document.getElementById(i)}

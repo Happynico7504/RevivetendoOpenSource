@@ -63,6 +63,15 @@ var redirectCache sync.Map
 // bannedPIDs is a set of globally banned PIDs, refreshed every 30s alongside redirects.
 var bannedPIDs sync.Map
 
+// mk8WhitelistedPIDs backs MK8's redirect access_mode = "whitelist" (see
+// handleMK8NexToken): only these PIDs get redirected to our own mk8-secure instance,
+// everyone else falls through to real Pretendo servers - rebuilt from scratch for MK8
+// specifically per explicit request 2026-11-08, after the shared whitelist/review
+// system (user_access/review_queue) was removed network-wide on 2026-09-15 (see
+// feedback_open_access_policy). This one is scoped to MK8 only and does not revive
+// that old table or any other title's access control.
+var mk8WhitelistedPIDs sync.Map
+
 type activeRedirect struct {
 	ToHost     string
 	Port       uint16
@@ -310,6 +319,18 @@ func main() {
 	)`); err != nil {
 		log.Fatalf("schema: %v", err)
 	}
+	// NEX tokens for servers that validate logins through account-grpc's
+	// ExchangeNEXTokenForUserData (stock Pretendo ConfigurePNValidation): Disney Infinity 3.0.
+	if _, err = db.Exec(`CREATE TABLE IF NOT EXISTS nex_tokens (
+		token          TEXT        PRIMARY KEY,
+		pid            BIGINT      NOT NULL,
+		game_server_id TEXT        NOT NULL,
+		system_type    SMALLINT    NOT NULL DEFAULT 1,
+		issued_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		expires_at     TIMESTAMPTZ NOT NULL
+	)`); err != nil {
+		log.Fatalf("schema: %v", err)
+	}
 	if _, err = db.Exec(`CREATE TABLE IF NOT EXISTS pid_cache (
 		auth_hash TEXT        PRIMARY KEY,
 		pid       BIGINT      NOT NULL,
@@ -435,6 +456,11 @@ func main() {
 	db.Exec(`ALTER TABLE redirects ADD COLUMN IF NOT EXISTS port INTEGER`)
 	db.Exec(`ALTER TABLE redirects ADD COLUMN IF NOT EXISTS access_mode TEXT NOT NULL DEFAULT 'open'`)
 	db.Exec(`ALTER TABLE redirects ALTER COLUMN access_mode SET DEFAULT 'open'`)
+	db.Exec(`CREATE TABLE IF NOT EXISTS mk8_whitelist (
+		pid        BIGINT PRIMARY KEY,
+		note       TEXT NOT NULL DEFAULT '',
+		added_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`)
 	db.Exec(`ALTER TABLE nex_accounts ADD COLUMN IF NOT EXISTS friends_nex_password TEXT`)
 	db.Exec(`CREATE TABLE IF NOT EXISTS pretendo_friends (
 		owner_pid      BIGINT      NOT NULL,
@@ -495,10 +521,12 @@ func main() {
 
 	refreshRedirects()
 	refreshBans()
+	refreshMK8Whitelist()
 	go func() {
 		for range time.Tick(30 * time.Second) {
 			refreshRedirects()
 			refreshBans()
+			refreshMK8Whitelist()
 		}
 	}()
 
@@ -638,6 +666,35 @@ func checkBanned(pid uint32) bool {
 	return ok
 }
 
+func refreshMK8Whitelist() {
+	rows, err := db.Query(`SELECT pid FROM mk8_whitelist`)
+	if err != nil {
+		log.Printf("refreshMK8Whitelist: %v", err)
+		return
+	}
+	defer rows.Close()
+	seen := map[uint32]bool{}
+	for rows.Next() {
+		var pid uint32
+		if err := rows.Scan(&pid); err != nil {
+			continue
+		}
+		mk8WhitelistedPIDs.Store(pid, struct{}{})
+		seen[pid] = true
+	}
+	mk8WhitelistedPIDs.Range(func(k, _ interface{}) bool {
+		if !seen[k.(uint32)] {
+			mk8WhitelistedPIDs.Delete(k)
+		}
+		return true
+	})
+}
+
+func isMK8Whitelisted(pid uint32) bool {
+	_, ok := mk8WhitelistedPIDs.Load(pid)
+	return ok
+}
+
 func generateJuxtServiceToken(pid uint32) (string, error) {
 	aesKey, err := hex.DecodeString(juxtAESKeyHex)
 	if err != nil {
@@ -690,7 +747,13 @@ func handleServiceToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ourToken, err := generateJuxtServiceToken(pid)
+	var ourToken string
+	var err error
+	if r.URL.Query().Get("client_id") == wiiKaraokeClientID && wiiKaraokeTokenKey != "" {
+		ourToken = generateWiiKaraokeServiceToken(pid, r)
+	} else {
+		ourToken, err = generateJuxtServiceToken(pid)
+	}
 	if err != nil {
 		log.Printf("service_token: generate error for PID=%d: %v", pid, err)
 		http.Error(w, "token generation error", http.StatusInternalServerError)
@@ -923,7 +986,9 @@ func handleAccount(w http.ResponseWriter, r *http.Request) {
 			case "1005A000":
 				handleNexToken(w, r, rd.ToHost, rd.Port, rd.AccessMode)
 			case "101AC900":
-				handleNexToken(w, r, rd.ToHost, rd.Port, rd.AccessMode)
+				handleDisneyInfinityNexToken(w, r, rd.ToHost, rd.Port, rd.AccessMode)
+			case wiiKaraokeGameServerID:
+				handleWiiKaraokeNexToken(w, r, rd.ToHost, rd.Port)
 			case "1010EB00":
 				handleMK8NexToken(w, r, rd.ToHost, rd.Port, rd.AccessMode)
 			case "1012F100":
@@ -1088,6 +1153,84 @@ func upsertMK8Account(pid uint32, password string) {
 	}
 }
 
+// handleDisneyInfinityNexToken serves Disney Infinity 3.0 (101AC900). It used to go through
+// handleNexToken, which is Wii U Chat's: NA consoles were sent to us-1's Wii U Chat auth server
+// (106-0502). The Disney Infinity server checks passwords via account-grpc GetNEXPassword, which
+// returns COALESCE(friends_nex_password, nex_password), so the token must be exactly that value.
+// There is no Disney Infinity server on the regional relays: always the main.
+func handleDisneyInfinityNexToken(w http.ResponseWriter, r *http.Request, host string, port uint16, accessMode string) {
+	ip := realIP(r)
+	pid := fetchRealPID(r)
+
+	if pid != 0 {
+		if checkBanned(pid) {
+			log.Printf("DisneyInfinity: PID=%d is banned, proxying to Pretendo", pid)
+			proxyAndCachePID(w, r)
+			return
+		}
+	}
+
+	var password string
+	if pid != 0 {
+		db.QueryRow(`SELECT COALESCE(NULLIF(friends_nex_password, ''), nex_password, '') FROM nex_accounts WHERE pid = $1`, pid).Scan(&password)
+	}
+	if password == "" {
+		b := make([]byte, 16)
+		if _, err := rand.Read(b); err != nil {
+			http.Error(w, "token error", 500)
+			return
+		}
+		password = fmt.Sprintf("%x", b)
+		if pid != 0 {
+			if _, err := db.Exec(`
+				INSERT INTO nex_accounts (pid, username, nex_password)
+				VALUES ($1, $2, $3)
+				ON CONFLICT (pid) DO UPDATE SET nex_password = EXCLUDED.nex_password
+			`, pid, fmt.Sprintf("%d", pid), password); err != nil {
+				log.Printf("upsert nex_account: %v", err)
+			}
+		}
+	}
+
+	// The server's LoginEx swaps this token for the account via account-grpc
+	// ExchangeNEXTokenForUserData (nex_tokens). A day, so reconnects within a session still validate.
+	tb := make([]byte, 32)
+	if _, err := rand.Read(tb); err != nil {
+		http.Error(w, "token error", 500)
+		return
+	}
+	token := base64.StdEncoding.EncodeToString(tb)
+	if pid != 0 {
+		db.Exec(`DELETE FROM nex_tokens WHERE expires_at < NOW()`)
+		if _, err := db.Exec(`
+			INSERT INTO nex_tokens (token, pid, game_server_id, system_type, expires_at)
+			VALUES ($1, $2, '101AC900', 1, NOW() + INTERVAL '1 day')
+		`, token, pid); err != nil {
+			log.Printf("insert nex_token: %v", err)
+		}
+		db.Exec(`INSERT INTO relay_requests (pid, game_server_id) VALUES ($1, $2)`, pid, "101AC900")
+	}
+	log.Printf("disney_infinity_token for %s: PID=%d -> %s:%d", ip, pid, host, port)
+
+	tkn := nexToken{
+		Host:        host,
+		NexPassword: password,
+		PID:         pid,
+		Port:        port,
+		Token:       token,
+	}
+	body, err := xml.MarshalIndent(tkn, "", "  ")
+	if err != nil {
+		http.Error(w, "encode error", 500)
+		return
+	}
+	body = append([]byte(xml.Header), body...)
+	w.Header().Set("Content-Type", "application/xml")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
+	w.WriteHeader(http.StatusOK)
+	w.Write(body)
+}
+
 func handleMK8NexToken(w http.ResponseWriter, r *http.Request, host string, port uint16, accessMode string) {
 	ip := realIP(r)
 	pid := fetchRealPID(r)
@@ -1098,6 +1241,15 @@ func handleMK8NexToken(w http.ResponseWriter, r *http.Request, host string, port
 			proxyAndCachePID(w, r)
 			return
 		}
+	}
+
+	// access_mode = "whitelist": only explicitly-approved PIDs reach this instance -
+	// everyone else (including an unresolved pid == 0) falls through to real
+	// Pretendo servers, same as a ban. See mk8_whitelist's doc comment for why.
+	if strings.EqualFold(accessMode, "whitelist") && !isMK8Whitelisted(pid) {
+		log.Printf("MK8: PID=%d not whitelisted, proxying to Pretendo", pid)
+		proxyAndCachePID(w, r)
+		return
 	}
 
 	b := make([]byte, 16)
@@ -2443,9 +2595,17 @@ func fetchFriendsPRUDP(ownerPID uint32, nexPassword, authHost string, authPort u
 		launchKeepAlive(ownerPID, nexPassword, authHost, authPort)
 		return
 	}
+	if _, already := oneShotSyncInProgress.LoadOrStore(ownerPID, struct{}{}); already {
+		log.Printf("fetchFriendsPRUDP PID=%d: a sync is already in flight, skipping", ownerPID)
+		return
+	}
+	defer oneShotSyncInProgress.Delete(ownerPID)
+
 	script := "/nico-pretendo-bridge/account-proxy/fetch_friends.py"
 	dbURI := os.Getenv("PN_WUC_POSTGRES_URI")
-	cmd := exec.Command("python3", script,
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "python3", script,
 		"--pid", fmt.Sprintf("%d", ownerPID),
 		"--nex-password", nexPassword,
 		"--auth-host", authHost,
@@ -2453,7 +2613,9 @@ func fetchFriendsPRUDP(ownerPID uint32, nexPassword, authHost string, authPort u
 		"--db-uri", dbURI,
 	)
 	out, err := cmd.CombinedOutput()
-	if err != nil {
+	if ctx.Err() == context.DeadlineExceeded {
+		log.Printf("fetchFriendsPRUDP PID=%d: timed out after 45s, killed\n%s", ownerPID, out)
+	} else if err != nil {
 		log.Printf("fetchFriendsPRUDP PID=%d: %v\n%s", ownerPID, err, out)
 	} else {
 		log.Printf("fetchFriendsPRUDP PID=%d: ok\n%s", ownerPID, out)
@@ -2921,6 +3083,14 @@ func handleInternalLookup(w http.ResponseWriter, r *http.Request) {
 
 // keepAliveProcs tracks long-running fetch_friends.py --keep-alive processes (pid → *keepAliveProc).
 var keepAliveProcs sync.Map
+
+// oneShotSyncInProgress tracks PIDs with an in-flight non-keep-alive fetch_friends.py run.
+// handleFriendsNexToken fires fetchFriendsPRUDP on every Friends-module login, with no limit on
+// how often a given console retries - if a run is slow (e.g. Postgres under load, or the PRUDP
+// handshake stalling against an unresponsive Pretendo server) nothing stopped the next one for
+// the same PID from starting anyway, and the resulting pile-up of processes exhausted swap and
+// required a server reboot (2026-11-06, ~15:00).
+var oneShotSyncInProgress sync.Map
 
 type keepAliveProc struct {
 	cmd  *exec.Cmd

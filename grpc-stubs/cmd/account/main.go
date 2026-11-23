@@ -411,6 +411,92 @@ func (x *ExchangeServiceTokenResponse) Reset()         { *x = ExchangeServiceTok
 func (x *ExchangeServiceTokenResponse) String() string { return fmt.Sprintf("%+v", *x) }
 func (*ExchangeServiceTokenResponse) ProtoMessage()    {}
 
+// ── ExchangeNEXTokenForUserData ───────────────────────────────
+// Stock Pretendo NEX servers (ConfigurePNValidation, e.g. Disney Infinity 3.0) validate the
+// console's LoginEx token with this. account-proxy issues the tokens into nex_tokens.
+
+type ExchangeNEXTokenRequest struct {
+	GameServerIds []string `protobuf:"bytes,1,rep,name=game_server_ids,json=gameServerIds,proto3"`
+	Token         string   `protobuf:"bytes,2,opt,name=token,proto3"`
+}
+
+func (x *ExchangeNEXTokenRequest) Reset()         { *x = ExchangeNEXTokenRequest{} }
+func (x *ExchangeNEXTokenRequest) String() string { return fmt.Sprintf("%+v", *x) }
+func (*ExchangeNEXTokenRequest) ProtoMessage()    {}
+
+// NEXAccountMsg (account.v2.NEXAccount) — the validator only reads pid and access_level.
+type NEXAccountMsg struct {
+	Pid         uint32 `protobuf:"varint,1,opt,name=pid,proto3"`
+	AccessLevel int32  `protobuf:"varint,3,opt,name=access_level,json=accessLevel,proto3"`
+}
+
+func (x *NEXAccountMsg) Reset()         { *x = NEXAccountMsg{} }
+func (x *NEXAccountMsg) String() string { return fmt.Sprintf("%+v", *x) }
+func (*NEXAccountMsg) ProtoMessage()    {}
+
+// NEXTokenInfoMsg (account.v2.TokenInfo) with expire_time (field 7).
+type NEXTokenInfoMsg struct {
+	SystemType int32           `protobuf:"varint,1,opt,name=system_type,json=systemType,proto3,enum=account.v2.SystemType"`
+	TokenType  int32           `protobuf:"varint,2,opt,name=token_type,json=tokenType,proto3,enum=account.v2.TokenType"`
+	Pid        uint64          `protobuf:"varint,3,opt,name=pid,proto3"`
+	IssueTime  *ProtoTimestamp `protobuf:"bytes,6,opt,name=issue_time,json=issueTime,proto3"`
+	ExpireTime *ProtoTimestamp `protobuf:"bytes,7,opt,name=expire_time,json=expireTime,proto3"`
+}
+
+func (x *NEXTokenInfoMsg) Reset()         { *x = NEXTokenInfoMsg{} }
+func (x *NEXTokenInfoMsg) String() string { return fmt.Sprintf("%+v", *x) }
+func (*NEXTokenInfoMsg) ProtoMessage()    {}
+
+// ExchangeNEXTokenResponse (account.v2.ExchangeNEXTokenForUserDataResponse)
+// field 1 = nex_account, field 2 = token_info.
+type ExchangeNEXTokenResponse struct {
+	NexAccount *NEXAccountMsg   `protobuf:"bytes,1,opt,name=nex_account,json=nexAccount,proto3"`
+	TokenInfo  *NEXTokenInfoMsg `protobuf:"bytes,2,opt,name=token_info,json=tokenInfo,proto3"`
+}
+
+func (x *ExchangeNEXTokenResponse) Reset()         { *x = ExchangeNEXTokenResponse{} }
+func (x *ExchangeNEXTokenResponse) String() string { return fmt.Sprintf("%+v", *x) }
+func (*ExchangeNEXTokenResponse) ProtoMessage()    {}
+
+func (s *accountServer) ExchangeNEXTokenForUserData(ctx context.Context, req *ExchangeNEXTokenRequest) (*ExchangeNEXTokenResponse, error) {
+	var pid int64
+	var gameServerID string
+	var systemType int32
+	var issued, expires time.Time
+	err := s.db.QueryRowContext(ctx, `
+		SELECT pid, game_server_id, system_type, issued_at, expires_at
+		FROM nex_tokens WHERE token = $1 AND expires_at > NOW()`, req.Token).
+		Scan(&pid, &gameServerID, &systemType, &issued, &expires)
+	if err == sql.ErrNoRows {
+		return nil, status.Error(codes.NotFound, "unknown or expired NEX token")
+	}
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "db error: %v", err)
+	}
+	if len(req.GameServerIds) > 0 {
+		ok := false
+		for _, id := range req.GameServerIds {
+			if strings.EqualFold(id, gameServerID) {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return nil, status.Errorf(codes.PermissionDenied, "token is for game server %s", gameServerID)
+		}
+	}
+	return &ExchangeNEXTokenResponse{
+		NexAccount: &NEXAccountMsg{Pid: uint32(pid)},
+		TokenInfo: &NEXTokenInfoMsg{
+			SystemType: systemType,
+			TokenType:  3, // NEX
+			Pid:        uint64(pid),
+			IssueTime:  &ProtoTimestamp{Seconds: issued.Unix()},
+			ExpireTime: &ProtoTimestamp{Seconds: expires.Unix()},
+		},
+	}, nil
+}
+
 func decryptJuxtToken(tokenB64 string) (systemType byte, pid uint32, issueTimeMs uint64, err error) {
 	raw, err := base64.StdEncoding.DecodeString(tokenB64)
 	if err != nil {
@@ -807,6 +893,22 @@ func registerAccountServiceV2(s *grpc.Server, srv *accountServer) {
 						return handler(ctx, in)
 					}
 					return interceptor(ctx, in, &grpc.UnaryServerInfo{Server: srv, FullMethod: "/account.v2.AccountService/ExchangeIndependentServiceTokenForUserData"}, handler)
+				},
+			},
+			{
+				MethodName: "ExchangeNEXTokenForUserData",
+				Handler: func(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+					in := new(ExchangeNEXTokenRequest)
+					if err := dec(in); err != nil {
+						return nil, err
+					}
+					handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+						return srv.(*accountServer).ExchangeNEXTokenForUserData(ctx, req.(*ExchangeNEXTokenRequest))
+					}
+					if interceptor == nil {
+						return handler(ctx, in)
+					}
+					return interceptor(ctx, in, &grpc.UnaryServerInfo{Server: srv, FullMethod: "/account.v2.AccountService/ExchangeNEXTokenForUserData"}, handler)
 				},
 			},
 		},

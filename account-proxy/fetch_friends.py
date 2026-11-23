@@ -6,6 +6,7 @@ full friend list via UpdateAndGetAllInformation, and upsert into pretendo_friend
 
 import argparse
 import asyncio
+import ctypes
 import signal
 import json
 import os
@@ -185,6 +186,25 @@ def _nna_complete(loaded: bool, local: dict) -> bool:
     return loaded and bool(local["nnid"]) and bool(local["mii_name"]) and bool(local["mii_data"])
 
 
+class _BoundedCM:
+    """Wraps an async context manager so entering and leaving it are each bounded by a
+    timeout, without having to touch the (long, deeply indented) body that uses it.
+    NintendoClients' backend.connect()/be.login() have no timeout of their own: against an
+    unresponsive server (seen worse during Pretendo maintenance, 2026-11-05) the handshake
+    can hang forever, and since fetch_friends_loop's SIGTERM handling only runs between
+    awaits, a --keep-alive stuck here never notices SIGTERM either - it just accumulates."""
+    def __init__(self, cm, enter_timeout=20, exit_timeout=10):
+        self._cm = cm
+        self._enter_timeout = enter_timeout
+        self._exit_timeout = exit_timeout
+
+    async def __aenter__(self):
+        return await asyncio.wait_for(self._cm.__aenter__(), timeout=self._enter_timeout)
+
+    async def __aexit__(self, *exc):
+        return await asyncio.wait_for(self._cm.__aexit__(*exc), timeout=self._exit_timeout)
+
+
 async def fetch_friends(pid: int, nex_password: str, auth_host: str, auth_port: int, db_uri: str, keep_alive: bool = False):
     # The Friends server speaks PRUDP v0 to Wii U consoles (NintendoClients' "friends" profile).
     # With the default profile (v1) the handshake still worked, but Pretendo sends its
@@ -220,8 +240,8 @@ async def fetch_friends(pid: int, nex_password: str, auth_host: str, auth_port: 
             raise RuntimeError(why)  # fetch_friends_loop retries in 5 s
         return
 
-    async with backend.connect(s, auth_host, auth_port) as be:
-        async with be.login(username, nex_password) as client:
+    async with _BoundedCM(backend.connect(s, auth_host, auth_port)) as be:
+        async with _BoundedCM(be.login(username, nex_password)) as client:
             friends_client = friends_lib.FriendsClientV2(client)
             # One sync: send our NNAInfo/presence, store Pretendo's friend list,
             # requests and settings, then run queued commands. A keep-alive
@@ -704,11 +724,30 @@ def main():
 STOP = None
 
 
+def _die_with_parent():
+    """If account-proxy itself dies without SIGTERM-ing us first (OOM kill, crash), the
+    kernel delivers the same SIGTERM here instead of leaving this --keep-alive process
+    orphaned under init forever, reconnecting every 5s with nothing left to stop it
+    (2026-11-05: a run of account-proxy OOM-kills left a growing pile of these)."""
+    PR_SET_PDEATHSIG = 1
+    try:
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        if libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0) != 0:
+            raise OSError(ctypes.get_errno(), "prctl")
+        # The parent may have died in the gap between its own start and this call.
+        if os.getppid() == 1:
+            os.kill(os.getpid(), signal.SIGTERM)
+    except Exception as e:
+        print(f"  keep-alive: could not set PR_SET_PDEATHSIG ({e}), relying on SIGTERM only", flush=True)
+
+
 async def _run_until_stopped(args):
     # account-proxy stops a keep-alive with SIGTERM and waits for it. Pretendo keeps ONE connection
     # per PID and forgets it whenever any connection of that PID ends - if the old connection's end
     # is only noticed (by timeout) after the replacement logged in, Pretendo drops the NEW one: the
     # player looks offline to friends and gets no presence notifications (2026-10-09).
+    if args.keep_alive:
+        _die_with_parent()
     global STOP
     STOP = asyncio.Event()
     asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, STOP.set)
