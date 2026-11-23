@@ -1,0 +1,7 @@
+{
+  "public_ip": "45.157.178.35",
+  "auth_port": 60022,
+  "secure_port": 60023,
+  "password_provider": "pretendo",
+  "pretendo_grpc": {"host": "127.0.0.1", "port": 9001, "api_key": ""}
+}

@@ -1,0 +1,18 @@
+.env
+.venv/
+config.json
+*.sqlite3
+private/
+nex/nex_config.json
+nex/nex_passwords.json
+__pycache__/
+# game data (JOYSOUND songs, song database) is never committed
+content/*
+!content/manifest.json
+
+# song-editor working backups, not source
+backups/
+
+# disassembly of the real game executable and its derived caches - not ours to redistribute
+tools/re/*.elf
+tools/re/*.pkl

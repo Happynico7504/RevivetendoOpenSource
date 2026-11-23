@@ -1,0 +1,13 @@
+{
+  "db": "db/main.bin",
+  "movie_db": "db/movie.bin",
+  "first_line_db": "db/firstline.bin",
+  "patch_list": {"*": []},
+  "patch": "db/patch/{pdid}.bin",
+  "music": "music/{sid}.bin",
+  "lyrics": "lyrics/{sid}.bin",
+  "movie": "movie/{mid}_{mno}.bin",
+  "feature": "feature/{lid}.bin",
+  "magazine": "magazine/{lid}.bin",
+  "urgent": null
+}

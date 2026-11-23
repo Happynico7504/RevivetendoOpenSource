@@ -1,0 +1,25 @@
+{
+  "access_key": "dfc5a4ac",
+  "game_server_id": "10100D01",
+  "bind": "0.0.0.0",
+  "public_ip": "192.168.1.10",
+  "auth_port": 60000,
+  "secure_port": 60001,
+  "secure_server_password": "change-this-secure-server-secret",
+  "build_name": "branch:origin/release/ngs/3.2.x build:3_2_1_2_0",
+  "password_provider": "json",
+  "password_file": "nex_passwords.json",
+  "pretendo_grpc": {
+    "host": "127.0.0.1",
+    "port": 50051,
+    "api_key": ""
+  },
+  "static_password": "",
+  "database": "nex_rankings.sqlite3",
+  "time_scopes": {
+    "0": "all",
+    "1": "all"
+  },
+  "log_level": "INFO",
+  "health_check_port": 0
+}

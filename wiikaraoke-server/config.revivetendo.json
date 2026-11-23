@@ -1,0 +1,13 @@
+{
+  "public_url": "http://wahp.nicoch.net",
+  "host": "127.0.0.1",
+  "port": 8383,
+  "identity": "token",
+  "trust_proxy_headers": true,
+  "ticket_mode": "unlimited",
+  "log_requests": true,
+  "private_songs": {
+    "0750259": {"file": "test-crushedbythekart.ujk", "pids": [1435853600, 1153268757]}
+  },
+  "private_first_line": {"file": "firstline-custom.bin", "pids": [1435853600, 1153268757]}
+}

@@ -1,0 +1,23 @@
+{
+  "public_url": "http://192.168.1.10:8383",
+  "host": "0.0.0.0",
+  "port": 8383,
+  "endpoint": "/control_Orchestra300_EU.php",
+  "timezone": "Europe/London",
+  "identity": "token",
+  "service_token_key": "",
+  "nex_database": "nex/nex_rankings.sqlite3",
+  "song_db": "content/wiiudb.dat",
+  "trust_proxy_headers": false,
+  "ticket_mode": "authentic",
+  "currency": "GBP",
+  "require_funds": true,
+  "starting_funds_cents": 0,
+  "status_no_ticket": 0,
+  "status_expired": 2,
+  "token_lifetime_hours": 6,
+  "content_dir": "content",
+  "database": "wahp.sqlite3",
+  "admin_key": "pick-a-secret",
+  "log_requests": true
+}
