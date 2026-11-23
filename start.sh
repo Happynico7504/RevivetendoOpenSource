@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 
+sleep 15
+
+if ! mountpoint /nico-pretendo-bridge/wiikaraoke-server/content; then
+  sudo mount revivetendo-wiikaraoke /nico-pretendo-bridge/wiikaraoke-server/content -t fuse.s3fs -o passwd_file=/etc/s3fs/wiikaraoke-passwd,url=https://sos-de-fra-1.exo.io,use_path_request_style,uid=1000,gid=1000,allow_other,_netdev,nonempty,stat_cache_expire=1,stat_cache_interval_expire=1
+fi
+
 sleep 45
 
 set -e
@@ -90,6 +96,8 @@ source "$ROOT/wiiu-chat-secure/.env"
 # Also pick up discord-bot/.env (for MII_BOT_TOKEN etc.)
 # shellcheck disable=SC1091
 [ -f "$ROOT/discord-bot/.env" ] && source "$ROOT/discord-bot/.env"
+# Wii Karaoke U secrets; account-proxy needs WAHP_SERVICE_TOKEN_KEY too
+[ -f "$ROOT/wiikaraoke-server/.env" ] && source "$ROOT/wiikaraoke-server/.env"
 set +a
 
 LOG="$ROOT/log"
@@ -322,6 +330,21 @@ BA_SECURE_PID=$!
 (cd "$ROOT/disney-infinity-3" && autostart disney-infinity-3 "$LOG/disney-infinity-3.log" "$BUILD/disney-infinity-3") &
 DISNEY_INFINITY_PID=$!
 
+# Wii Karaoke U: JOYSOUND HTTP API (port 8383, behind nginx) and NEX rankings (udp 60022/60023).
+# Python, so nothing to build. Needs wiikaraoke-server/.env and .venv (flask, grpcio);
+# without them it is simply not started (instead of crash-looping).
+KARAOKE_HTTP_PID=""
+KARAOKE_NEX_PID=""
+KARAOKE_PY="$ROOT/wiikaraoke-server/.venv/bin/python"
+if [ -f "$ROOT/wiikaraoke-server/.env" ] && [ -x "$KARAOKE_PY" ]; then
+	(cd "$ROOT/wiikaraoke-server" && autostart wiikaraoke-http "$LOG/wiikaraoke-http.log" \
+		env WAHP_CONFIG=config.revivetendo.json "$KARAOKE_PY" server.py) &
+	KARAOKE_HTTP_PID=$!
+	(cd "$ROOT/wiikaraoke-server/nex" && autostart wiikaraoke-nex "$LOG/wiikaraoke-nex.log" \
+		"$KARAOKE_PY" nex_server.py nex_config.revivetendo.json) &
+	KARAOKE_NEX_PID=$!
+fi
+
 # relayhub: the relay API for regional relays (port 7777) and the relay registry.
 # Needs the main RSA key, created ONCE with:  build/relayhub keygen
 # Without it the hub is simply not started (instead of crash-looping).
@@ -357,6 +380,9 @@ fi
 if [ -n "$RELAYHUB_PID" ]; then
 	SERVICES+=(relayhub)
 fi
+if [ -n "$KARAOKE_HTTP_PID" ]; then
+	SERVICES+=(wiikaraoke-http wiikaraoke-nex)
+fi
 {
 	printf '{"services":['
 	first=1
@@ -378,7 +404,7 @@ RESTARTD_PID=$!
 
 cleanup() {
 	echo "==> shutting down..."
-	kill ${RESTARTD_PID:-} $ACCOUNT_PID $FRIENDS_PID $ADMIN_PID $PROXY_PID $MK8_AUTH_PID $MK8_SECURE_PID $ABSW_PID $WSC_AUTH_PID $WSC_SECURE_PID $MC_AUTH_PID $MC_SECURE_PID $SWAPDOODLE_PID $BA_AUTH_PID $BA_SECURE_PID $DISNEY_INFINITY_PID $BOT_PID ${MII_BOT_PID:-} ${RELAYHUB_PID:-} 2>/dev/null || true
+	kill ${RESTARTD_PID:-} $ACCOUNT_PID $FRIENDS_PID $ADMIN_PID $PROXY_PID $MK8_AUTH_PID $MK8_SECURE_PID $ABSW_PID $WSC_AUTH_PID $WSC_SECURE_PID $MC_AUTH_PID $MC_SECURE_PID $SWAPDOODLE_PID $BA_AUTH_PID $BA_SECURE_PID $DISNEY_INFINITY_PID $BOT_PID ${MII_BOT_PID:-} ${RELAYHUB_PID:-} ${KARAOKE_HTTP_PID:-} ${KARAOKE_NEX_PID:-} 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
