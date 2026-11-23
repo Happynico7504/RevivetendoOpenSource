@@ -29,6 +29,13 @@ const (
 	WUCEdgeSecurePort = "60005"          // where the edge listens: the same port wiiu-chat uses on the main
 )
 
+// The Mario Kart 8 edge auth variant, the counterpart of WSC's.
+const (
+	MK8EdgeGame       = "mk8-edge" // auth server whose secure server is the relay itself
+	MK8EdgeBase       = "mk8"      // the game whose configuration it is derived from
+	MK8EdgeSecurePort = "60003"    // where the edge listens: the same port mk8-secure uses on the main
+)
+
 // EdgeVariant describes an auth variant that hands consoles to a relay's edge instead of the main.
 type EdgeVariant struct {
 	Name       string // the derived game, e.g. "wsc-edge"
@@ -40,6 +47,7 @@ type EdgeVariant struct {
 var EdgeVariants = map[string]EdgeVariant{
 	WSCEdgeBase: {Name: WSCEdgeGame, Base: WSCEdgeBase, SecurePort: WSCEdgeSecurePort},
 	WUCEdgeBase: {Name: WUCEdgeGame, Base: WUCEdgeBase, SecurePort: WUCEdgeSecurePort},
+	MK8EdgeBase: {Name: MK8EdgeGame, Base: MK8EdgeBase, SecurePort: MK8EdgeSecurePort},
 }
 
 // DeriveEdgeGame derives an edge variant's configuration from its base game's: same access key, NEX
@@ -80,6 +88,11 @@ func NexGameDefaults() map[string]NexGame {
 	return map[string]NexGame{
 		"wsc": {Name: "wsc", GameServerID: "1012F100", Port: 60014, AccessKey: "4d324052", NEXMajor: 3, NEXMinor: 4, NEXPatch: 0, BuildName: "Pretendo WSC"},
 		"mk8": {Name: "mk8", GameServerID: "1010EB00", Port: 60002, AccessKey: "25dbf96a", NEXMajor: 3, NEXMinor: 5, NEXPatch: 4, BuildName: "Pretendo MK7"},
+		// mk8-edge is MK8's auth server with a different secure server: the relay itself,
+		// where the MK8 edge terminates the session. Everything else, including the
+		// Kerberos secret, is MK8's (see DeriveEdgeGame); derived per relay, never
+		// configured on its own - same pattern as WSCEdgeGame above.
+		MK8EdgeGame: {Name: MK8EdgeGame, GameServerID: "1010EB00", Port: 60102, AccessKey: "25dbf96a", NEXMajor: 3, NEXMinor: 5, NEXPatch: 4, BuildName: "Pretendo MK7"},
 		// wsc-edge is WSC's auth server with a different secure server: the relay itself, where
 		// the WSC edge terminates the session. Everything else, including the Kerberos secret,
 		// is WSC's (see EdgeGame); it is derived per relay, never configured on its own.

@@ -43,15 +43,16 @@ func TestChatEdgeGameMatchesWiiUChatWhereTheEdgeMustAndDiffersWhereItShould(t *t
 	if e.Name != WUCEdgeGame || e.Port == chat.Port || e.SecureHost != "107.173.31.124" || e.SecurePort != "60005" {
 		t.Fatalf("chat edge routing: %+v", e)
 	}
-	// Both edge variants exist and none collides with another game (auth ports are checked elsewhere).
-	if len(EdgeVariants) != 2 || EdgeVariants["wsc"].Name != WSCEdgeGame || EdgeVariants["wiiu-chat"].Name != WUCEdgeGame {
+	// Every edge variant exists and none collides with another game (auth ports are checked elsewhere).
+	if len(EdgeVariants) != 3 || EdgeVariants["wsc"].Name != WSCEdgeGame || EdgeVariants["wiiu-chat"].Name != WUCEdgeGame ||
+		EdgeVariants["mk8"].Name != MK8EdgeGame {
 		t.Fatalf("edge variants: %+v", EdgeVariants)
 	}
 }
 
 func TestEdgeNamesDoNotCollide(t *testing.T) {
 	seen := map[string]string{}
-	for who, n := range map[string]EdgeNames{"wsc": WSCEdgeNames, "wuc": WUCEdgeNames} {
+	for who, n := range map[string]EdgeNames{"wsc": WSCEdgeNames, "wuc": WUCEdgeNames, "mk8": MK8EdgeNames} {
 		for _, name := range []string{n.Open, n.RMC, n.Alive, n.Close, n.Stats, n.Trace, n.Out} {
 			if other, dup := seen[name]; dup {
 				t.Fatalf("%q used by both %s and %s", name, who, other)

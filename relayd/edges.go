@@ -23,4 +23,9 @@ var KnownEdges = map[string]EdgeSpec{
 		Names:     relaylink.WUCEdgeNames,
 		SecretEnv: "PN_WUC_KERBEROS_PASSWORD",
 	},
+	"mk8edge": {
+		Variant:   relaylink.EdgeVariants[relaylink.MK8EdgeBase],
+		Names:     relaylink.MK8EdgeNames,
+		SecretEnv: "MK8_KERBEROS_PASSWORD",
+	},
 }

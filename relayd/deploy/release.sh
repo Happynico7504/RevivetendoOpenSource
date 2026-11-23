@@ -8,7 +8,7 @@
 # directory, then copy that directory's contents into the main's ~/.relayhub/releases/.
 #
 # Components are separate Go modules with their own binary and their own dependencies: "wscedge"
-# (patched nex-go v1) and "wiiuchatedge" (stock nex-go v2).
+# and "mk8edge" (patched nex-go v1) and "wiiuchatedge" (stock nex-go v2).
 set -euo pipefail
 COMPONENT=relayd
 if [ "${1:-}" = "-c" ]; then
@@ -37,8 +37,12 @@ wiiuchatedge)
 	MODULE=relayd/wiiuchatedge; PKG=./cmd/wiiuchatedge; VARNAME=main.Version
 	(cd relayd/wiiuchatedge && go vet ./... >/dev/null && go test ./... >/dev/null) || { echo "wiiuchatedge vet/tests failed" >&2; exit 1; }
 	;;
+mk8edge)
+	MODULE=relayd/mk8edge; PKG=./cmd/mk8edge; VARNAME=main.Version
+	(cd relayd/mk8edge && go vet ./... >/dev/null && go test ./... >/dev/null) || { echo "mk8edge vet/tests failed" >&2; exit 1; }
+	;;
 *)
-	echo "unknown component: $COMPONENT (known: relayd, wscedge, wiiuchatedge)" >&2
+	echo "unknown component: $COMPONENT (known: relayd, wscedge, wiiuchatedge, mk8edge)" >&2
 	exit 1
 	;;
 esac

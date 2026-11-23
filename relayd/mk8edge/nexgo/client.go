@@ -1,0 +1,382 @@
+package nex
+
+import (
+	"crypto/rc4"
+	"net"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+// Client represents a connected or non-connected PRUDP client
+type Client struct {
+	address                   *net.UDPAddr
+	rebound                   atomic.Pointer[net.UDPAddr] // set when the client's NAT moved it to a new address (see Server.rebind)
+	inSeqNext                 uint16                      // sequence ID of the next reliable data packet to decipher
+	inSeqKnown                bool                        // inSeqNext is set (false until the first one after a key change)
+	server                    *Server
+	mu                        sync.Mutex // protects cipher and decipher (RC4 is not goroutine-safe)
+	cipher                    *rc4.Cipher
+	decipher                  *rc4.Cipher
+	prudpProtocolMinorVersion int
+	supportedFunctions        int
+	signatureKey              []byte
+	signatureBase             int
+	serverConnectionSignature []byte
+	clientConnectionSignature []byte
+	sessionKey                []byte
+	sequenceIDIn              *Counter
+	sequenceIDOut             *Counter
+	pid                       uint32
+	localStationURL           string
+	connectionID              uint32
+	pingCheckTimer            *time.Timer
+	pingKickTimer             *time.Timer
+	connected                 bool
+	pendingMu                 sync.Mutex
+	pendingPackets            map[uint16]*pendingPacket
+	rttSmoothed               time.Duration // smoothed ack round trip time (RFC 6298 style, alpha 1/8)
+	rttMin                    time.Duration
+	rttSamples                int
+}
+
+// pendingPacket is a reliable packet awaiting acknowledgement. data holds the already
+// RC4-encrypted, fully encoded wire bytes — resends must reuse them as-is via SendRaw,
+// never re-run Bytes(), since re-encoding a DataPacket advances the RC4 keystream again
+// and would desync the cipher from what the client expects.
+type pendingPacket struct {
+	data    []byte
+	sentAt  time.Time
+	first   time.Time // first transmission (sentAt moves with every resend)
+	retries int
+}
+
+// Reset resets the Client to default values
+func (client *Client) Reset() {
+	client.sequenceIDIn = NewCounter(0)
+	client.sequenceIDOut = NewCounter(0)
+
+	client.UpdateAccessKey(client.Server().AccessKey())
+	client.UpdateRC4Key([]byte("CD&ML"))
+
+	if client.Server().PRUDPVersion() == 0 {
+		client.SetServerConnectionSignature(make([]byte, 4))
+		client.SetClientConnectionSignature(make([]byte, 4))
+	} else {
+		client.SetServerConnectionSignature([]byte{})
+		client.SetClientConnectionSignature([]byte{})
+	}
+
+	client.SetConnected(false)
+
+	client.pendingMu.Lock()
+	client.pendingPackets = make(map[uint16]*pendingPacket)
+	client.pendingMu.Unlock()
+}
+
+// TrackPending registers an already-encoded reliable packet for retransmission until
+// it is acknowledged or exceeds its retry budget.
+func (client *Client) TrackPending(sequenceID uint16, data []byte) {
+	client.pendingMu.Lock()
+	defer client.pendingMu.Unlock()
+
+	if client.pendingPackets == nil {
+		client.pendingPackets = make(map[uint16]*pendingPacket)
+	}
+
+	now := time.Now()
+	client.pendingPackets[sequenceID] = &pendingPacket{data: data, sentAt: now, first: now}
+}
+
+// PendingStats describes the reliable packets this server sent the client that it has not
+// acknowledged yet: how many, how long the oldest has waited and the most resends of any.
+// A console that gives up while these pile up is not getting the server's packets.
+func (client *Client) PendingStats() (count int, oldest time.Duration, maxRetries int) {
+	client.pendingMu.Lock()
+	defer client.pendingMu.Unlock()
+	now := time.Now()
+	for _, p := range client.pendingPackets {
+		count++
+		if age := now.Sub(p.first); age > oldest {
+			oldest = age
+		}
+		if p.retries > maxRetries {
+			maxRetries = p.retries
+		}
+	}
+	return
+}
+
+// AcknowledgePending removes a single tracked packet, identified by the sequence ID
+// carried in a simple (non-aggregate) Ack packet's header.
+func (client *Client) AcknowledgePending(sequenceID uint16) {
+	client.pendingMu.Lock()
+	defer client.pendingMu.Unlock()
+
+	client.sampleRTTLocked(sequenceID)
+	delete(client.pendingPackets, sequenceID)
+}
+
+// sampleRTTLocked records the round trip of an acknowledged packet. A packet that was ever
+// retransmitted is skipped: the ack could belong to either transmission (Karn's rule).
+// Caller holds pendingMu.
+func (client *Client) sampleRTTLocked(sequenceID uint16) {
+	p, ok := client.pendingPackets[sequenceID]
+	if !ok || p.retries != 0 {
+		return
+	}
+	sample := time.Since(p.sentAt)
+	if client.rttSamples == 0 {
+		client.rttSmoothed, client.rttMin = sample, sample
+	} else {
+		client.rttSmoothed += (sample - client.rttSmoothed) / 8
+		if sample < client.rttMin {
+			client.rttMin = sample
+		}
+	}
+	client.rttSamples++
+}
+
+// RTT reports the smoothed and minimum round trip time between sending a reliable packet
+// and receiving its acknowledgement, and how many samples that rests on (0 = none yet). It
+// works whatever the player's router does with ICMP.
+func (client *Client) RTT() (smoothed, min time.Duration, samples int) {
+	client.pendingMu.Lock()
+	defer client.pendingMu.Unlock()
+	return client.rttSmoothed, client.rttMin, client.rttSamples
+}
+
+// AcknowledgePendingUpTo removes every tracked packet whose sequence ID is <= base
+// (the cumulative-ack semantics PRUDP's aggregate MultiAck uses), plus any additional
+// sequence IDs listed explicitly for selective acknowledgement of out-of-order packets.
+func (client *Client) AcknowledgePendingUpTo(base uint16, additional []uint16) {
+	client.pendingMu.Lock()
+	defer client.pendingMu.Unlock()
+
+	client.sampleRTTLocked(base)
+	for seq := range client.pendingPackets {
+		if seq <= base {
+			delete(client.pendingPackets, seq)
+		}
+	}
+
+	for _, seq := range additional {
+		delete(client.pendingPackets, seq)
+	}
+}
+
+// ResendStalePackets resends any tracked packet that has been unacknowledged for at
+// least timeout, dropping it once it has been retried maxRetries times. Packets are
+// resent verbatim via SendRaw — see the pendingPacket doc comment for why.
+func (client *Client) ResendStalePackets(server *Server, timeout time.Duration, maxRetries int) {
+	now := time.Now()
+
+	client.pendingMu.Lock()
+	var toResend [][]byte
+	for seq, p := range client.pendingPackets {
+		if now.Sub(p.sentAt) < timeout {
+			continue
+		}
+		if p.retries >= maxRetries {
+			delete(client.pendingPackets, seq)
+			continue
+		}
+		p.retries++
+		p.sentAt = now
+		toResend = append(toResend, p.data)
+	}
+	client.pendingMu.Unlock()
+
+	for _, data := range toResend {
+		server.SendRaw(client.Address(), data)
+	}
+}
+
+// Address returns the clients UDP address
+func (client *Client) Address() *net.UDPAddr {
+	if a := client.rebound.Load(); a != nil {
+		return a
+	}
+	return client.address
+}
+
+// Server returns the server the client is currently connected to
+func (client *Client) Server() *Server {
+	return client.server
+}
+
+// PRUDPProtocolMinorVersion returns the client PRUDP minor version
+func (client *Client) PRUDPProtocolMinorVersion() int {
+	return client.prudpProtocolMinorVersion
+}
+
+// SetPRUDPProtocolMinorVersion sets the client PRUDP minor
+func (client *Client) SetPRUDPProtocolMinorVersion(prudpProtocolMinorVersion int) {
+	client.prudpProtocolMinorVersion = prudpProtocolMinorVersion
+}
+
+// SupportedFunctions returns the supported PRUDP functions by the client
+func (client *Client) SupportedFunctions() int {
+	return client.supportedFunctions
+}
+
+// SetSupportedFunctions sets the supported PRUDP functions by the client
+func (client *Client) SetSupportedFunctions(supportedFunctions int) {
+	client.supportedFunctions = supportedFunctions
+}
+
+// UpdateRC4Key sets the client RC4 stream key
+func (client *Client) UpdateRC4Key(key []byte) {
+	cipher, _ := rc4.NewCipher(key)
+	client.cipher = cipher
+
+	decipher, _ := rc4.NewCipher(key)
+	client.decipher = decipher
+	client.inSeqKnown = false // a fresh keystream: the next reliable data packet sets the order
+}
+
+// Cipher returns the RC4 cipher stream for out-bound packets
+func (client *Client) Cipher() *rc4.Cipher {
+	return client.cipher
+}
+
+// Decipher returns the RC4 cipher stream for in-bound packets
+func (client *Client) Decipher() *rc4.Cipher {
+	return client.decipher
+}
+
+// UpdateAccessKey sets the client signature base and signature key
+func (client *Client) UpdateAccessKey(accessKey string) {
+	client.signatureBase = sum([]byte(accessKey))
+	client.signatureKey = MD5Hash([]byte(accessKey))
+}
+
+// SignatureBase returns the v0 checksum signature base
+func (client *Client) SignatureBase() int {
+	return client.signatureBase
+}
+
+// SignatureKey returns signature key
+func (client *Client) SignatureKey() []byte {
+	return client.signatureKey
+}
+
+// SetServerConnectionSignature sets the clients server-side connection signature
+func (client *Client) SetServerConnectionSignature(serverConnectionSignature []byte) {
+	client.serverConnectionSignature = serverConnectionSignature
+}
+
+// ServerConnectionSignature returns the clients server-side connection signature
+func (client *Client) ServerConnectionSignature() []byte {
+	return client.serverConnectionSignature
+}
+
+// SetClientConnectionSignature sets the clients client-side connection signature
+func (client *Client) SetClientConnectionSignature(clientConnectionSignature []byte) {
+	client.clientConnectionSignature = clientConnectionSignature
+}
+
+// ClientConnectionSignature returns the clients client-side connection signature
+func (client *Client) ClientConnectionSignature() []byte {
+	return client.clientConnectionSignature
+}
+
+// SequenceIDCounterOut returns the clients packet SequenceID counter for out-going packets
+func (client *Client) SequenceIDCounterOut() *Counter {
+	return client.sequenceIDOut
+}
+
+// SequenceIDCounterIn returns the clients packet SequenceID counter for incoming packets
+func (client *Client) SequenceIDCounterIn() *Counter {
+	return client.sequenceIDIn
+}
+
+// SetSessionKey sets the clients session key
+func (client *Client) SetSessionKey(sessionKey []byte) {
+	client.sessionKey = sessionKey
+}
+
+// SessionKey returns the clients session key
+func (client *Client) SessionKey() []byte {
+	return client.sessionKey
+}
+
+// SetPID sets the clients NEX PID
+func (client *Client) SetPID(pid uint32) {
+	client.pid = pid
+}
+
+// PID returns the clients NEX PID
+func (client *Client) PID() uint32 {
+	return client.pid
+}
+
+// SetLocalStationURL sets the clients Local Station URL
+func (client *Client) SetLocalStationURL(localStationURL string) {
+	client.localStationURL = localStationURL
+}
+
+// LocalStationURL returns the clients Local Station URL
+func (client *Client) LocalStationURL() string {
+	return client.localStationURL
+}
+
+// SetConnectionID sets the clients Connection ID
+func (client *Client) SetConnectionID(connectionID uint32) {
+	client.connectionID = connectionID
+}
+
+// ConnectionID returns the clients Connection ID
+func (client *Client) ConnectionID() uint32 {
+	return client.connectionID
+}
+
+// SetConnected sets the clients connection status
+func (client *Client) SetConnected(connected bool) {
+	client.connected = connected
+}
+
+// IncreasePingTimeoutTime adds a number of seconds to the check timer
+func (client *Client) IncreasePingTimeoutTime(seconds int) {
+	//Stop the kick timer if we get something back
+	if client.pingKickTimer != nil {
+		client.pingKickTimer.Stop()
+	}
+	//and reset the check timer
+	if client.pingCheckTimer != nil {
+		client.pingCheckTimer.Reset(time.Second * time.Duration(seconds))
+	}
+}
+
+// StartTimeoutTimer begins the packet timeout timer
+func (client *Client) StartTimeoutTimer() {
+	// Stop any previously running timers so reconnects don't accumulate goroutines.
+	if client.pingCheckTimer != nil {
+		client.pingCheckTimer.Stop()
+		client.pingCheckTimer = nil
+	}
+	if client.pingKickTimer != nil {
+		client.pingKickTimer.Stop()
+		client.pingKickTimer = nil
+	}
+	//if we haven't gotten a ping *from* the client, send them one to check all is well
+	client.pingCheckTimer = time.AfterFunc(time.Second*time.Duration(client.server.PingTimeout()), func() {
+		client.server.SendPing(client)
+		//if we *still* get nothing, they're gone
+		client.pingKickTimer = time.AfterFunc(time.Second*time.Duration(client.server.PingTimeout()), func() {
+			client.server.Kick(client)
+		})
+	})
+}
+
+// NewClient returns a new PRUDP client
+func NewClient(address *net.UDPAddr, server *Server) *Client {
+	client := &Client{
+		address: address,
+		server:  server,
+	}
+
+	client.Reset()
+
+	return client
+}

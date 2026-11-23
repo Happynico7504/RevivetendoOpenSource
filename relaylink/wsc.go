@@ -124,4 +124,5 @@ func EdgeNamesFor(prefix string) EdgeNames {
 var (
 	WSCEdgeNames = EdgeNamesFor("wsc")
 	WUCEdgeNames = EdgeNamesFor("wuc")
+	MK8EdgeNames = EdgeNamesFor("mk8")
 )

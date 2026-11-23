@@ -172,6 +172,7 @@ func cmdServe(args []string) {
 	internal := fs.String("internal", "127.0.0.1:9401", "local-only invalidation endpoint")
 	wscEdge := fs.String("wsc-edge", "http://127.0.0.1:9451", "wsc-secure's edge endpoint for relay-terminated WSC sessions (empty = off)")
 	wucEdge := fs.String("wuc-edge", "http://127.0.0.1:9452", "wiiu-chat's edge endpoint for relay-terminated Wii U Chat sessions (empty = off)")
+	mk8Edge := fs.String("mk8-edge", "http://127.0.0.1:9453", "mk8-secure's edge endpoint for relay-terminated MK8 sessions (empty = off)")
 	keyPath := fs.String("key", defaultKeyPath(), "main RSA private key")
 	envFile := fs.String("env", "../wiiu-chat-secure/.env", "env file with PN_WUC_POSTGRES_URI")
 	redisAddr := fs.String("redis", "127.0.0.1:6379", "Redis for replay protection")
@@ -253,6 +254,7 @@ func cmdServe(args []string) {
 				EdgeLists: map[string]func() map[uint32]bool{
 					relaylink.WSCEdgeBase: edgeList(filepath.Join(filepath.Dir(*keyPath), "wsc-edge-pids")),
 					relaylink.WUCEdgeBase: edgeList(filepath.Join(filepath.Dir(*keyPath), "wuc-edge-pids")),
+					relaylink.MK8EdgeBase: edgeList(filepath.Join(filepath.Dir(*keyPath), "mk8-edge-pids")),
 				},
 				ForcePIDs: func() map[uint32]bool {
 					fmu.Lock()
@@ -302,6 +304,12 @@ func cmdServe(args []string) {
 	if *wucEdge != "" {
 		chatEdge = &relayhub.EdgeBridge{Streams: streams, Main: *wucEdge, Names: relaylink.WUCEdgeNames, Logf: log.Printf}
 		chatEdge.Register()
+	}
+	// The same for Mario Kart 8: its own stream methods (mk8.*) and its own session table.
+	var mk8EdgeBridge *relayhub.EdgeBridge
+	if *mk8Edge != "" {
+		mk8EdgeBridge = &relayhub.EdgeBridge{Streams: streams, Main: *mk8Edge, Names: relaylink.MK8EdgeNames, Logf: log.Printf}
+		mk8EdgeBridge.Register()
 	}
 	// P2P tunnels for consoles that cannot reach each other directly. Which gatherings get one is
 	// decided by ~/.relayhub/wsc-p2p-tunnel ("international", "*", PIDs; missing = none), re-read
@@ -375,6 +383,9 @@ func cmdServe(args []string) {
 		}
 		if chatEdge != nil {
 			mux.HandleFunc("/wuc-edge/out", chatEdge.Out)
+		}
+		if mk8EdgeBridge != nil {
+			mux.HandleFunc("/mk8-edge/out", mk8EdgeBridge.Out)
 		}
 		// wsc-secure asks for a gathering's tunnel; 204 = the consoles connect directly.
 		mux.HandleFunc("/p2p/open", func(w http.ResponseWriter, r *http.Request) {
