@@ -3793,74 +3793,54 @@ func lookupRealWiiUTaskSheetTitleID(bossAppID, taskID string) (string, bool) {
 	return titleID, true
 }
 
-// bossCaptureDir holds raw request/response logs from handleBossCapture, for offline
-// decryption with a dumped BOSS key once we've seen what real Wara Wara Plaza traffic
-// looks like. TEMPORARY — see handleBossCapture doc comment.
-const bossCaptureDir = "/nico-pretendo-bridge/boss-capture"
-
-// hppCaptureDir holds raw request logs from handleHPPCapture. TEMPORARY — first
-// pass at bringing up HPP (Swapdoodle and friends): the Nimbus socket:U patch
-// redirects any hpp-<gameid>-l1.n.app.nintendowifi.net DNS lookup to
-// hpp-relay.nicochristmann.net, but leaves the actual HTTP Host header/TLS SNI
-// (and the whole HPP wire format) untouched, so we don't yet know what a real
-// request looks like. This just logs full requests until we've seen one.
-const hppCaptureDir = "/nico-pretendo-bridge/hpp-capture"
-
-// olv3dsCaptureDir: full request/response captures for real Nintendo 3DS
-// traffic through handleOLV. TEMPORARY — added to diagnose an ARM11 data
-// abort in the 3DS's olv process, which happened after the console
-// successfully received a real response for the first time (previously
-// blocked by an empty-SNI nginx routing gap). Scoped to 3DS User-Agents
-// only so it doesn't capture the much higher volume of normal Wii U
-// traffic. Remove once resolved.
-const olv3dsCaptureDir = "/nico-pretendo-bridge/olv-capture-3ds"
-
-func logOLV3DSExchange(r *http.Request, reqBody []byte, status int, respHeader http.Header, respBody []byte) {
-	os.MkdirAll(olv3dsCaptureDir, 0755)
-	ts := time.Now().Format("20060102-150405.000")
-	safePath := strings.ReplaceAll(strings.Trim(r.URL.Path, "/"), "/", "_")
-	base := fmt.Sprintf("%s/%s_%s", olv3dsCaptureDir, ts, safePath)
-	reqLog := fmt.Sprintf("%s %s\nQuery: %s\nHeaders: %v\nBody (hex): %x\n",
-		r.Method, r.URL.Path, r.URL.RawQuery, r.Header, reqBody)
-	os.WriteFile(base+".request.txt", []byte(reqLog), 0644)
-	respLog := fmt.Sprintf("Status: %d\nHeaders: %v\nBody (hex): %x\nBody (raw): %s\n",
-		status, respHeader, respBody, respBody)
-	os.WriteFile(base+".response.txt", []byte(respLog), 0644)
+// clientTag identifies the console/device behind a request for the
+// lightweight per-request log lines below - IP (via realIP, which already
+// unwraps X-Forwarded-For from a regional relay) plus User-Agent, which
+// alone usually identifies platform, firmware, and often a per-console
+// fingerprint (e.g. Wii U's PBOSU-4.0/<fingerprint>/<firmware>). Replaces
+// the old per-request raw-dump-to-disk capture functions (logOLV3DSExchange,
+// logBossRequest, handleHPPCapture et al.) that used to write a pair of
+// .request.txt/.response.txt files per request into boss-capture/,
+// hpp-capture/, and olv-capture-3ds/ - those were only ever meant to be
+// TEMPORARY bring-up aids for WSC/HPP/3DS-OLV, all long since resolved, and
+// the per-request file dumps had grown to hundreds of thousands of files and
+// double-digit gigabytes with no one reading most of them. A one-line log
+// entry per request is enough to debug a specific device/IP after the fact
+// via the normal account-proxy.log, without the disk cost.
+func clientTag(r *http.Request) string {
+	return fmt.Sprintf("ip=%s ua=%q", realIP(r), r.Header.Get("User-Agent"))
 }
 
-// logBossRequest saves the full incoming request (method, path, query string,
-// headers, body) to bossCaptureDir, matching the format handleBossCapture's
-// generic proxy path already uses. The synthetic handlers (handleWSCSpotPass*)
-// never captured this before, only a one-line summary - added to see the
-// query string real Nintendo captures show (e.g. ?c=US&l=en) and full headers
-// for a given real request, since WSC's actual request shape has repeatedly
-// turned out to matter (bossAppId varying, real vs. assumed field values).
+// logOLV3DSExchange logs one line per real 3DS OLV exchange (see clientTag's
+// doc comment for why this replaced a per-request file dump).
+func logOLV3DSExchange(r *http.Request, reqBody []byte, status int, respHeader http.Header, respBody []byte) {
+	log.Printf("OLV 3DS: %s %s %s status=%d reqBytes=%d respBytes=%d", clientTag(r), r.Method, r.URL.Path, status, len(reqBody), len(respBody))
+}
+
+// logBossRequest logs one line per incoming BOSS request (see clientTag's
+// doc comment for why this replaced a per-request file dump). Still
+// restores r.Body so callers can read it afterwards, matching the old
+// behavior.
 func logBossRequest(r *http.Request) {
 	reqBody, _ := io.ReadAll(r.Body)
 	r.Body.Close()
 	r.Body = io.NopCloser(bytes.NewReader(reqBody))
 
-	os.MkdirAll(bossCaptureDir, 0755)
-	ts := time.Now().Format("20060102-150405.000")
-	safePath := strings.ReplaceAll(strings.Trim(r.URL.Path, "/"), "/", "_")
-	base := fmt.Sprintf("%s/%s_%s", bossCaptureDir, ts, safePath)
-
-	reqLog := fmt.Sprintf("%s %s\nQuery: %s\nHeaders: %v\nBody (hex): %x\n",
-		r.Method, r.URL.Path, r.URL.RawQuery, r.Header, reqBody)
-	os.WriteFile(base+".request.txt", []byte(reqLog), 0644)
+	log.Printf("BOSS request: %s %s %s Query=%s bodyBytes=%d", clientTag(r), r.Method, r.URL.Path, r.URL.RawQuery, len(reqBody))
 }
 
-// handleBossCapture is a TEMPORARY diagnostic proxy for reverse-engineering the Wara
-// Wara Plaza BOSS content format (see feedback_wsc_ping_timeout-style memory once this
-// lands — not yet saved). Inkay-NicoChristmann v3.0.0-9 redirects the client's nppl/npts
-// BOSS lookups to boss.nicochristmann.net instead of the real nppl.app.pretendo.cc /
-// npts.app.pretendo.cc. This handler transparently forwards to the REAL Pretendo BOSS
-// servers (so nothing about the console's plaza experience changes) while logging the
-// full raw request and response to bossCaptureDir. The response's <TaskSheet><File> Url
-// still points at the real npdi.cdn.pretendo.cc (untouched, unpatched), so the actual
-// encrypted file download isn't captured here — only the policylist + tasksheet legs.
-// Remove this (and the matching Inkay patch + nginx stream map entry) once the plaza
-// content format has been reverse-engineered from the captured samples.
+// handleBossCapture dispatches to our own synthetic BOSS handlers (WSC
+// SpotPass, Wii U/3DS sysmsg) first, then transparently proxies everything
+// else to the REAL Pretendo BOSS servers (nppl.app.pretendo.cc/
+// npts.app.pretendo.cc, which Inkay-NicoChristmann v3.0.0-9 redirects
+// nppl/npts lookups to boss.nicochristmann.net instead of) - so nothing
+// about the console's plaza experience changes - applying the real
+// PolicyList <UpdateTime> fixup below along the way. The response's
+// <TaskSheet><File> Url still points at the real npdi.cdn.pretendo.cc
+// (untouched, unpatched), so the actual encrypted file download isn't
+// proxied here, only the policylist + tasksheet legs. Despite the name
+// (kept to avoid touching every comment that references it), this no
+// longer captures anything to disk - see clientTag's doc comment.
 // wscSpotPassTasks: WSC's own SpotPass tasks (sp1_ans, sp1_rnk) that Pretendo's
 // real BOSS server has never implemented (404 on the task itself, not just a
 // missing file) — this is different from olvinfo-style "task exists but is
@@ -4528,6 +4508,12 @@ var wiiuSysMsgTasks = map[string]bool{
 
 var wiiuSysMsgDataCache sync.Map
 
+// wiiuSysMsgEncodedCache memoizes the per-poll-invariant encode result
+// (hash/size/DataId) for a given (message id, resolved inner-TitleId) pair -
+// see encodeWiiUSysMsgFile's doc comment for why this must never be
+// recomputed on every poll.
+var wiiuSysMsgEncodedCache sync.Map
+
 type wiiuSysMsgRow struct {
 	id           int
 	subject      string
@@ -4535,10 +4521,11 @@ type wiiuSysMsgRow struct {
 	titleID      string
 	highPriority bool
 	region       string
+	createdAt    time.Time
 }
 
 func activeWiiUSysMsgs() []wiiuSysMsgRow {
-	rows, err := db.Query(`SELECT id, subject, body, title_id, high_priority, region FROM wiiu_system_messages WHERE active = true ORDER BY id ASC`)
+	rows, err := db.Query(`SELECT id, subject, body, title_id, high_priority, region, created_at FROM wiiu_system_messages WHERE active = true ORDER BY id ASC`)
 	if err != nil {
 		log.Printf("wiiu sysmsg: query failed: %v", err)
 		return nil
@@ -4547,11 +4534,74 @@ func activeWiiUSysMsgs() []wiiuSysMsgRow {
 	var out []wiiuSysMsgRow
 	for rows.Next() {
 		var m wiiuSysMsgRow
-		if err := rows.Scan(&m.id, &m.subject, &m.body, &m.titleID, &m.highPriority, &m.region); err == nil {
+		if err := rows.Scan(&m.id, &m.subject, &m.body, &m.titleID, &m.highPriority, &m.region, &m.createdAt); err == nil {
 			out = append(out, m)
 		}
 	}
 	return out
+}
+
+// wiiuSysMsgEncoded is the cached, poll-invariant result of encoding one
+// message's <File> entry.
+type wiiuSysMsgEncoded struct {
+	hash   string
+	size   int
+	dataID int64
+}
+
+// encodeWiiUSysMsgFile builds (and caches) the gzip+BOSS-encrypted bytes for
+// one message as actually embedded in a <File> entry, plus its DataId.
+// resolvedTitleID is the message's final inner <Message><TitleId> (after
+// handleWiiUSysMsgTasksheet/handle3DSSysMsgTasksheet's home-menu-placeholder
+// override), since that can vary the encoded bytes by requesting console
+// region even for the same DB row.
+//
+// MUST be cached per (m.id, resolvedTitleID), not recomputed on every single
+// TaskSheet poll: this task is polled every few seconds by a connected
+// console, and both encryptBossFile's random IV (-> a brand-new MD5 hash/Url
+// every call) and the previous time.Now()-based DataId changed on literally
+// every poll even though the message's actual content never changed. Real
+// Nintendo's own server returns a stable DataId/hash for unchanged content
+// (confirmed by real consoles round-tripping an If-None-Match/ETag that
+// matches a prior response). Presenting what looks like a brand-new,
+// never-before-seen message several times a minute for the same still-active
+// announcement is a far more likely cause of the Notifications app hanging
+// than any inner-XML field, since the console has no reason to expect the
+// same announcement to keep re-arriving as "new" - confirmed still freezing
+// live 2026-11-27 even after the WoodLink src_title_id fix. DataId itself is
+// derived from the message's own created_at (not time.Now()), so it's stable
+// across restarts too, while still satisfying the large/ever-increasing
+// constraint from handleWiiUSysMsgTasksheet's original DataId comment.
+func encodeWiiUSysMsgFile(platform string, m wiiuSysMsgRow, resolvedTitleID string) (wiiuSysMsgEncoded, error) {
+	// platform disambiguates wiiu_system_messages from n3ds_system_messages -
+	// both tables have their own independent `id` sequence, so e.g. Wii U
+	// message id=1 and 3DS message id=1 must not share a cache entry.
+	key := fmt.Sprintf("%s:%d:%s", platform, m.id, resolvedTitleID)
+	if v, ok := wiiuSysMsgEncodedCache.Load(key); ok {
+		return v.(wiiuSysMsgEncoded), nil
+	}
+
+	msg := m
+	msg.titleID = resolvedTitleID
+	innerXML := buildWiiUMessageXML(msg)
+	compressed, err := gzipBytes(innerXML)
+	if err != nil {
+		return wiiuSysMsgEncoded{}, fmt.Errorf("gzip: %w", err)
+	}
+	encrypted, err := encryptBossFile(compressed)
+	if err != nil {
+		return wiiuSysMsgEncoded{}, fmt.Errorf("encrypt: %w", err)
+	}
+	hash := fmt.Sprintf("%x", md5.Sum(encrypted))
+	bossDataStore(&wiiuSysMsgDataCache, hash, encrypted)
+
+	enc := wiiuSysMsgEncoded{
+		hash:   hash,
+		size:   len(encrypted),
+		dataID: m.createdAt.Unix()*1000 + int64(m.id),
+	}
+	wiiuSysMsgEncodedCache.Store(key, enc)
+	return enc, nil
 }
 
 // wiiuHomeMenuTitleIDs are the known Home Menu self-referential TitleId
@@ -4608,6 +4658,21 @@ func regionMatches(messageRegion, consoleRegion string) bool {
 // record per-message regardless of LinkType, rather than only when a link
 // is actually followed). Confirmed live 2026-08-25 that the app hangs on
 // load for a message sent with these fields empty.
+// wiiuWoodLinkSrcTitleID is the WoodLink "launcher_type=info" parameter's
+// src_title_id - confirmed by decrypting all 5 real messages from
+// PretendoNetwork/BOSS's seed data (not just the one eShop-closure example
+// reference_wiiu_sysmsg_format memory was originally built from) with our
+// own boss_keys.bin (all 5 HMACs valid): this value is IDENTICAL across
+// every message regardless of that message's own <TitleId> (one real
+// example has <TitleId>000500101004d100</TitleId> right next to
+// src_title_id=000500101004d000 - a different value, not a region variant
+// of the message's own title) and regardless of console region. Previously
+// this code substituted m.titleID (the message's own, possibly
+// region-corrected title) here instead, which diverges from every genuine
+// sample and is a plausible cause of the Notifications app hanging on a
+// console whose region makes m.titleID differ from this fixed sentinel.
+const wiiuWoodLinkSrcTitleID = "000500101004d000"
+
 func buildWiiUMessageXML(m wiiuSysMsgRow) []byte {
 	highPriority := "false"
 	if m.highPriority {
@@ -4635,7 +4700,7 @@ func buildWiiUMessageXML(m wiiuSysMsgRow) []byte {
   <OptoutType>NEVER</OptoutType>
   <ForceNotify>false</ForceNotify>
 </Message>
-`, m.id, time.Now().UTC().Format("2006-01-02T15:04:05-0700"), highPriority, m.titleID, xmlEscape(m.subject), xmlEscape(m.body), m.titleID, m.titleID)
+`, m.id, time.Now().UTC().Format("2006-01-02T15:04:05-0700"), highPriority, m.titleID, xmlEscape(m.subject), xmlEscape(m.body), wiiuWoodLinkSrcTitleID, m.titleID)
 	return []byte(xmlBody)
 }
 
@@ -4758,32 +4823,11 @@ func handleWiiUSysMsgTasksheet(w http.ResponseWriter, r *http.Request) bool {
 			m.titleID = titleID
 		}
 
-		innerXML := buildWiiUMessageXML(m)
-		compressed, err := gzipBytes(innerXML)
+		enc, err := encodeWiiUSysMsgFile("wiiu", m, m.titleID)
 		if err != nil {
-			log.Printf("wiiu sysmsg: gzip failed for message %d: %v", m.id, err)
+			log.Printf("wiiu sysmsg: encode failed for message %d: %v", m.id, err)
 			continue
 		}
-		encrypted, err := encryptBossFile(compressed)
-		if err != nil {
-			log.Printf("wiiu sysmsg: encrypt failed for message %d: %v", m.id, err)
-			continue
-		}
-		hash := fmt.Sprintf("%x", md5.Sum(encrypted))
-		bossDataStore(&wiiuSysMsgDataCache, hash, encrypted)
-
-		// * DataId must be a large, ever-increasing value, not just the DB
-		// * row's own small serial id - confirmed live 2026-08-24: a real
-		// * console fetched a real-format TaskSheet with DataId=1 twice
-		// * (30+ seconds apart) but never followed up with the actual data
-		// * fetch. Real Nintendo DataIds were a global incrementing counter
-		// * already in the tens of thousands (e.g. 56957 in the genuine
-		// * 2023 example this format is modeled on) - a client that tracks
-		// * "highest DataId already processed for this task" would treat a
-		// * low DataId like 1 as already-seen/stale and silently skip it.
-		// * Unix-seconds is always far above any historical real value and
-		// * always increasing, so this can never look stale.
-		dataID := time.Now().Unix()*1000 + int64(m.id)
 
 		fileEntries.WriteString(fmt.Sprintf(`    <File>
       <Filename>%s</Filename>
@@ -4796,7 +4840,7 @@ func handleWiiUSysMsgTasksheet(w http.ResponseWriter, r *http.Request) bool {
         <LED>false</LED>
       </Notify>
     </File>
-`, filename, dataID, hash, len(encrypted)))
+`, filename, enc.dataID, enc.hash, enc.size))
 	}
 
 	xmlBody := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
@@ -4868,7 +4912,7 @@ var n3dsHomeMenuTitleIDs = map[string]bool{
 }
 
 func active3DSSysMsgs() []wiiuSysMsgRow {
-	rows, err := db.Query(`SELECT id, subject, body, title_id, high_priority, region FROM n3ds_system_messages WHERE active = true ORDER BY id ASC`)
+	rows, err := db.Query(`SELECT id, subject, body, title_id, high_priority, region, created_at FROM n3ds_system_messages WHERE active = true ORDER BY id ASC`)
 	if err != nil {
 		log.Printf("3ds sysmsg: query failed: %v", err)
 		return nil
@@ -4877,7 +4921,7 @@ func active3DSSysMsgs() []wiiuSysMsgRow {
 	var out []wiiuSysMsgRow
 	for rows.Next() {
 		var m wiiuSysMsgRow
-		if err := rows.Scan(&m.id, &m.subject, &m.body, &m.titleID, &m.highPriority, &m.region); err == nil {
+		if err := rows.Scan(&m.id, &m.subject, &m.body, &m.titleID, &m.highPriority, &m.region, &m.createdAt); err == nil {
 			out = append(out, m)
 		}
 	}
@@ -4951,21 +4995,11 @@ func handle3DSSysMsgTasksheet(w http.ResponseWriter, r *http.Request) bool {
 			m.titleID = titleID
 		}
 
-		innerXML := buildWiiUMessageXML(m)
-		compressed, err := gzipBytes(innerXML)
+		enc, err := encodeWiiUSysMsgFile("3ds", m, m.titleID)
 		if err != nil {
-			log.Printf("3ds sysmsg: gzip failed for message %d: %v", m.id, err)
+			log.Printf("3ds sysmsg: encode failed for message %d: %v", m.id, err)
 			continue
 		}
-		encrypted, err := encryptBossFile(compressed)
-		if err != nil {
-			log.Printf("3ds sysmsg: encrypt failed for message %d: %v", m.id, err)
-			continue
-		}
-		hash := fmt.Sprintf("%x", md5.Sum(encrypted))
-		bossDataStore(&wiiuSysMsgDataCache, hash, encrypted)
-
-		dataID := time.Now().Unix()*1000 + int64(m.id)
 
 		fileEntries.WriteString(fmt.Sprintf(`    <File>
       <Filename>%s</Filename>
@@ -4978,7 +5012,7 @@ func handle3DSSysMsgTasksheet(w http.ResponseWriter, r *http.Request) bool {
         <LED>false</LED>
       </Notify>
     </File>
-`, filename, dataID, hash, len(encrypted)))
+`, filename, enc.dataID, enc.hash, enc.size))
 	}
 
 	xmlBody := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
@@ -4999,27 +5033,15 @@ func handle3DSSysMsgTasksheet(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
-// handleHPPCapture logs the full raw request (method, path, headers - including
-// Host, which is what tells us whether the real per-game hostname survives the
-// DNS-only redirect as expected - and body) to hppCaptureDir. TEMPORARY, see
-// hppCaptureDir's doc comment. Always responds 200 with an empty body; we don't
-// yet know the real HPP wire format so there's nothing meaningful to serve.
+// handleHPPCapture logs one line per request (method, path, Host - which is
+// what tells us whether the real per-game hostname survives the DNS-only
+// redirect as expected) - see clientTag's doc comment for why this no
+// longer writes a per-request file. Always responds 200 with an empty body;
+// we don't yet know the real HPP wire format so there's nothing meaningful
+// to serve.
 func handleHPPCapture(w http.ResponseWriter, r *http.Request) {
 	reqBody, _ := io.ReadAll(r.Body)
-
-	os.MkdirAll(hppCaptureDir, 0755)
-	ts := time.Now().Format("20060102-150405.000")
-	safePath := strings.ReplaceAll(strings.Trim(r.URL.Path, "/"), "/", "_")
-	if safePath == "" {
-		safePath = "root"
-	}
-	base := fmt.Sprintf("%s/%s_%s", hppCaptureDir, ts, safePath)
-
-	reqLog := fmt.Sprintf("From: %s\n%s %s\nHost: %s\nQuery: %s\nHeaders: %v\nBody (hex): %x\nBody (raw): %q\n",
-		realIP(r), r.Method, r.URL.Path, r.Host, r.URL.RawQuery, r.Header, reqBody, reqBody)
-	os.WriteFile(base+".request.txt", []byte(reqLog), 0644)
-
-	log.Printf("HPP capture: %s %s Host=%s from %s -> logged %d byte body", r.Method, r.URL.Path, r.Host, realIP(r), len(reqBody))
+	log.Printf("HPP capture: %s %s %s Host=%s bodyBytes=%d", clientTag(r), r.Method, r.URL.Path, r.Host, len(reqBody))
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -5203,19 +5225,8 @@ const swapdoodleHPPBackend = "http://127.0.0.1:9010"
 // instead of letting it fall into the generic *.nicoch.net -> *.pretendo.cc
 // reversal proxy (which just times out, since Pretendo doesn't host this).
 func handleSwapdoodleHPP(w http.ResponseWriter, r *http.Request) {
-	// TEMPORARY - dumping the raw HPP request/response bodies (multipart
-	// forms carrying an embedded NEX packet - see the PretendoNetwork
-	// swapdoodle PR #1 thread for the extraction technique) so real note
-	// upload/DataStore calls from the actual 3DS can be inspected offline,
-	// same capture pattern as handleBossCapture/handleNpdlCDN.
 	reqBody, _ := io.ReadAll(r.Body)
 	r.Body = io.NopCloser(bytes.NewReader(reqBody))
-	os.MkdirAll(bossCaptureDir, 0755)
-	ts := time.Now().Format("20060102-150405.000")
-	base := fmt.Sprintf("%s/hpp_%s", bossCaptureDir, ts)
-	reqLog := fmt.Sprintf("%s %s from %s\nHeaders: %v\n", r.Method, r.URL.Path, realIP(r), r.Header)
-	os.WriteFile(base+".request.txt", []byte(reqLog), 0644)
-	os.WriteFile(base+".request.bin", reqBody, 0644)
 
 	fullTarget := swapdoodleHPPBackend + r.URL.Path
 	if r.URL.RawQuery != "" {
@@ -5236,9 +5247,6 @@ func handleSwapdoodleHPP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
-	respLog := fmt.Sprintf("Status: %d\nHeaders: %v\n", resp.StatusCode, resp.Header)
-	os.WriteFile(base+".response.txt", []byte(respLog), 0644)
-	os.WriteFile(base+".response.bin", respBody, 0644)
 
 	for k, vv := range resp.Header {
 		for _, v := range vv {
@@ -5247,7 +5255,7 @@ func handleSwapdoodleHPP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(resp.StatusCode)
 	w.Write(respBody)
-	log.Printf("swapdoodle HPP: %s %s from %s -> %d (captured to %s)", r.Method, r.URL.Path, realIP(r), resp.StatusCode, base)
+	log.Printf("swapdoodle HPP: %s %s %s -> %d bytes=%d", clientTag(r), r.Method, r.URL.Path, resp.StatusCode, len(respBody))
 }
 
 // parseSimpleMultipart extracts form fields and the "file" field's raw bytes
@@ -5379,13 +5387,6 @@ func handleSwapdoodleS3Relay(w http.ResponseWriter, r *http.Request) {
 
 	reqBody, _ := io.ReadAll(r.Body)
 
-	os.MkdirAll(bossCaptureDir, 0755)
-	ts := time.Now().Format("20060102-150405.000")
-	base := fmt.Sprintf("%s/s3relay_%s", bossCaptureDir, ts)
-	reqLog := fmt.Sprintf("%s %s -> %s\nHeaders: %v\nBody length: %d\n", r.Method, r.URL.Path, fullTarget, r.Header, len(reqBody))
-	os.WriteFile(base+".request.txt", []byte(reqLog), 0644)
-	os.WriteFile(base+".request.bin", reqBody, 0644)
-
 	proxyReq, err := http.NewRequest(r.Method, fullTarget, bytes.NewReader(reqBody))
 	if err != nil {
 		http.Error(w, "proxy error", http.StatusInternalServerError)
@@ -5404,9 +5405,6 @@ func handleSwapdoodleS3Relay(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
-	respLog := fmt.Sprintf("Status: %d\nHeaders: %v\n", resp.StatusCode, resp.Header)
-	os.WriteFile(base+".response.txt", []byte(respLog), 0644)
-	os.WriteFile(base+".response.bin", respBody, 0644)
 
 	for k, vv := range resp.Header {
 		for _, v := range vv {
@@ -5415,7 +5413,7 @@ func handleSwapdoodleS3Relay(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(resp.StatusCode)
 	w.Write(respBody)
-	log.Printf("swapdoodle S3 relay: %s %s -> %s status=%d bytes=%d (captured to %s)", r.Method, r.URL.Path, fullTarget, resp.StatusCode, len(respBody), base)
+	log.Printf("swapdoodle S3 relay: %s %s %s -> %s status=%d bytes=%d", clientTag(r), r.Method, r.URL.Path, fullTarget, resp.StatusCode, len(respBody))
 }
 
 // handleSwapdoodleS3RelayUpload parses the presigned-POST multipart form the
@@ -5428,21 +5426,11 @@ func handleSwapdoodleS3Relay(w http.ResponseWriter, r *http.Request) {
 // CompletePostObjectV1 that the official servers don't validate against S3
 // either.
 func handleSwapdoodleS3RelayUpload(w http.ResponseWriter, r *http.Request) {
-	ts := time.Now().Format("20060102-150405.000")
-	base := fmt.Sprintf("%s/s3relayupload_%s", bossCaptureDir, ts)
-	os.MkdirAll(bossCaptureDir, 0755)
-
 	reqBody, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "read error", http.StatusInternalServerError)
 		return
 	}
-	// * Raw pre-parse capture, so a suspected parseSimpleMultipart bug can be
-	// * diffed against the exact wire bytes - previously only the post-parse
-	// * fileBytes were saved (as .file.bin), which is no help for telling
-	// * whether THIS function altered the content vs. it already looking that
-	// * way on the wire.
-	os.WriteFile(base+".request.bin", reqBody, 0644)
 
 	// * Manual byte-level field extraction instead of Go's mime/multipart
 	// * reader - confirmed live 2026-08-24 that Go's stricter RFC 2046
@@ -5466,8 +5454,6 @@ func handleSwapdoodleS3RelayUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing bucket/key/file field", http.StatusBadRequest)
 		return
 	}
-	os.WriteFile(base+".file.bin", fileBytes, 0644)
-	os.WriteFile(base+".meta.txt", []byte(fmt.Sprintf("bucket=%s key=%s size=%d\n", bucket, key, len(fileBytes))), 0644)
 
 	client, err := swapdoodleS3()
 	if err != nil {
@@ -5485,7 +5471,7 @@ func handleSwapdoodleS3RelayUpload(w http.ResponseWriter, r *http.Request) {
 
 	// * A real presigned-POST upload returns 204 No Content on success.
 	w.WriteHeader(http.StatusNoContent)
-	log.Printf("swapdoodle S3 relay upload: PUT %s/%s (%d bytes) -> 204 (captured to %s)", bucket, key, len(fileBytes), base)
+	log.Printf("swapdoodle S3 relay upload: %s PUT %s/%s (%d bytes) -> 204", clientTag(r), bucket, key, len(fileBytes))
 }
 
 // pidFromBossUserAgent extracts the requesting console's own PID from a BOSS
@@ -6006,21 +5992,13 @@ func handleNpdlCDN(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TEMPORARY - capturing real Swapdoodle SpotPass note-check traffic
-	// (RNG_EC1/RNG_MD1/RNG_NT1/RNG_NT2-style paths) that currently 404s
-	// against the real npdl.cdn.pretendo.cc, so we can see the exact
-	// request shape (query params, headers) needed to build a synthetic
-	// response backed by our own swapdoodle-server. See handleBossCapture's
-	// doc comment for the same pattern used for WSC.
+	// Any other path falls through to a real passthrough proxy to
+	// npdl.cdn.pretendo.cc (Swapdoodle SpotPass note-check traffic Pretendo
+	// doesn't implement, among other things) - see clientTag's doc comment
+	// for why this only logs a one-line summary rather than capturing full
+	// request/response bodies to disk.
 	reqBody, _ := io.ReadAll(r.Body)
 	r.Body = io.NopCloser(bytes.NewReader(reqBody))
-	os.MkdirAll(bossCaptureDir, 0755)
-	ts := time.Now().Format("20060102-150405.000")
-	safePath := strings.ReplaceAll(strings.Trim(r.URL.Path, "/"), "/", "_")
-	base := fmt.Sprintf("%s/npdl_%s_%s", bossCaptureDir, ts, safePath)
-	reqLog := fmt.Sprintf("%s %s\nQuery: %s\nHeaders: %v\nBody (hex): %x\n",
-		r.Method, r.URL.Path, r.URL.RawQuery, r.Header, reqBody)
-	os.WriteFile(base+".request.txt", []byte(reqLog), 0644)
 
 	fullTarget := "https://npdl.cdn.pretendo.cc" + r.URL.Path
 	if r.URL.RawQuery != "" {
@@ -6042,9 +6020,6 @@ func handleNpdlCDN(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
-	respLog := fmt.Sprintf("Status: %d\nHeaders: %v\nBody length: %d\n", resp.StatusCode, resp.Header, len(respBody))
-	os.WriteFile(base+".response.txt", []byte(respLog), 0644)
-	os.WriteFile(base+".response.bin", respBody, 0644)
 
 	for k, vv := range resp.Header {
 		for _, v := range vv {
@@ -6053,7 +6028,7 @@ func handleNpdlCDN(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(resp.StatusCode)
 	w.Write(respBody)
-	log.Printf("npdl CDN: %s %s -> proxied, status=%d (captured to %s)", r.Method, r.URL.Path, resp.StatusCode, base)
+	log.Printf("npdl CDN: %s %s %s -> proxied, status=%d bytes=%d", clientTag(r), r.Method, r.URL.Path, resp.StatusCode, len(respBody))
 }
 
 func handleBossCapture(w http.ResponseWriter, r *http.Request) {
@@ -6101,15 +6076,6 @@ func handleBossCapture(w http.ResponseWriter, r *http.Request) {
 
 	reqBody, _ := io.ReadAll(r.Body)
 
-	os.MkdirAll(bossCaptureDir, 0755)
-	ts := time.Now().Format("20060102-150405.000")
-	safePath := strings.ReplaceAll(strings.Trim(r.URL.Path, "/"), "/", "_")
-	base := fmt.Sprintf("%s/%s_%s", bossCaptureDir, ts, safePath)
-
-	reqLog := fmt.Sprintf("%s %s\nQuery: %s\nHeaders: %v\nBody (hex): %x\n",
-		r.Method, r.URL.Path, r.URL.RawQuery, r.Header, reqBody)
-	os.WriteFile(base+".request.txt", []byte(reqLog), 0644)
-
 	fullTarget := target + r.URL.Path
 	if r.URL.RawQuery != "" {
 		fullTarget += "?" + r.URL.RawQuery
@@ -6130,10 +6096,6 @@ func handleBossCapture(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
-
-	respLog := fmt.Sprintf("Status: %d\nHeaders: %v\nBody length: %d\n", resp.StatusCode, resp.Header, len(respBody))
-	os.WriteFile(base+".response.txt", []byte(respLog), 0644)
-	os.WriteFile(base+".response.bin", respBody, 0644)
 
 	respHeader := resp.Header
 	// Pretendo's real policylist server has a consistent bug: <UpdateTime>'s
@@ -6159,8 +6121,7 @@ func handleBossCapture(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	log.Printf("BOSS capture: %s %s -> %s status=%d bytes=%d (saved %s)",
-		r.Method, r.URL.Path, target, resp.StatusCode, len(respBody), base)
+	log.Printf("BOSS capture: %s %s %s -> %s status=%d bytes=%d", clientTag(r), r.Method, r.URL.Path, target, resp.StatusCode, len(respBody))
 
 	for k, vs := range respHeader {
 		for _, v := range vs {
@@ -6623,7 +6584,6 @@ func handleOLV(w http.ResponseWriter, r *http.Request) {
 	if is3DS {
 		w.Write(respBodyCopy)
 		logOLV3DSExchange(r, reqBodyCopy, resp.StatusCode, resp.Header, respBodyCopy)
-		log.Printf("OLV proxy: %s %s -> 127.0.0.1:%s status=%d bytes=%d (3DS, captured)", r.Method, r.URL.Path, port, resp.StatusCode, len(respBodyCopy))
 		return
 	}
 	n, _ := io.Copy(w, resp.Body)
@@ -6672,7 +6632,7 @@ func startOLVProxy() {
 	if err != nil {
 		log.Fatalf("3ds ctr.olv cert: %v", err)
 	}
-	// HPP relay - see hppCaptureDir's doc comment. Cert trust doesn't matter here:
+	// HPP relay - see handleHPPCapture's doc comment. Cert trust doesn't matter here:
 	// the Nimbus ssl:C patch disables root CA verification system-wide.
 	hppRelayCert, err := tls.LoadX509KeyPair(baseCerts+"/hpp-relay-nicochristmann-net.crt", baseCerts+"/hpp-relay-nicochristmann-net.key")
 	if err != nil {
@@ -6682,6 +6642,12 @@ func startOLVProxy() {
 	npdlCert, err := tls.LoadX509KeyPair(baseCerts+"/npdl-cdn-pretendo-cc.crt", baseCerts+"/npdl-cdn-pretendo-cc.key")
 	if err != nil {
 		log.Fatalf("npdl cdn cert: %v", err)
+	}
+	// whx.cdn.nintendo.net - Wii Street U's own CDN, a real Nintendo domain now
+	// NXDOMAIN - see handleWiiStreetU's doc comment.
+	whxCert, err := tls.LoadX509KeyPair(baseCerts+"/whx-cdn-nintendo-net.crt", baseCerts+"/whx-cdn-nintendo-net.key")
+	if err != nil {
+		log.Fatalf("whx cdn cert: %v", err)
 	}
 	// Larimar's Wii U portal (larimar.go), signed by the NN CA like olvCert.
 	larimarCert, err := tls.LoadX509KeyPair(baseCerts+"/larimar-nicochristmann-net.crt", baseCerts+"/larimar-nicochristmann-net.key")
@@ -6727,6 +6693,8 @@ func startOLVProxy() {
 			return &hppRelayCert, nil
 		case "npdl.cdn.pretendo.cc":
 			return &npdlCert, nil
+		case "whx.cdn.nintendo.net":
+			return &whxCert, nil
 		case "olv.nicochristmann.net", "portal.olv.nicochristmann.net":
 			// Explicit despite being what the default branch would otherwise
 			// serve anyway - these two were relying on falling through to
@@ -6944,12 +6912,14 @@ func startOLVProxy() {
 			return
 		}
 		switch r.Host {
-		case "boss.nicochristmann.net": // TEMPORARY — see handleBossCapture doc comment.
+		case "boss.nicochristmann.net": // see handleBossCapture doc comment.
 			handleBossCapture(w, r)
-		case "hpp-relay.nicochristmann.net": // TEMPORARY — see hppCaptureDir doc comment.
+		case "hpp-relay.nicochristmann.net": // TEMPORARY — see handleHPPCapture doc comment.
 			handleHPPCapture(w, r)
 		case "npdl.cdn.pretendo.cc", "npdl.cdn.nicochristmann.net", "npdl.cdn.nicoch.net":
 			handleNpdlCDN(w, r)
+		case "whx.cdn.nintendo.net":
+			handleWiiStreetU(w, r)
 		case "conntest.nicochristmann.net", "conntest.nicoch.net":
 			handleConnTest(w, r)
 		case "nasc.nicochristmann.net":
@@ -7056,22 +7026,10 @@ func soapFieldValue(fields []soapField, name string) string {
 	return ""
 }
 
-// TEMPORARY - captureShopRequest writes the exact raw request (headers +
-// body bytes) to disk, same pattern as handleBossCapture/handleHPPCapture
-// elsewhere in this file. Added 2026-09-16 after a real NUS request parsed
-// as root element "Envelope" with empty fields even though log.Printf's
-// %s of the same body variable showed plain bare GetSystemTitleHash XML -
-// a byte-for-byte local reproduction of that exact printed text parsed
-// correctly, so something about the real wire bytes differs from what got
-// printed (possibly connection reuse/pipelining between the ECS and NUS
-// calls). This bypasses any ambiguity in how log.Printf rendered it.
+// captureShopRequest logs one line per eShop request (see clientTag's doc
+// comment for why this no longer writes a per-request file to disk).
 func captureShopRequest(label string, r *http.Request, body []byte) {
-	os.MkdirAll(bossCaptureDir, 0755)
-	ts := time.Now().Format("20060102-150405.000")
-	base := fmt.Sprintf("%s/shop_%s_%s", bossCaptureDir, label, ts)
-	reqLog := fmt.Sprintf("%s %s\nHost: %s\nHeaders: %v\n", r.Method, r.URL.RequestURI(), r.Host, r.Header)
-	os.WriteFile(base+".request.txt", []byte(reqLog), 0644)
-	os.WriteFile(base+".request.bin", body, 0644)
+	log.Printf("shop %s: %s %s %s Host=%s bodyBytes=%d", label, clientTag(r), r.Method, r.URL.RequestURI(), r.Host, len(body))
 }
 
 // ninjaTextPlainFile lists client IPs (one per line, # comments) whose ninja shop replies are sent as
